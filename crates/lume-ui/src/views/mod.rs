@@ -162,6 +162,7 @@ pub enum Message {
     Audio(AudioEvent),
     Tray(TrayAction),
     Smtc(SmtcAction),
+    SmtcHwndReady(Option<usize>),
     DismissToast,
 }
 
