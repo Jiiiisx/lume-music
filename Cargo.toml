@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lume-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Lume Music"]
+
+[workspace.dependencies]
+async-trait = "0.1"
+bytemuck = { version = "1", features = ["derive"] }
+dirs = "7.0"
+iced = { version = "0.14", features = ["wgpu", "tokio", "image", "advanced"] }
+image = "0.25"
+lofty = "0.25"
+rand = "0.10"
+raw-window-handle = "0.6"
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "query", "charset", "http2", "system-proxy"] }
+rfd = "0.18"
+rodio = { version = "0.23", features = ["symphonia-all"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+souvlaki = "0.9"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+toml = "1.2"
+tray-icon = "0.26"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+window-vibrancy = "0.8"
+
+lume-core = { path = "crates/lume-core" }
+lume-storage = { path = "crates/lume-storage" }
+lume-providers = { path = "crates/lume-providers" }
+lume-audio = { path = "crates/lume-audio" }
