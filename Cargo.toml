@@ -5,6 +5,7 @@ members = [
     "crates/lume-storage",
     "crates/lume-providers",
     "crates/lume-audio",
+    "crates/lume-ui",
 ]
 
 [workspace.package]
