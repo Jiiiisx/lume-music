@@ -4,8 +4,9 @@ use lume_core::Track;
 
 use crate::views::Message;
 use crate::widgets::{
-    ghost_button_style, glass_button_style, glass_elevated_style, thin_scrollable_style,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    ghost_button_style, glass_button_style, glass_elevated_style, icon_chevron_down,
+    icon_chevron_up, icon_close, thin_scrollable_style, ICON_LIGHT, ICON_MUTED, TEXT_MUTED,
+    TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn view_queue_drawer<'a>(
@@ -13,14 +14,14 @@ pub fn view_queue_drawer<'a>(
     current_pos: Option<usize>,
 ) -> Element<'a, Message> {
     let header = row![
-        text("Play Queue").size(16).color(TEXT_PRIMARY),
+        text("Play Queue").size(17).color(TEXT_PRIMARY),
         space().width(Length::Fill),
         button(text("Clear").size(11))
-            .padding([4, 10])
+            .padding([5, 12])
             .style(glass_button_style(false))
             .on_press(Message::ClearQueue),
-        button(text("×").size(14))
-            .padding([3, 9])
+        button(icon_close(14.0, ICON_LIGHT))
+            .padding([6, 8])
             .style(ghost_button_style)
             .on_press(Message::ToggleQueueDrawer),
     ]
@@ -40,7 +41,7 @@ pub fn view_queue_drawer<'a>(
                 button(
                     column![
                         text(track.title.as_str()).size(13).color(if is_current {
-                            Color::from_rgb8(255, 224, 178)
+                            Color::from_rgb8(255, 224, 184)
                         } else {
                             TEXT_PRIMARY
                         }),
@@ -58,8 +59,8 @@ pub fn view_queue_drawer<'a>(
 
             if idx > 0 {
                 row_controls = row_controls.push(
-                    button(text("↑").size(11))
-                        .padding([4, 6])
+                    button(icon_chevron_up(13.0, ICON_MUTED))
+                        .padding([5, 6])
                         .style(ghost_button_style)
                         .on_press(Message::QueueMove {
                             from: idx,
@@ -69,8 +70,8 @@ pub fn view_queue_drawer<'a>(
             }
             if idx + 1 < len {
                 row_controls = row_controls.push(
-                    button(text("↓").size(11))
-                        .padding([4, 6])
+                    button(icon_chevron_down(13.0, ICON_MUTED))
+                        .padding([5, 6])
                         .style(ghost_button_style)
                         .on_press(Message::QueueMove {
                             from: idx,
@@ -79,22 +80,26 @@ pub fn view_queue_drawer<'a>(
                 );
             }
             row_controls = row_controls.push(
-                button(text("×").size(12))
-                    .padding([4, 7])
+                button(icon_close(12.0, ICON_MUTED))
+                    .padding([5, 7])
                     .style(ghost_button_style)
                     .on_press(Message::QueueRemoveAt(idx)),
             );
 
             list_col = list_col.push(
                 container(row_controls)
-                    .padding([4, 6])
+                    .padding([6, 8])
                     .style(move |_| container::Style {
                         background: Some(Background::Color(if is_current {
-                            Color::from_rgba(1.0, 1.0, 1.0, 0.14)
+                            Color::from_rgba(1.0, 1.0, 1.0, 0.16)
                         } else {
-                            Color::from_rgba(1.0, 1.0, 1.0, 0.04)
+                            Color::from_rgba(1.0, 1.0, 1.0, 0.06)
                         })),
-                        border: iced::border::rounded(8.0),
+                        border: iced::border::Border {
+                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+                            width: 1.0,
+                            radius: 14.0.into(),
+                        },
                         ..Default::default()
                     }),
             );
@@ -108,9 +113,9 @@ pub fn view_queue_drawer<'a>(
                 .height(Length::Fill)
                 .style(thin_scrollable_style),
         ]
-        .spacing(12)
-        .padding(16)
-        .width(Length::Fixed(330.0))
+        .spacing(14)
+        .padding(18)
+        .width(Length::Fixed(340.0))
         .height(Length::Fill),
     )
     .height(Length::Fill)

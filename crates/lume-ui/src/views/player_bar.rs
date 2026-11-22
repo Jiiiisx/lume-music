@@ -6,8 +6,10 @@ use lume_core::{PlaybackStatus, RepeatMode};
 
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    cover_art_widget, ghost_button_style, glass_button_style, glass_panel, seek_slider_style,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    cover_art_widget, floating_dock_style, ghost_button_style, glass_button_style, icon_heart,
+    icon_lyrics, icon_next, icon_pause, icon_play, icon_prev, icon_queue, icon_repeat,
+    icon_shuffle, icon_volume, play_circle_button_style, seek_slider_style, ICON_HEART_ACTIVE,
+    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_ON_PILL, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 fn format_mm_ss(ms: u64) -> String {
@@ -29,22 +31,19 @@ pub fn view_player_bar<'a>(
     let artist = track
         .map(|t| t.artist_display())
         .unwrap_or_else(|| "Select a track to play".to_string());
-    let badge = info
-        .source_used
-        .map(|s| s.badge_label())
-        .unwrap_or("Idle");
+    let badge = info.source_used.map(|s| s.badge_label()).unwrap_or("Idle");
 
     let left_track_info = mouse_area(
         row![
-            cover_art_widget(art, 50.0, 8.0),
+            cover_art_widget(art, 52.0, 12.0),
             column![
                 row![
                     text(title).size(14).color(TEXT_PRIMARY),
-                    container(text(badge).size(10).color(TEXT_MUTED))
-                        .padding([1, 6])
+                    container(text(badge).size(10).color(TEXT_SECONDARY))
+                        .padding([2, 8])
                         .style(|_| container::Style {
-                            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))),
-                            border: iced::border::rounded(6.0),
+                            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.12))),
+                            border: iced::border::rounded(10.0),
                             ..Default::default()
                         }),
                 ]
@@ -54,30 +53,40 @@ pub fn view_player_bar<'a>(
             ]
             .spacing(3),
         ]
-        .spacing(12)
+        .spacing(14)
         .align_y(Alignment::Center),
     )
     .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics));
 
     let like_btn: Element<'a, Message> = if let Some(t) = track {
-        button(text(if t.is_liked { "♥" } else { "♡" }).size(15))
-            .padding([6, 8])
-            .style(ghost_button_style)
-            .on_press(Message::ToggleLike(t.clone()))
-            .into()
+        button(if t.is_liked {
+            icon_heart(true, 16.0, ICON_HEART_ACTIVE)
+        } else {
+            icon_heart(false, 16.0, ICON_MUTED)
+        })
+        .padding([8, 8])
+        .style(ghost_button_style)
+        .on_press(Message::ToggleLike(t.clone()))
+        .into()
     } else {
         space().width(0).into()
     };
 
-    let play_glyph = match info.status {
-        PlaybackStatus::Playing | PlaybackStatus::Buffering => "⏸",
-        PlaybackStatus::Paused | PlaybackStatus::Stopped => "▶",
+    let is_playing = matches!(
+        info.status,
+        PlaybackStatus::Playing | PlaybackStatus::Buffering
+    );
+
+    let play_icon = if is_playing {
+        icon_pause(16.0, TEXT_ON_PILL)
+    } else {
+        icon_play(16.0, TEXT_ON_PILL)
     };
 
-    let repeat_label = match info.repeat {
-        RepeatMode::Off => "Repeat",
-        RepeatMode::All => "Repeat All",
-        RepeatMode::One => "Repeat 1",
+    let repeat_color = if info.repeat != RepeatMode::Off {
+        TEXT_ON_PILL
+    } else {
+        ICON_MUTED
     };
 
     let max_dur = info.duration_ms.max(1) as f32;
@@ -85,37 +94,59 @@ pub fn view_player_bar<'a>(
 
     let center_controls = column![
         row![
-            button(text("Shuffle").size(11))
-                .padding([5, 10])
-                .style(glass_button_style(info.shuffle))
-                .on_press(Message::ToggleShuffle),
-            button(text("⏮").size(14))
-                .padding([6, 10])
+            button(icon_shuffle(
+                14.0,
+                if info.shuffle { TEXT_ON_PILL } else { ICON_MUTED }
+            ))
+            .padding([7, 9])
+            .style(glass_button_style(info.shuffle))
+            .on_press(Message::ToggleShuffle),
+            button(icon_prev(15.0, ICON_LIGHT))
+                .padding([8, 10])
                 .style(ghost_button_style)
                 .on_press(Message::PreviousTrack),
-            button(text(play_glyph).size(15))
-                .padding([7, 14])
-                .style(glass_button_style(true))
-                .on_press(Message::TogglePlayPause),
-            button(text("⏭").size(14))
-                .padding([6, 10])
+            button(
+                container(play_icon)
+                    .width(Length::Fixed(40.0))
+                    .height(Length::Fixed(40.0))
+                    .center_x(Length::Fixed(40.0))
+                    .center_y(Length::Fixed(40.0)),
+            )
+            .padding(0)
+            .style(play_circle_button_style)
+            .on_press(Message::TogglePlayPause),
+            button(icon_next(15.0, ICON_LIGHT))
+                .padding([8, 10])
                 .style(ghost_button_style)
                 .on_press(Message::NextTrack),
-            button(text(repeat_label).size(11))
-                .padding([5, 10])
-                .style(glass_button_style(info.repeat != RepeatMode::Off))
-                .on_press(Message::CycleRepeat),
+            button(
+                row![
+                    icon_repeat(14.0, repeat_color),
+                    if info.repeat == RepeatMode::One {
+                        Element::from(text("1").size(10).color(repeat_color))
+                    } else {
+                        Element::from(space().width(0))
+                    },
+                ]
+                .spacing(2)
+                .align_y(Alignment::Center),
+            )
+            .padding([7, 9])
+            .style(glass_button_style(info.repeat != RepeatMode::Off))
+            .on_press(Message::CycleRepeat),
         ]
-        .spacing(8)
+        .spacing(10)
         .align_y(Alignment::Center),
         row![
             text(format_mm_ss(info.position_ms))
                 .size(11)
                 .color(TEXT_MUTED),
-            slider(0.0..=max_dur, cur_pos, |v| Message::SeekSliderChanged(v as u64))
-                .step(250.0_f32)
-                .style(seek_slider_style)
-                .width(Length::Fill),
+            slider(0.0..=max_dur, cur_pos, |v| {
+                Message::SeekSliderChanged(v as u64)
+            })
+            .step(250.0_f32)
+            .style(seek_slider_style)
+            .width(Length::Fill),
             text(format_mm_ss(info.duration_ms))
                 .size(11)
                 .color(TEXT_MUTED),
@@ -130,17 +161,24 @@ pub fn view_player_bar<'a>(
 
     let right_controls = row![
         like_btn,
-        button(text("Lyrics").size(12))
-            .padding([6, 10])
-            .style(glass_button_style(false))
-            .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
-        button(text("Queue").size(12))
-            .padding([6, 10])
-            .style(glass_button_style(queue_open))
-            .on_press(Message::ToggleQueueDrawer),
-        button(text(if info.muted { "Muted" } else { "Vol" }).size(11))
-            .padding([6, 8])
-            .style(glass_button_style(info.muted))
+        button(
+            row![icon_lyrics(14.0, ICON_LIGHT), text("Lyrics").size(12)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .padding([7, 12])
+        .style(glass_button_style(false))
+        .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
+        button(icon_queue(
+            15.0,
+            if queue_open { TEXT_ON_PILL } else { ICON_LIGHT }
+        ))
+        .padding([8, 10])
+        .style(glass_button_style(queue_open))
+        .on_press(Message::ToggleQueueDrawer),
+        button(icon_volume(info.muted, 15.0, ICON_LIGHT))
+            .padding([8, 8])
+            .style(ghost_button_style)
             .on_press(Message::ToggleMute),
         slider(
             0.0..=1.0,
@@ -149,13 +187,13 @@ pub fn view_player_bar<'a>(
         )
         .step(0.02_f32)
         .style(seek_slider_style)
-        .width(Length::Fixed(86.0)),
+        .width(Length::Fixed(88.0)),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
 
     container(
-        glass_panel(
+        container(
             row![
                 container(left_track_info).width(Length::FillPortion(1)),
                 center_controls,
@@ -163,14 +201,20 @@ pub fn view_player_bar<'a>(
                     .width(Length::FillPortion(1))
                     .align_x(iced::alignment::Horizontal::Right),
             ]
-            .spacing(16)
-            .padding([10, 16])
+            .spacing(18)
+            .padding([12, 20])
             .align_y(Alignment::Center)
             .width(Length::Fill),
         )
+        .style(floating_dock_style)
         .width(Length::Fill),
     )
-    .padding([10, 14])
+    .padding(iced::Padding {
+        top: 8.0,
+        right: 16.0,
+        bottom: 14.0,
+        left: 16.0,
+    })
     .width(Length::Fill)
     .into()
 }

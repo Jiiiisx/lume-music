@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, Unbounde
 use crate::lyrics_anim::{active_line_index, LyricsSpringState};
 use crate::platform::smtc::{extract_hwnd, SmtcController};
 use crate::platform::{apply_window_glass_mode, TrayController};
-use crate::theme::{extract_palette, AlbumPalette, DynamicBackdropProgram};
+use crate::theme::{decode_art_blur_rgba, extract_palette, AlbumPalette, DynamicBackdropProgram};
 use crate::views::browse::{validate_playlist_name, view_browse, view_sidebar, BrowseViewProps};
 use crate::views::lyrics_view::{
     lyrics_scroll_id, view_now_playing_lyrics, LyricsViewProps, LYRIC_LINE_STRIDE_PX,
@@ -145,6 +145,8 @@ pub struct LumeApp {
 
     art_handles: HashMap<String, image::Handle>,
     art_handle_lru: VecDeque<String>,
+    art_blur_rgba: Option<Arc<Vec<u8>>>,
+    art_blur_version: u64,
 
     prev_palette: AlbumPalette,
     target_palette: AlbumPalette,
@@ -262,6 +264,8 @@ impl LumeApp {
             last_scrolled_line: None,
             art_handles: HashMap::new(),
             art_handle_lru: VecDeque::new(),
+            art_blur_rgba: None,
+            art_blur_version: 0,
             prev_palette: default_pal,
             target_palette: default_pal,
             display_palette: default_pal,
@@ -296,6 +300,14 @@ impl LumeApp {
         if !app.config.local_folders.is_empty() {
             app.scanning_folders = true;
             startup_tasks.push(app.spawn_local_scan_task());
+        } else if !app.local_tracks.is_empty() {
+            let keys: Vec<String> = app
+                .local_tracks
+                .iter()
+                .filter_map(|t| t.artwork_ref.clone())
+                .take(MAX_IN_MEM_ART_HANDLES)
+                .collect();
+            startup_tasks.push(app.preload_thumbnails_task(keys));
         }
 
         (app, Task::batch(startup_tasks))
@@ -816,11 +828,14 @@ impl LumeApp {
                 track_uid,
                 palette,
                 art_bytes,
+                art_blur_rgba,
             } => {
                 if let Some(bytes) = art_bytes {
                     self.insert_art_handle(track_uid.clone(), image::Handle::from_bytes(bytes));
                 }
                 if self.queue.current().map(|t| t.uid.as_str()) == Some(track_uid.as_str()) {
+                    self.art_blur_rgba = art_blur_rgba;
+                    self.art_blur_version = self.art_blur_version.wrapping_add(1);
                     self.prev_palette = self.display_palette;
                     self.target_palette = palette;
                     if self.config.reduced_motion {
@@ -829,6 +844,11 @@ impl LumeApp {
                     } else {
                         self.palette_transition_start = Some(Instant::now());
                     }
+                }
+            }
+            Message::ThumbnailsLoaded(items) => {
+                for (key, bytes) in items {
+                    self.insert_art_handle(key, image::Handle::from_bytes(bytes));
                 }
             }
             Message::SetGlassmorphismMode(mode) => {
@@ -900,6 +920,11 @@ impl LumeApp {
                 self.scanning_folders = false;
                 match res {
                     Ok((report, tracks)) => {
+                        let thumb_keys: Vec<String> = tracks
+                            .iter()
+                            .filter_map(|t| t.artwork_ref.clone())
+                            .take(MAX_IN_MEM_ART_HANDLES)
+                            .collect();
                         self.local_tracks = tracks;
                         self.refresh_search_results();
                         self.scan_summary = Some(format!(
@@ -909,6 +934,7 @@ impl LumeApp {
                             report.skipped_corrupt,
                             report.pruned
                         ));
+                        return self.preload_thumbnails_task(thumb_keys);
                     }
                     Err(err) => {
                         self.scan_summary = Some(format!("Scan failed: {err}"));
@@ -999,7 +1025,7 @@ impl LumeApp {
     pub fn view(&self) -> Element<'_, Message> {
         let acrylic_browse = self.config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
             && self.view_mode == ViewMode::Browse;
-        let acrylic_tint = acrylic_browse.then_some(0.28);
+        let acrylic_tint = acrylic_browse.then_some(0.24);
 
         let backdrop = shader(DynamicBackdropProgram::new(
             self.display_palette,
@@ -1009,6 +1035,8 @@ impl LumeApp {
                 self.time_s
             },
             acrylic_tint,
+            self.art_blur_rgba.clone(),
+            self.art_blur_version,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -1292,16 +1320,43 @@ impl LumeApp {
                         .as_deref()
                         .map(extract_palette)
                         .unwrap_or_else(AlbumPalette::default_dark);
-                    (track_uid, palette, bytes)
+                    let blur_rgba = bytes.as_deref().and_then(decode_art_blur_rgba).map(Arc::new);
+                    (track_uid, palette, bytes, blur_rgba)
                 })
                 .await
-                .unwrap_or_else(|_| (String::new(), AlbumPalette::default_dark(), None))
+                .unwrap_or_else(|_| (String::new(), AlbumPalette::default_dark(), None, None))
             },
-            |(track_uid, palette, art_bytes)| Message::PaletteLoaded {
+            |(track_uid, palette, art_bytes, art_blur_rgba)| Message::PaletteLoaded {
                 track_uid,
                 palette,
                 art_bytes,
+                art_blur_rgba,
             },
+        )
+    }
+
+    fn preload_thumbnails_task(&self, keys: Vec<String>) -> Task<Message> {
+        if keys.is_empty() {
+            return Task::none();
+        }
+        let art_cache = Arc::clone(&self.art_cache);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut out = Vec::new();
+                    if let Ok(mut cache) = art_cache.lock() {
+                        for key in keys {
+                            if let Ok(Some(bytes)) = cache.get(&key) {
+                                out.push((key, bytes));
+                            }
+                        }
+                    }
+                    out
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::ThumbnailsLoaded,
         )
     }
 

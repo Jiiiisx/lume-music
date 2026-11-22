@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
 use iced::mouse;
 use iced::wgpu;
@@ -18,6 +20,8 @@ pub struct DynamicBackdropProgram {
     pub palette: AlbumPalette,
     pub time_s: f32,
     pub transparent_acrylic_tint: Option<f32>,
+    pub art_rgba: Option<Arc<Vec<u8>>>,
+    pub art_version: u64,
 }
 
 impl DynamicBackdropProgram {
@@ -25,11 +29,15 @@ impl DynamicBackdropProgram {
         palette: AlbumPalette,
         time_s: f32,
         transparent_acrylic_tint: Option<f32>,
+        art_rgba: Option<Arc<Vec<u8>>>,
+        art_version: u64,
     ) -> Self {
         Self {
             palette,
             time_s,
             transparent_acrylic_tint,
+            art_rgba,
+            art_version,
         }
     }
 }
@@ -37,16 +45,20 @@ impl DynamicBackdropProgram {
 #[derive(Debug, Clone)]
 pub struct BackdropPrimitive {
     uniforms: BackdropUniforms,
+    art_rgba: Option<Arc<Vec<u8>>>,
+    art_version: u64,
 }
 
 pub struct BackdropPipeline {
     render_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
+    art_texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    uploaded_version: u64,
 }
 
 impl shader::Pipeline for BackdropPipeline {
-    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lume_music.backdrop.shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("background.wgsl").into()),
@@ -59,27 +71,103 @@ impl shader::Pipeline for BackdropPipeline {
             mapped_at_creation: false,
         });
 
+        let art_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lume_music.backdrop.art_tex"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Seed neutral pixels so initial bind group is well-defined before any album art uploads.
+        let init_pixels = vec![32u8; 64 * 64 * 4];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &art_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &init_pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64 * 4),
+                rows_per_image: Some(64),
+            },
+            wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let art_view = art_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let art_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lume_music.backdrop.art_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lume_music.backdrop.bind_group_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lume_music.backdrop.bind_group"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&art_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&art_sampler),
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -120,7 +208,9 @@ impl shader::Pipeline for BackdropPipeline {
         Self {
             render_pipeline,
             uniform_buffer,
+            art_texture,
             bind_group,
+            uploaded_version: 0,
         }
     }
 }
@@ -136,6 +226,33 @@ impl shader::Primitive for BackdropPrimitive {
         _bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
+        if self.art_version != pipeline.uploaded_version {
+            if let Some(bytes) = &self.art_rgba {
+                if bytes.len() == 64 * 64 * 4 {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &pipeline.art_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(64 * 4),
+                            rows_per_image: Some(64),
+                        },
+                        wgpu::Extent3d {
+                            width: 64,
+                            height: 64,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+            pipeline.uploaded_version = self.art_version;
+        }
+
         queue.write_buffer(
             &pipeline.uniform_buffer,
             0,
@@ -162,11 +279,23 @@ impl<Message> shader::Program<Message> for DynamicBackdropProgram {
         _bounds: Rectangle,
     ) -> Self::Primitive {
         let acrylic_alpha = self.transparent_acrylic_tint.unwrap_or(1.0);
+        let has_art = self
+            .art_rgba
+            .as_ref()
+            .map(|b| b.len() == 64 * 64 * 4)
+            .unwrap_or(false);
         BackdropPrimitive {
             uniforms: BackdropUniforms {
                 colors: self.palette.colors,
-                params: [self.time_s, self.palette.scrim_alpha, acrylic_alpha, 0.0],
+                params: [
+                    self.time_s,
+                    self.palette.scrim_alpha,
+                    acrylic_alpha,
+                    if has_art { 1.0 } else { 0.0 },
+                ],
             },
+            art_rgba: self.art_rgba.clone(),
+            art_version: self.art_version,
         }
     }
 }

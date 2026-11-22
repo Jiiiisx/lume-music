@@ -13,7 +13,7 @@ pub fn apply_window_glass_mode(
         #[cfg(target_os = "windows")]
         {
             if enable_acrylic {
-                let _ = window_vibrancy::apply_acrylic(window, Some((18, 18, 26, 175)));
+                let _ = window_vibrancy::apply_acrylic(window, Some((24, 18, 22, 108)));
             } else {
                 let _ = window_vibrancy::clear_acrylic(window);
             }

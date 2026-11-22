@@ -6,15 +6,17 @@ pub struct AlbumPalette {
 }
 
 impl AlbumPalette {
+    /// Luminous warm ambient palette used when no album art is active,
+    /// giving frosted glass surfaces depth and soft glow immediately at launch.
     pub fn default_dark() -> Self {
         Self {
             colors: [
-                [0.14, 0.09, 0.20, 1.0],
-                [0.24, 0.11, 0.18, 1.0],
-                [0.08, 0.14, 0.24, 1.0],
-                [0.06, 0.07, 0.11, 1.0],
+                [0.72, 0.44, 0.28, 1.0],
+                [0.50, 0.27, 0.24, 1.0],
+                [0.24, 0.16, 0.20, 1.0],
+                [0.64, 0.42, 0.34, 1.0],
             ],
-            scrim_alpha: 0.42,
+            scrim_alpha: 0.38,
         }
     }
 
@@ -33,6 +35,16 @@ impl AlbumPalette {
             scrim_alpha,
         }
     }
+}
+
+/// Decodes raw image bytes into a 64×64 RGBA buffer (16 KB) for GPU blurred backdrop rendering.
+pub fn decode_art_blur_rgba(image_bytes: &[u8]) -> Option<Vec<u8>> {
+    if image_bytes.is_empty() {
+        return None;
+    }
+    let img = image::load_from_memory(image_bytes).ok()?;
+    let small = img.resize_exact(64, 64, image::imageops::FilterType::Triangle);
+    Some(small.to_rgba8().into_raw())
 }
 
 pub fn extract_palette(image_bytes: &[u8]) -> AlbumPalette {
@@ -85,12 +97,20 @@ pub fn extract_palette(image_bytes: &[u8]) -> AlbumPalette {
     let mut colors = [[0.0_f32; 4]; 4];
     for i in 0..4 {
         let w = quad_accum[i][3].max(0.0001);
-        colors[i] = [
-            (quad_accum[i][0] / w).clamp(0.0, 1.0),
-            (quad_accum[i][1] / w).clamp(0.0, 1.0),
-            (quad_accum[i][2] / w).clamp(0.0, 1.0),
-            1.0,
-        ];
+        let mut r = (quad_accum[i][0] / w).clamp(0.0, 1.0);
+        let mut g = (quad_accum[i][1] / w).clamp(0.0, 1.0);
+        let mut b = (quad_accum[i][2] / w).clamp(0.0, 1.0);
+
+        // Gently lift very dark non-black colors so frosted glass retains luminous depth.
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if luma > 0.02 && luma < 0.18 {
+            let boost = (0.18 / luma).min(2.2);
+            r = (r * boost).clamp(0.0, 1.0);
+            g = (g * boost).clamp(0.0, 1.0);
+            b = (b * boost).clamp(0.0, 1.0);
+        }
+
+        colors[i] = [r, g, b, 1.0];
     }
 
     let avg_luma = (total_luma / pixel_count).clamp(0.0, 1.0);
@@ -135,5 +155,13 @@ mod tests {
     fn corrupt_or_empty_image_bytes_return_safe_default_palette() {
         assert_eq!(extract_palette(&[]), AlbumPalette::default_dark());
         assert_eq!(extract_palette(b"garbage"), AlbumPalette::default_dark());
+    }
+
+    #[test]
+    fn decode_art_blur_rgba_produces_64x64_rgba_or_none() {
+        let bytes = encode_solid_png(180, 90, 45, 24);
+        let rgba = decode_art_blur_rgba(&bytes).unwrap();
+        assert_eq!(rgba.len(), 64 * 64 * 4);
+        assert!(decode_art_blur_rgba(b"not an image").is_none());
     }
 }

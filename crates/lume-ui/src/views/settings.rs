@@ -4,8 +4,9 @@ use lume_storage::{AppConfig, GlassmorphismMode, LyricsVisualMode};
 
 use crate::views::Message;
 use crate::widgets::{
-    glass_button_style, glass_panel, primary_pill_button_style, thin_scrollable_style,
-    GLASS_BORDER, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_button_style, glass_panel, icon_folder, icon_plus, icon_refresh, icon_trash,
+    primary_pill_button_style, thin_scrollable_style, GLASS_SUBTLE_BORDER, ICON_LIGHT, ICON_MUTED,
+    TEXT_MUTED, TEXT_ON_PILL, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn view_settings<'a>(
@@ -17,7 +18,7 @@ pub fn view_settings<'a>(
         text("Appearance & Glassmorphism").size(16).color(TEXT_PRIMARY),
         row![
             button(text("Dynamic Album Blur (Default)").size(13))
-                .padding([8, 14])
+                .padding([9, 18])
                 .style(glass_button_style(
                     config.glassmorphism_mode == GlassmorphismMode::DynamicAlbumBlur
                 ))
@@ -25,7 +26,7 @@ pub fn view_settings<'a>(
                     GlassmorphismMode::DynamicAlbumBlur
                 )),
             button(text("Windows 11 Native Acrylic").size(13))
-                .padding([8, 14])
+                .padding([9, 18])
                 .style(glass_button_style(
                     config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
                 ))
@@ -37,13 +38,13 @@ pub fn view_settings<'a>(
         text("Lyrics Visual Mode").size(15).color(TEXT_PRIMARY),
         row![
             button(text("Spicy Smooth (Spring + Depth)").size(13))
-                .padding([8, 14])
+                .padding([9, 18])
                 .style(glass_button_style(
                     config.lyrics_visual_mode == LyricsVisualMode::SpicySmooth
                 ))
                 .on_press(Message::SetLyricsVisualMode(LyricsVisualMode::SpicySmooth)),
             button(text("Ultra-Light (Static Minimal)").size(13))
-                .padding([8, 14])
+                .padding([9, 18])
                 .style(glass_button_style(
                     config.lyrics_visual_mode == LyricsVisualMode::UltraLight
                 ))
@@ -55,12 +56,12 @@ pub fn view_settings<'a>(
             .on_toggle(Message::SetReducedMotion)
             .text_size(13),
     ]
-    .spacing(10);
+    .spacing(12);
 
     let behavior = column![
         text("Desktop & Playback Behavior").size(16).color(TEXT_PRIMARY),
         toggler(config.close_to_tray)
-            .label("Close button (×) minimizes to System Tray")
+            .label("Close button minimizes to System Tray")
             .on_toggle(Message::SetCloseToTray)
             .text_size(13),
         toggler(config.prefer_youtube_fallback)
@@ -68,12 +69,23 @@ pub fn view_settings<'a>(
             .on_toggle(Message::SetPreferYoutubeFallback)
             .text_size(13),
     ]
-    .spacing(10);
+    .spacing(12);
 
-    let mut folder_rows = column![].spacing(6);
+    let mut folder_rows = column![].spacing(8);
     if config.local_folders.is_empty() {
         folder_rows = folder_rows.push(
-            text("No local folders added yet.").size(13).color(TEXT_MUTED),
+            container(
+                text("No local folders added yet. Click \"Add Folder\" to index your music.")
+                    .size(13)
+                    .color(TEXT_MUTED),
+            )
+            .padding([12, 16])
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+                border: iced::border::rounded(16.0),
+                ..Default::default()
+            }),
         );
     } else {
         for folder in &config.local_folders {
@@ -81,19 +93,28 @@ pub fn view_settings<'a>(
             folder_rows = folder_rows.push(
                 container(
                     row![
+                        icon_folder(16.0, ICON_MUTED),
                         text(label).size(13).color(TEXT_PRIMARY).width(Length::Fill),
-                        button(text("Remove").size(11))
-                            .padding([4, 10])
-                            .style(glass_button_style(false))
-                            .on_press(Message::RemoveLocalFolder(folder.clone())),
+                        button(
+                            row![icon_trash(12.0, ICON_LIGHT), text("Remove").size(12)]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                        )
+                        .padding([6, 12])
+                        .style(glass_button_style(false))
+                        .on_press(Message::RemoveLocalFolder(folder.clone())),
                     ]
                     .align_y(Alignment::Center)
                     .spacing(10),
                 )
-                .padding([8, 12])
+                .padding([10, 14])
                 .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.05))),
-                    border: iced::border::rounded(8.0),
+                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))),
+                    border: iced::border::Border {
+                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.12),
+                        width: 1.0,
+                        radius: 16.0.into(),
+                    },
                     ..Default::default()
                 }),
             );
@@ -104,14 +125,25 @@ pub fn view_settings<'a>(
         row![
             text("Local Audio Folders").size(16).color(TEXT_PRIMARY),
             space().width(Length::Fill),
-            button(text("+ Add Folder").size(12))
-                .padding([7, 14])
-                .style(primary_pill_button_style)
-                .on_press(Message::PickLocalFolder),
-            button(text(if scanning { "Scanning..." } else { "Rescan All" }).size(12))
-                .padding([7, 14])
-                .style(glass_button_style(false))
-                .on_press(Message::RescanLocalFolders),
+            button(
+                row![icon_plus(13.0, TEXT_ON_PILL), text("Add Folder").size(12)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            )
+            .padding([8, 16])
+            .style(primary_pill_button_style)
+            .on_press(Message::PickLocalFolder),
+            button(
+                row![
+                    icon_refresh(13.0, ICON_LIGHT),
+                    text(if scanning { "Scanning..." } else { "Rescan All" }).size(12),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding([8, 16])
+            .style(glass_button_style(false))
+            .on_press(Message::RescanLocalFolders),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -122,13 +154,13 @@ pub fn view_settings<'a>(
         },
         folder_rows,
     ]
-    .spacing(10);
+    .spacing(12);
 
     let divider = || {
         container(space().height(1))
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(Background::Color(GLASS_BORDER)),
+                background: Some(Background::Color(GLASS_SUBTLE_BORDER)),
                 ..Default::default()
             })
     };
@@ -136,15 +168,15 @@ pub fn view_settings<'a>(
     glass_panel(
         scrollable(
             column![
-                text("Settings").size(22).color(TEXT_PRIMARY),
+                text("Settings").size(24).color(TEXT_PRIMARY),
                 appearance,
                 divider(),
                 behavior,
                 divider(),
                 local_library,
             ]
-            .spacing(18)
-            .padding(22),
+            .spacing(20)
+            .padding(24),
         )
         .style(thin_scrollable_style)
         .height(Length::Fill),

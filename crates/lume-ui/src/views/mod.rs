@@ -6,6 +6,7 @@ pub mod settings;
 pub mod titlebar;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use lume_audio::AudioEvent;
 use lume_core::{LyricsData, PlaybackSourceUsed, PlaybackStatus, RepeatMode, Track};
@@ -144,7 +145,9 @@ pub enum Message {
         track_uid: String,
         palette: AlbumPalette,
         art_bytes: Option<Vec<u8>>,
+        art_blur_rgba: Option<Arc<Vec<u8>>>,
     },
+    ThumbnailsLoaded(Vec<(String, Vec<u8>)>),
 
     // Settings & local library
     SetGlassmorphismMode(GlassmorphismMode),

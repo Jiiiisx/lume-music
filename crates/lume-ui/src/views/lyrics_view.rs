@@ -11,9 +11,11 @@ use lume_storage::LyricsVisualMode;
 use crate::lyrics_anim::{active_line_index, line_visual_style, word_progress};
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    close_button_style, cover_art_widget, ghost_button_style, glass_button_style,
-    primary_pill_button_style, seek_slider_style, thin_scrollable_style, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    close_button_style, cover_art_widget, ghost_button_style, glass_button_style, icon_back,
+    icon_close, icon_heart, icon_maximize, icon_minimize, icon_more, icon_next, icon_pause,
+    icon_play, icon_prev, icon_refresh, icon_repeat, icon_shuffle, play_circle_button_style,
+    primary_pill_button_style, seek_slider_style, thin_scrollable_style, ICON_HEART_ACTIVE,
+    ICON_LIGHT, ICON_MUTED, TEXT_ON_PILL, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn lyrics_scroll_id() -> Id {
@@ -59,48 +61,62 @@ pub struct LyricsViewProps<'a> {
 pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Message> {
     let top_left = mouse_area(
         row![
-            button(text("← Back").size(13).color(TEXT_SECONDARY))
-                .padding([6, 10])
-                .style(ghost_button_style)
-                .on_press(Message::SetViewMode(ViewMode::Browse)),
-            button(text("•••").size(14).color(TEXT_SECONDARY))
-                .padding([6, 10])
-                .style(ghost_button_style)
+            button(
+                row![icon_back(14.0, ICON_LIGHT), text("Library").size(13)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            )
+            .padding([6, 12])
+            .style(glass_button_style(false))
+            .on_press(Message::SetViewMode(ViewMode::Browse)),
+            button(icon_more(16.0, ICON_LIGHT))
+                .padding([7, 10])
+                .style(glass_button_style(false))
                 .on_press(Message::ToggleQueueDrawer),
             space().width(Length::Fill),
         ]
-        .spacing(4)
+        .spacing(8)
         .align_y(Alignment::Center)
-        .padding([8, 12]),
+        .padding([10, 14]),
     )
     .on_press(Message::DragWindow);
 
-    let max_glyph = if props.maximized { "❐" } else { "□" };
     let top_right = container(
         row![
-            button(text("─").size(12).color(TEXT_PRIMARY))
-                .padding([6, 12])
+            button(icon_minimize(13.0, ICON_LIGHT))
+                .padding([7, 11])
                 .style(ghost_button_style)
                 .on_press(Message::MinimizeWindow),
-            button(text(max_glyph).size(12).color(TEXT_PRIMARY))
-                .padding([6, 12])
+            button(icon_maximize(props.maximized, 13.0, ICON_LIGHT))
+                .padding([7, 11])
                 .style(ghost_button_style)
                 .on_press(Message::ToggleMaximizeWindow),
-            button(text("×").size(14).color(TEXT_PRIMARY))
-                .padding([5, 13])
+            button(icon_close(13.0, ICON_LIGHT))
+                .padding([7, 12])
                 .style(close_button_style)
                 .on_press(Message::CloseRequested),
         ]
         .spacing(2)
         .align_y(Alignment::Center),
     )
-    .padding([2, 4])
+    .padding(2)
     .style(|_| container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.25))),
+        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))),
+        border: iced::border::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.14),
+            width: 1.0,
+            radius: 14.0.into(),
+        },
         ..Default::default()
     });
 
     let top_bar = row![top_left, top_right]
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 14.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .width(Length::Fill)
         .align_y(Alignment::Center);
 
@@ -114,32 +130,29 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
     let artist = track
         .map(|t| t.artist_display())
         .unwrap_or_else(|| "Select a track from your library".to_string());
-    let source_badge = props
-        .info
-        .source_used
-        .map(|s| s.badge_label())
-        .unwrap_or("Idle");
+    let source_badge = props.info.source_used.map(|s| s.badge_label()).unwrap_or("Idle");
 
     let max_dur = props.info.duration_ms.max(1) as f32;
     let cur_pos = (props.info.position_ms.min(props.info.duration_ms.max(1))) as f32;
 
-    let play_glyph = match props.info.status {
-        PlaybackStatus::Playing | PlaybackStatus::Buffering => "⏸",
-        PlaybackStatus::Paused | PlaybackStatus::Stopped => "▶",
+    let is_playing = matches!(
+        props.info.status,
+        PlaybackStatus::Playing | PlaybackStatus::Buffering
+    );
+    let play_icon = if is_playing {
+        icon_pause(18.0, TEXT_ON_PILL)
+    } else {
+        icon_play(18.0, TEXT_ON_PILL)
+    };
+    let repeat_color = if props.info.repeat != RepeatMode::Off {
+        TEXT_ON_PILL
+    } else {
+        ICON_MUTED
     };
 
-    let repeat_label = match props.info.repeat {
-        RepeatMode::Off => "Repeat",
-        RepeatMode::All => "All",
-        RepeatMode::One => "One",
-    };
-
-    // Left column matching reference-lyrics-view.jpg:
-    // Crisp square cover art, thin seekbar + M:SS timestamps right underneath,
-    // bold centered marquee title, softer artist subtitle, source badge & compact controls.
     let left_column = container(
         column![
-            cover_art_widget(art, 356.0, 8.0),
+            cover_art_widget(art, 356.0, 14.0),
             column![
                 slider(0.0..=max_dur, cur_pos, |v| {
                     Message::SeekSliderChanged(v as u64)
@@ -168,18 +181,22 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
             .width(Length::Fixed(356.0)),
             row![
                 container(text(source_badge).size(11).color(TEXT_SECONDARY))
-                    .padding([3, 10])
+                    .padding([4, 12])
                     .style(|_| container::Style {
-                        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.12))),
-                        border: iced::border::rounded(12.0),
+                        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.14))),
+                        border: iced::border::rounded(14.0),
                         ..Default::default()
                     }),
                 if let Some(t) = track {
                     Element::from(
-                        button(text(if t.is_liked { "♥" } else { "♡" }).size(14))
-                            .padding([4, 10])
-                            .style(ghost_button_style)
-                            .on_press(Message::ToggleLike(t.clone())),
+                        button(if t.is_liked {
+                            icon_heart(true, 16.0, ICON_HEART_ACTIVE)
+                        } else {
+                            icon_heart(false, 16.0, ICON_LIGHT)
+                        })
+                        .padding([6, 10])
+                        .style(ghost_button_style)
+                        .on_press(Message::ToggleLike(t.clone())),
                     )
                 } else {
                     Element::from(space().width(0))
@@ -188,28 +205,52 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
             .spacing(8)
             .align_y(Alignment::Center),
             row![
-                button(text("Shuffle").size(11))
-                    .padding([6, 10])
-                    .style(glass_button_style(props.info.shuffle))
-                    .on_press(Message::ToggleShuffle),
-                button(text("⏮").size(15))
-                    .padding([6, 12])
+                button(icon_shuffle(
+                    15.0,
+                    if props.info.shuffle {
+                        TEXT_ON_PILL
+                    } else {
+                        ICON_MUTED
+                    }
+                ))
+                .padding([8, 10])
+                .style(glass_button_style(props.info.shuffle))
+                .on_press(Message::ToggleShuffle),
+                button(icon_prev(17.0, ICON_LIGHT))
+                    .padding([9, 12])
                     .style(ghost_button_style)
                     .on_press(Message::PreviousTrack),
-                button(text(play_glyph).size(16))
-                    .padding([8, 16])
-                    .style(glass_button_style(true))
-                    .on_press(Message::TogglePlayPause),
-                button(text("⏭").size(15))
-                    .padding([6, 12])
+                button(
+                    container(play_icon)
+                        .width(Length::Fixed(46.0))
+                        .height(Length::Fixed(46.0))
+                        .center_x(Length::Fixed(46.0))
+                        .center_y(Length::Fixed(46.0)),
+                )
+                .padding(0)
+                .style(play_circle_button_style)
+                .on_press(Message::TogglePlayPause),
+                button(icon_next(17.0, ICON_LIGHT))
+                    .padding([9, 12])
                     .style(ghost_button_style)
                     .on_press(Message::NextTrack),
-                button(text(repeat_label).size(11))
-                    .padding([6, 10])
-                    .style(glass_button_style(props.info.repeat != RepeatMode::Off))
-                    .on_press(Message::CycleRepeat),
+                button(
+                    row![
+                        icon_repeat(15.0, repeat_color),
+                        if props.info.repeat == RepeatMode::One {
+                            Element::from(text("1").size(10).color(repeat_color))
+                        } else {
+                            Element::from(space().width(0))
+                        },
+                    ]
+                    .spacing(2)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 10])
+                .style(glass_button_style(props.info.repeat != RepeatMode::Off))
+                .on_press(Message::CycleRepeat),
             ]
-            .spacing(8)
+            .spacing(10)
             .align_y(Alignment::Center),
         ]
         .spacing(16)
@@ -261,10 +302,14 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                 text("No synced or plain lyrics are available for this track yet.")
                     .size(14)
                     .color(TEXT_SECONDARY),
-                button(text("↻  Retry").size(13))
-                    .padding([9, 18])
-                    .style(primary_pill_button_style)
-                    .on_press(Message::RetryLyrics),
+                button(
+                    row![icon_refresh(14.0, TEXT_ON_PILL), text("Try again").size(13)]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .padding([10, 20])
+                .style(primary_pill_button_style)
+                .on_press(Message::RetryLyrics),
             ]
             .spacing(14)
             .align_x(Alignment::Center),
@@ -368,10 +413,14 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
     container(
         column![
             text("No lyrics found").size(24).color(TEXT_PRIMARY),
-            button(text("↻  Retry").size(13))
-                .padding([9, 18])
-                .style(primary_pill_button_style)
-                .on_press(Message::RetryLyrics),
+            button(
+                row![icon_refresh(14.0, TEXT_ON_PILL), text("Try again").size(13)]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .padding([10, 20])
+            .style(primary_pill_button_style)
+            .on_press(Message::RetryLyrics),
         ]
         .spacing(12)
         .align_x(Alignment::Center),

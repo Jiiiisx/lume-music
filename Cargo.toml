@@ -18,7 +18,7 @@ authors = ["Lume Music"]
 async-trait = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
 dirs = "7.0"
-iced = { version = "0.14", features = ["wgpu", "tokio", "image", "advanced"] }
+iced = { version = "0.14", features = ["wgpu", "tokio", "image", "svg", "advanced"] }
 image = "0.25"
 lofty = "0.25"
 rand = "0.10"
