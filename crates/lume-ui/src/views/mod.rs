@@ -1,4 +1,5 @@
 pub mod browse;
+pub mod lyrics_view;
 pub mod player_bar;
 pub mod queue_drawer;
 pub mod settings;
