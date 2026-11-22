@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lume-core",
     "crates/lume-storage",
+    "crates/lume-providers",
 ]
 
 [workspace.package]
