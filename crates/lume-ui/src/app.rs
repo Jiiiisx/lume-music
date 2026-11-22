@@ -1025,21 +1025,6 @@ impl LumeApp {
     pub fn view(&self) -> Element<'_, Message> {
         let acrylic_browse = self.config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
             && self.view_mode == ViewMode::Browse;
-        let acrylic_tint = acrylic_browse.then_some(0.24);
-
-        let backdrop = shader(DynamicBackdropProgram::new(
-            self.display_palette,
-            if self.config.reduced_motion {
-                0.0
-            } else {
-                self.time_s
-            },
-            acrylic_tint,
-            self.art_blur_rgba.clone(),
-            self.art_blur_version,
-        ))
-        .width(Length::Fill)
-        .height(Length::Fill);
 
         let info = NowPlayingInfo {
             track: self.queue.current(),
@@ -1099,8 +1084,8 @@ impl LumeApp {
                             self.scan_summary.as_deref()
                         ),
                     ]
-                    .spacing(14)
-                    .padding([0, 14])
+                    .spacing(16)
+                    .padding([2, 16])
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
@@ -1162,18 +1147,49 @@ impl LumeApp {
             Color::from_rgb8(10, 10, 14)
         };
 
-        container(
+        let root_content: Element<'_, Message> = if acrylic_browse {
+            foreground
+        } else {
+            let backdrop = shader(DynamicBackdropProgram::new(
+                self.display_palette,
+                if self.config.reduced_motion {
+                    0.0
+                } else {
+                    self.time_s
+                },
+                None,
+                self.art_blur_rgba.clone(),
+                self.art_blur_version,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill);
+
             stack![backdrop, foreground]
                 .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(root_bg)),
-            ..Default::default()
-        })
-        .into()
+                .height(Length::Fill)
+                .into()
+        };
+
+        container(root_content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| {
+                let border = if acrylic_browse {
+                    iced::border::Border {
+                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+                        width: 1.0,
+                        radius: 12.0.into(),
+                    }
+                } else {
+                    iced::border::Border::default()
+                };
+                container::Style {
+                    background: Some(Background::Color(root_bg)),
+                    border,
+                    ..Default::default()
+                }
+            })
+            .into()
     }
 
     fn visible_tracks(&self) -> &[Track] {

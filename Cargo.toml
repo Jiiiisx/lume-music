@@ -43,3 +43,6 @@ lume-core = { path = "crates/lume-core" }
 lume-storage = { path = "crates/lume-storage" }
 lume-providers = { path = "crates/lume-providers" }
 lume-audio = { path = "crates/lume-audio" }
+
+[patch.crates-io]
+iced_wgpu = { path = "patches/iced_wgpu" }

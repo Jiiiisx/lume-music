@@ -8,8 +8,8 @@ use crate::error::StorageError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GlassmorphismMode {
-    #[default]
     DynamicAlbumBlur,
+    #[default]
     WindowsAcrylic,
 }
 
@@ -39,7 +39,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            glassmorphism_mode: GlassmorphismMode::DynamicAlbumBlur,
+            glassmorphism_mode: GlassmorphismMode::WindowsAcrylic,
             lyrics_visual_mode: LyricsVisualMode::SpicySmooth,
             reduced_motion: false,
             close_to_tray: true,
@@ -89,13 +89,13 @@ mod tests {
         let default_cfg = AppConfig::load_or_default(&path).unwrap();
         assert_eq!(
             default_cfg.glassmorphism_mode,
-            GlassmorphismMode::DynamicAlbumBlur
+            GlassmorphismMode::WindowsAcrylic
         );
         assert_eq!(default_cfg.lyrics_visual_mode, LyricsVisualMode::SpicySmooth);
         assert!(default_cfg.close_to_tray);
 
         let mut updated = default_cfg;
-        updated.glassmorphism_mode = GlassmorphismMode::WindowsAcrylic;
+        updated.glassmorphism_mode = GlassmorphismMode::DynamicAlbumBlur;
         updated.lyrics_visual_mode = LyricsVisualMode::UltraLight;
         updated.close_to_tray = false;
         updated.local_folders.push(PathBuf::from(r"D:\Music"));

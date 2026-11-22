@@ -17,21 +17,21 @@ pub fn view_settings<'a>(
     let appearance = column![
         text("Appearance & Glassmorphism").size(16).color(TEXT_PRIMARY),
         row![
-            button(text("Dynamic Album Blur (Default)").size(13))
-                .padding([9, 18])
-                .style(glass_button_style(
-                    config.glassmorphism_mode == GlassmorphismMode::DynamicAlbumBlur
-                ))
-                .on_press(Message::SetGlassmorphismMode(
-                    GlassmorphismMode::DynamicAlbumBlur
-                )),
-            button(text("Windows 11 Native Acrylic").size(13))
+            button(text("Windows 11 Native Acrylic (Default)").size(13))
                 .padding([9, 18])
                 .style(glass_button_style(
                     config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
                 ))
                 .on_press(Message::SetGlassmorphismMode(
                     GlassmorphismMode::WindowsAcrylic
+                )),
+            button(text("Dynamic Album Blur").size(13))
+                .padding([9, 18])
+                .style(glass_button_style(
+                    config.glassmorphism_mode == GlassmorphismMode::DynamicAlbumBlur
+                ))
+                .on_press(Message::SetGlassmorphismMode(
+                    GlassmorphismMode::DynamicAlbumBlur
                 )),
         ]
         .spacing(10),

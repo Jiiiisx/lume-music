@@ -72,22 +72,22 @@ fn frosted_surface_gradient(top_alpha: f32, mid_alpha: f32, bot_dark_alpha: f32)
     Background::Gradient(gradient::Gradient::Linear(
         gradient::Linear::new(Radians(2.45))
             .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, top_alpha))
-            .add_stop(0.55, Color::from_rgba(1.0, 1.0, 1.0, mid_alpha))
-            .add_stop(1.0, Color::from_rgba(0.07, 0.05, 0.09, bot_dark_alpha)),
+            .add_stop(0.52, Color::from_rgba(1.0, 1.0, 1.0, mid_alpha))
+            .add_stop(1.0, Color::from_rgba(14.0 / 255.0, 16.0 / 255.0, 24.0 / 255.0, bot_dark_alpha)),
     ))
 }
 
 pub fn glass_panel_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.16, 0.07, 0.22)),
+        background: Some(frosted_surface_gradient(0.11, 0.05, 0.30)),
         border: border::Border {
-            color: GLASS_BORDER,
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
             width: 1.0,
             radius: 24.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.28),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
             offset: Vector::new(0.0, 12.0),
             blur_radius: 28.0,
         },
@@ -98,14 +98,14 @@ pub fn glass_panel_style(_theme: &iced::Theme) -> container::Style {
 pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.22, 0.11, 0.44)),
+        background: Some(frosted_surface_gradient(0.16, 0.08, 0.36)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.26),
             width: 1.0,
             radius: 22.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.36),
             offset: Vector::new(0.0, 14.0),
             blur_radius: 34.0,
         },
@@ -116,16 +116,34 @@ pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
 pub fn floating_dock_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.19, 0.09, 0.30)),
+        background: Some(frosted_surface_gradient(0.14, 0.06, 0.32)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.26),
             width: 1.0,
             radius: 26.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.36),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
             offset: Vector::new(0.0, 14.0),
             blur_radius: 34.0,
+        },
+        snap: false,
+    }
+}
+
+pub fn glass_card_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        text_color: Some(TEXT_PRIMARY),
+        background: Some(frosted_surface_gradient(0.12, 0.05, 0.28)),
+        border: border::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.20),
+            offset: Vector::new(0.0, 8.0),
+            blur_radius: 22.0,
         },
         snap: false,
     }

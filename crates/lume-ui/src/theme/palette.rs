@@ -6,17 +6,16 @@ pub struct AlbumPalette {
 }
 
 impl AlbumPalette {
-    /// Luminous warm ambient palette used when no album art is active,
-    /// giving frosted glass surfaces depth and soft glow immediately at launch.
+    /// Neutral smoky midnight-glass palette used when Dynamic Album Blur is idle.
     pub fn default_dark() -> Self {
         Self {
             colors: [
-                [0.72, 0.44, 0.28, 1.0],
-                [0.50, 0.27, 0.24, 1.0],
-                [0.24, 0.16, 0.20, 1.0],
-                [0.64, 0.42, 0.34, 1.0],
+                [0.18, 0.21, 0.30, 1.0],
+                [0.24, 0.19, 0.32, 1.0],
+                [0.10, 0.12, 0.18, 1.0],
+                [0.16, 0.24, 0.30, 1.0],
             ],
-            scrim_alpha: 0.38,
+            scrim_alpha: 0.42,
         }
     }
 
