@@ -1,7 +1,7 @@
 # Lume Music — Design Specification
 
 - **Date:** 2026-11-22
-- **Status:** Draft (pending user approval)
+- **Status:** Approved
 - **Working Project Name:** `lume-music` *(Designer's call — can be renamed before scaffolding)*
 - **Target Platform:** Windows 11 x64 (verified host: Windows 11 Pro Build 26200, Rust 1.99.1, AMD Radeon Graphics, ~13.7 GB usable RAM)
 
@@ -189,7 +189,7 @@ Runs on a dedicated background worker (Tokio runtime + audio thread) controlled 
 ## 5. Designer's Calls & Builder Discretion
 
 ### Calls Made in This Design (user can override any before approval)
-1. **Working project name:** `lume-music` inside `C:\Users\HYPE AMD\.gemini\antigravity\scratch\lume-music`.
+1. **Working project name:** `lume-music` inside `D:\Project\lume-music`.
 2. **Temporary file buffer for YTM seeking:** Stream active YouTube audio through a single temporary seekable file deleted on track switch/exit so `symphonia` seeking is instant without bloating RAM or saving permanent downloads.
 3. **Click-lyric-to-seek:** Clicking a synced lyric line seeks the track to that line's timestamp.
 4. **Close button (`×`) behavior:** Minimizes to system tray by default (toggleable in Settings to exit completely).
