@@ -22,15 +22,18 @@ fn format_mm_ss(ms: u64) -> String {
 
 pub fn view_player_bar<'a>(
     info: NowPlayingInfo<'a>,
+    active_cover: Option<&'a image::Handle>,
     art_handles: &'a HashMap<String, image::Handle>,
     queue_open: bool,
     player_menu_open: bool,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
     let track = info.track;
-    let art = track
-        .and_then(|t| t.artwork_ref.as_deref())
-        .and_then(|k| art_handles.get(k));
+    let art = active_cover.or_else(|| {
+        track
+            .and_then(|t| t.artwork_ref.as_deref())
+            .and_then(|k| art_handles.get(k))
+    });
 
     let title = track.map(|t| t.title.as_str()).unwrap_or("Nothing Playing");
     let artist = track

@@ -25,6 +25,7 @@ use lume_storage::{
     TokenStore,
 };
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Semaphore;
 
 use crate::lyrics_anim::{
     active_display_index, build_display_timeline, target_scroll_y_for_item, LyricsDisplayItem,
@@ -35,7 +36,9 @@ use crate::platform::apply_window_glass_mode;
 use crate::theme::{
     decode_art_blur_rgba, extract_palette, AccentTheme, AlbumPalette, DynamicBackdropProgram,
 };
-use crate::views::browse::{validate_playlist_name, view_browse, view_sidebar, BrowseViewProps};
+use crate::views::browse::{
+    sort_playlist_tracks, validate_playlist_name, view_browse, view_sidebar, BrowseViewProps,
+};
 use crate::views::lyrics_view::{lyrics_scroll_id, view_now_playing_lyrics, LyricsViewProps};
 use crate::views::player_bar::{view_player_bar, view_player_menu_popover};
 use crate::views::queue_drawer::view_queue_drawer;
@@ -46,9 +49,14 @@ use crate::views::{
     SpotifySearchError, SpotifySettingsProps, SpotifySyncReport, ViewMode,
 };
 
-/// Bounded in-memory Browse thumbnail cache (`120 × 96×96×4 ≈ 4.3 MiB` max RAM).
-const MAX_IN_MEM_ART_HANDLES: usize = 120;
+/// Bounded in-memory Browse thumbnail cache (`800 × 96×96×4 ≈ 28.8 MiB` max RAM),
+/// large enough to hold 1,000+ songs across playlists without LRU eviction flicker.
+const MAX_IN_MEM_ART_HANDLES: usize = 800;
 const THUMBNAIL_SIZE_PX: u32 = 96;
+/// Max concurrent remote artwork HTTP downloads to avoid CDN timeouts / connection drops.
+const MAX_CONCURRENT_ART_DOWNLOADS: usize = 12;
+/// Max concurrent Spotify oEmbed enrichment requests to stay below rate limits.
+const OEMBED_ENRICH_CONCURRENCY: usize = 6;
 /// Maximum decoded dimension for the single active cinema cover (`512×512×4 = 1 MiB` max RAM).
 const MAX_ACTIVE_COVER_PX: u32 = 512;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
@@ -232,7 +240,7 @@ static ART_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 fn shared_art_http_client() -> &'static reqwest::Client {
     ART_HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(12))
             .pool_max_idle_per_host(16)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
@@ -260,15 +268,31 @@ async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Opt
         return None;
     }
 
-    let resp = shared_art_http_client().get(&key).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
+    let mut fetched: Option<Vec<u8>> = None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let Ok(resp) = shared_art_http_client().get(&key).send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            if resp.status().as_u16() == 429 || resp.status().is_server_error() {
+                continue;
+            }
+            return None;
+        }
+        let Ok(bytes) = resp.bytes().await else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_REMOTE_ART_BYTES {
+            return None;
+        }
+        fetched = Some(bytes.to_vec());
+        break;
     }
-    let bytes = resp.bytes().await.ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_REMOTE_ART_BYTES {
-        return None;
-    }
-    let vec = bytes.to_vec();
+
+    let vec = fetched?;
     let vec_for_cache = vec.clone();
     let _ = tokio::task::spawn_blocking(move || {
         if let Ok(mut cache) = art_cache.lock() {
@@ -894,11 +918,11 @@ impl LumeApp {
                     if let Ok(db) = self.db.lock() {
                         self.playlist_tracks = db.get_playlist_tracks(&pl_id).unwrap_or_default();
                     }
-                    let keys = self.missing_art_keys(&self.playlist_tracks);
-                    let tracks_snapshot = self.playlist_tracks.clone();
+                    let ordered = self.ordered_playlist_tracks(&pl_id);
+                    let keys = self.missing_art_keys(&ordered);
                     return Task::batch([
                         self.preload_thumbnails_task(keys),
-                        self.spawn_spotify_artwork_enrichment_task(&tracks_snapshot),
+                        self.spawn_spotify_artwork_enrichment_task(&ordered),
                     ]);
                 } else if matches!(self.nav, ActiveNav::LikedSongs) {
                     if let Ok(db) = self.db.lock() {
@@ -1398,19 +1422,31 @@ impl LumeApp {
                 }
             }
             Message::SetPlaylistSort(field) => {
-                if let ActiveNav::Playlist(pl_id) = &self.nav {
+                if let ActiveNav::Playlist(pl_id) = self.nav.clone() {
                     let sort = self.playlist_sorts.entry(pl_id.clone()).or_default();
                     sort.select(field);
                     self.config.playlist_sorts.insert(pl_id.clone(), *sort);
                     let _ = self.config.save(&self.config_path);
+                    let ordered = self.ordered_playlist_tracks(&pl_id);
+                    let keys = self.missing_art_keys(&ordered);
+                    return Task::batch([
+                        self.preload_thumbnails_task(keys),
+                        self.spawn_spotify_artwork_enrichment_task(&ordered),
+                    ]);
                 }
             }
             Message::TogglePlaylistSortDirection => {
-                if let ActiveNav::Playlist(pl_id) = &self.nav {
+                if let ActiveNav::Playlist(pl_id) = self.nav.clone() {
                     let sort = self.playlist_sorts.entry(pl_id.clone()).or_default();
                     sort.toggle_direction();
                     self.config.playlist_sorts.insert(pl_id.clone(), *sort);
                     let _ = self.config.save(&self.config_path);
+                    let ordered = self.ordered_playlist_tracks(&pl_id);
+                    let keys = self.missing_art_keys(&ordered);
+                    return Task::batch([
+                        self.preload_thumbnails_task(keys),
+                        self.spawn_spotify_artwork_enrichment_task(&ordered),
+                    ]);
                 }
             }
             Message::ToggleTrackMenu(uid) => {
@@ -1934,14 +1970,16 @@ impl LumeApp {
                 attempted_uids,
                 resolved: pairs,
             } => {
-                if pairs.is_empty() {
-                    // Release failed UIDs (e.g. while offline) so artwork enriches once online again.
-                    for uid in attempted_uids {
+                let updated_map: HashMap<String, String> = pairs.into_iter().collect();
+                // Release any UID that failed (e.g. HTTP 429 or transient offline) so it can retry later.
+                for uid in attempted_uids {
+                    if !updated_map.contains_key(&uid) {
                         self.enriching_spotify_art.remove(&uid);
                     }
+                }
+                if updated_map.is_empty() {
                     return Task::none();
                 }
-                let updated_map: HashMap<String, String> = pairs.into_iter().collect();
                 let mut new_keys = Vec::with_capacity(updated_map.len());
 
                 for (idx, t) in self.playlist_tracks.iter_mut().enumerate() {
@@ -2006,13 +2044,13 @@ impl LumeApp {
                     }
                 }
                 // Continue enriching any remaining visible tracks in the current view.
-                let remaining_snapshot = match self.nav {
+                let remaining_snapshot = match &self.nav {
                     ActiveNav::Home => self
                         .home_spotify_charts
                         .get(&self.home_region)
                         .cloned()
                         .unwrap_or_default(),
-                    ActiveNav::Playlist(_) => self.playlist_tracks.clone(),
+                    ActiveNav::Playlist(pl_id) => self.ordered_playlist_tracks(pl_id),
                     ActiveNav::LikedSongs => self.liked_tracks.clone(),
                     _ => Vec::new(),
                 };
@@ -2518,15 +2556,16 @@ impl LumeApp {
             muted: self.muted,
         };
 
+        let active_cover = self.active_cover_handle.as_ref().and_then(|(k, h)| {
+            let cur_key = self
+                .queue
+                .current()
+                .and_then(|t| t.artwork_ref.as_deref().or(Some(t.uid.as_str())));
+            (cur_key == Some(k.as_str())).then_some(h)
+        });
+
         let foreground: Element<'_, Message> = match self.view_mode {
             ViewMode::NowPlayingLyrics => {
-                let active_cover = self.active_cover_handle.as_ref().and_then(|(k, h)| {
-                    let cur_key = self
-                        .queue
-                        .current()
-                        .and_then(|t| t.artwork_ref.as_deref().or(Some(t.uid.as_str())));
-                    (cur_key == Some(k.as_str())).then_some(h)
-                });
                 let base_lyrics: Element<'_, Message> = view_now_playing_lyrics(LyricsViewProps {
                     info,
                     lyrics: self.current_lyrics.as_ref(),
@@ -2692,6 +2731,7 @@ impl LumeApp {
 
                 let player_bar = view_player_bar(
                     info,
+                    active_cover,
                     &self.art_handles,
                     self.queue_open,
                     self.player_menu_open,
@@ -2930,6 +2970,18 @@ impl LumeApp {
         self.search_results = merge_search_results(with_spotify, self.ytm_search_results.clone());
     }
 
+    fn ordered_playlist_tracks(&self, pl_id: &str) -> Vec<Track> {
+        let sort = self
+            .playlist_sorts
+            .get(pl_id)
+            .copied()
+            .unwrap_or_default();
+        sort_playlist_tracks(&self.playlist_tracks, sort)
+            .into_iter()
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
     fn missing_art_keys(&self, tracks: &[Track]) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -3165,19 +3217,24 @@ impl LumeApp {
         if keys.is_empty() {
             return Task::none();
         }
-        // Emit chunks of 16 progressively so visible covers appear in ~150 ms instead of waiting
-        // for all 200+ images in a large playlist to finish downloading and decoding.
+        // Emit chunks of 16 progressively while capping total concurrent HTTP downloads via a
+        // shared semaphore so large playlists never flood the CDN into timeouts or drops.
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_ART_DOWNLOADS));
         let mut tasks = Vec::new();
         for group in keys.chunks(16) {
             let group_keys: Vec<String> = group.to_vec();
             let art_cache = Arc::clone(&self.art_cache);
+            let sem = Arc::clone(&sem);
             tasks.push(Task::perform(
                 async move {
                     let mut set = tokio::task::JoinSet::new();
                     for key in group_keys {
                         let cache = Arc::clone(&art_cache);
+                        let sem = Arc::clone(&sem);
                         set.spawn(async move {
+                            let _permit = sem.acquire_owned().await.ok()?;
                             let bytes = fetch_or_cache_art(cache, key.clone()).await?;
+                            drop(_permit);
                             let (w, h, rgba) = tokio::task::spawn_blocking(move || {
                                 decode_thumbnail_rgba_96(&bytes)
                             })
@@ -3234,7 +3291,7 @@ impl LumeApp {
                 let client = shared_art_http_client().clone();
 
                 let mut resolved = Vec::with_capacity(batch.len());
-                for chunk in batch.chunks(16) {
+                for chunk in batch.chunks(OEMBED_ENRICH_CONCURRENCY) {
                     let mut set = tokio::task::JoinSet::new();
                     for (uid, sp_id) in chunk {
                         let http = client.clone();
