@@ -1,17 +1,20 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::futures::SinkExt;
 use iced::widget::{container, image, operation, row, shader, stack};
 use iced::{window, Background, Color, Element, Length, Subscription, Task, Theme};
 use lume_audio::{AudioCommand, AudioEngineHandle, AudioEvent};
 use lume_core::{
-    LyricsData, PlaybackSourceUsed, PlaybackStatus, Playlist, QueueActionResult, QueueEngine,
-    Track, TrackSource,
+    LyricsData, MusicProvider, PlaybackSourceUsed, PlaybackStatus, Playlist, QueueActionResult,
+    QueueEngine, ResolvedStream, Track, TrackSource,
 };
-use lume_providers::{find_sidecar_lrc, parse_lrc, read_embedded_lyrics, LocalProvider, LrclibClient};
+use lume_providers::{
+    detect_yt_dlp_binary, find_sidecar_lrc, parse_lrc, read_embedded_lyrics, LocalProvider,
+    LrclibClient, YouTubeMusicProvider,
+};
 use lume_storage::{AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup};
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 
@@ -34,8 +37,73 @@ use crate::views::{
 };
 
 const MAX_IN_MEM_ART_HANDLES: usize = 30;
+const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
 const PALETTE_TRANSITION_SECS: f32 = 0.6;
 const LRCLIB_BASE_URL: &str = "https://lrclib.net";
+
+pub fn is_remote_art_url(key: &str) -> bool {
+    key.starts_with("https://") || key.starts_with("http://")
+}
+
+pub fn merge_search_results(cached: Vec<Track>, remote: Vec<Track>) -> Vec<Track> {
+    let mut seen = HashSet::with_capacity(cached.len() + remote.len());
+    let mut merged = Vec::with_capacity(cached.len() + remote.len());
+    for track in cached {
+        if seen.insert(track.uid.clone()) {
+            merged.push(track);
+        }
+    }
+    for track in remote {
+        if seen.insert(track.uid.clone()) {
+            merged.push(track);
+        }
+    }
+    merged
+}
+
+async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Option<Vec<u8>> {
+    let cache_read = Arc::clone(&art_cache);
+    let key_read = key.clone();
+    let cached = tokio::task::spawn_blocking(move || {
+        cache_read
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(&key_read).ok().flatten())
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if cached.is_some() {
+        return cached;
+    }
+
+    if !is_remote_art_url(&key) {
+        return None;
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .ok()?;
+    let resp = client.get(&key).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_REMOTE_ART_BYTES {
+        return None;
+    }
+    let vec = bytes.to_vec();
+    let vec_for_cache = vec.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(mut cache) = art_cache.lock() {
+            let _ = cache.put(&key, &vec_for_cache);
+        }
+    })
+    .await;
+    Some(vec)
+}
 
 static AUDIO_RX_SLOT: OnceLock<Mutex<Option<Receiver<AudioEvent>>>> = OnceLock::new();
 static TRAY_RX_SLOT: OnceLock<Mutex<Option<UnboundedReceiver<TrayAction>>>> = OnceLock::new();
@@ -131,6 +199,12 @@ pub struct LumeApp {
     liked_tracks: Vec<Track>,
     playlist_tracks: Vec<Track>,
     search_results: Vec<Track>,
+    ytm_search_results: Vec<Track>,
+    searching_ytm: bool,
+    resolving_stream: bool,
+    search_request_id: u64,
+    play_request_id: u64,
+    yt_dlp_detected: Option<PathBuf>,
 
     queue: QueueEngine,
     status: PlaybackStatus,
@@ -231,6 +305,7 @@ impl LumeApp {
         let now = Instant::now();
         let default_pal = AlbumPalette::default_dark();
         let db = Arc::new(Mutex::new(db_raw));
+        let yt_dlp_detected = detect_yt_dlp_binary(config.yt_dlp_path.as_deref());
 
         let mut app = Self {
             config,
@@ -254,6 +329,12 @@ impl LumeApp {
             liked_tracks,
             playlist_tracks: Vec::new(),
             search_results: Vec::new(),
+            ytm_search_results: Vec::new(),
+            searching_ytm: false,
+            resolving_stream: false,
+            search_request_id: 0,
+            play_request_id: 0,
+            yt_dlp_detected,
             queue,
             status: PlaybackStatus::Stopped,
             source_used: None,
@@ -483,12 +564,18 @@ impl LumeApp {
                     if let Ok(db) = self.db.lock() {
                         self.playlist_tracks = db.get_playlist_tracks(&pl_id).unwrap_or_default();
                     }
+                    let keys = self.missing_art_keys(&self.playlist_tracks);
+                    return self.preload_thumbnails_task(keys);
                 } else if matches!(self.nav, ActiveNav::LikedSongs) {
                     if let Ok(db) = self.db.lock() {
                         self.liked_tracks = db.list_unified_liked_tracks().unwrap_or_default();
                     }
+                    let keys = self.missing_art_keys(&self.liked_tracks);
+                    return self.preload_thumbnails_task(keys);
                 } else if matches!(self.nav, ActiveNav::Search) {
                     self.refresh_search_results();
+                } else if matches!(self.nav, ActiveNav::Settings) {
+                    self.yt_dlp_detected = detect_yt_dlp_binary(self.config.yt_dlp_path.as_deref());
                 }
             }
             Message::SetViewMode(mode) => {
@@ -605,19 +692,18 @@ impl LumeApp {
                         Some("Enter a valid https://open.spotify.com/playlist/... URL.".to_string());
                 }
             }
-            Message::AddTrackToPlaylist {
-                playlist_id,
-                track_uid,
-            } => {
+            Message::AddTrackToPlaylist { playlist_id, track } => {
                 self.open_track_menu_uid = None;
                 if let Ok(db) = self.db.lock() {
-                    match db.add_track_to_playlist(&playlist_id, &track_uid) {
+                    let _ = db.upsert_track(&track, None);
+                    match db.add_track_to_playlist(&playlist_id, &track.uid) {
                         Ok(()) => {
                             self.playlists = db.list_playlists().unwrap_or_default();
                             if matches!(&self.nav, ActiveNav::Playlist(cur) if cur == &playlist_id) {
                                 self.playlist_tracks =
                                     db.get_playlist_tracks(&playlist_id).unwrap_or_default();
                             }
+                            self.status_toast = Some(format!("Added \"{}\" to playlist", track.title));
                         }
                         Err(e) => self.status_toast = Some(e.to_string()),
                     }
@@ -666,6 +752,10 @@ impl LumeApp {
             }
             Message::SearchInputChanged(val) => {
                 self.search_query = val;
+                if self.search_query.trim().is_empty() {
+                    self.ytm_search_results.clear();
+                    self.searching_ytm = false;
+                }
                 self.refresh_search_results();
                 if !self.search_query.trim().is_empty()
                     && matches!(self.nav, ActiveNav::LocalFiles | ActiveNav::LikedSongs)
@@ -676,9 +766,60 @@ impl LumeApp {
             Message::SearchSubmitted => {
                 self.nav = ActiveNav::Search;
                 self.refresh_search_results();
+                let query = self.search_query.trim().to_string();
+                if !query.is_empty()
+                    && matches!(
+                        self.source_filter,
+                        SourceFilter::All | SourceFilter::YouTubeMusic
+                    )
+                {
+                    self.search_request_id = self.search_request_id.wrapping_add(1);
+                    let req_id = self.search_request_id;
+                    self.searching_ytm = true;
+                    return self.spawn_ytm_search_task(query, req_id);
+                }
             }
             Message::SourceFilterChanged(filter) => {
                 self.source_filter = filter;
+                let query = self.search_query.trim().to_string();
+                if matches!(self.nav, ActiveNav::Search)
+                    && matches!(filter, SourceFilter::YouTubeMusic | SourceFilter::All)
+                    && !query.is_empty()
+                    && self.ytm_search_results.is_empty()
+                    && !self.searching_ytm
+                {
+                    self.search_request_id = self.search_request_id.wrapping_add(1);
+                    let req_id = self.search_request_id;
+                    self.searching_ytm = true;
+                    return self.spawn_ytm_search_task(query, req_id);
+                }
+            }
+            Message::YtmSearchFinished { request_id, result } => {
+                if request_id != self.search_request_id {
+                    return Task::none();
+                }
+                self.searching_ytm = false;
+                match result {
+                    Ok(mut tracks) => {
+                        let liked_uids: HashSet<String> = self
+                            .liked_tracks
+                            .iter()
+                            .map(|t| t.uid.clone())
+                            .collect();
+                        for t in &mut tracks {
+                            if liked_uids.contains(&t.uid) {
+                                t.is_liked = true;
+                            }
+                        }
+                        let keys = self.missing_art_keys(&tracks);
+                        self.ytm_search_results = tracks;
+                        self.refresh_search_results();
+                        return self.preload_thumbnails_task(keys);
+                    }
+                    Err(err) => {
+                        self.status_toast = Some(format!("YouTube Music search failed: {err}"));
+                    }
+                }
             }
             Message::PlayTrackList {
                 tracks,
@@ -702,11 +843,17 @@ impl LumeApp {
             Message::ToggleLike(track) => {
                 let next_liked = !track.is_liked;
                 if let Ok(db) = self.db.lock() {
+                    let _ = db.upsert_track(&track, None);
                     let _ = db.set_local_favorite(&track.uid, next_liked);
                     self.local_tracks = db.list_local_tracks().unwrap_or_default();
                     self.liked_tracks = db.list_unified_liked_tracks().unwrap_or_default();
                     if let ActiveNav::Playlist(pl_id) = &self.nav {
                         self.playlist_tracks = db.get_playlist_tracks(pl_id).unwrap_or_default();
+                    }
+                }
+                for t in &mut self.ytm_search_results {
+                    if t.uid == track.uid {
+                        t.is_liked = next_liked;
                     }
                 }
                 self.refresh_search_results();
@@ -829,16 +976,72 @@ impl LumeApp {
                     }
                 }
             }
+            Message::StreamResolved {
+                request_id,
+                track,
+                result,
+            } => {
+                if request_id != self.play_request_id {
+                    return Task::none();
+                }
+                self.resolving_stream = false;
+                match result {
+                    Ok(ResolvedStream::HttpUrl { url, source }) => {
+                        self.source_used = Some(source);
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.send(AudioCommand::LoadHttpStream {
+                                url,
+                                track_uid: track.uid,
+                                duration_ms: track.duration_ms,
+                                mime_hint: Some("m4a".to_string()),
+                            });
+                        }
+                    }
+                    Ok(ResolvedStream::LocalFile(path)) => {
+                        self.source_used = Some(PlaybackSourceUsed::LocalFile);
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.send(AudioCommand::LoadLocal {
+                                path,
+                                track_uid: track.uid,
+                                duration_ms: track.duration_ms,
+                            });
+                        }
+                    }
+                    Ok(ResolvedStream::SpotifyTrack { .. }) => {
+                        self.status = PlaybackStatus::Stopped;
+                        self.status_toast = Some(
+                            "Spotify native playback arrives in Phase 3.".to_string(),
+                        );
+                    }
+                    Err(err) => {
+                        self.status = PlaybackStatus::Stopped;
+                        self.smtc.set_playback(PlaybackStatus::Stopped, 0);
+                        self.status_toast = Some(err);
+                    }
+                }
+            }
             Message::PaletteLoaded {
                 track_uid,
+                art_key,
                 palette,
                 art_bytes,
                 art_blur_rgba,
             } => {
+                let handle_key = art_key.clone().unwrap_or_else(|| track_uid.clone());
                 if let Some(bytes) = art_bytes {
-                    self.insert_art_handle(track_uid.clone(), image::Handle::from_bytes(bytes));
+                    self.insert_art_handle(handle_key.clone(), image::Handle::from_bytes(bytes));
                 }
                 if self.queue.current().map(|t| t.uid.as_str()) == Some(track_uid.as_str()) {
+                    if let Some(track) = self.queue.current() {
+                        let cover_path = self
+                            .art_cache
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.art_path(&handle_key));
+                        if cover_path.is_some() {
+                            self.smtc.set_metadata(Some(track), cover_path.as_deref());
+                        }
+                    }
                     self.art_blur_rgba = art_blur_rgba;
                     self.art_blur_version = self.art_blur_version.wrapping_add(1);
                     self.prev_palette = self.display_palette;
@@ -882,6 +1085,31 @@ impl LumeApp {
             Message::SetPreferYoutubeFallback(enabled) => {
                 self.config.prefer_youtube_fallback = enabled;
                 let _ = self.config.save(&self.config_path);
+            }
+            Message::PickYtDlpBinary => {
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("yt-dlp executable", &["exe", "cmd", "bat"])
+                            .pick_file()
+                            .await
+                            .map(|h| h.path().to_path_buf())
+                    },
+                    Message::YtDlpPicked,
+                );
+            }
+            Message::YtDlpPicked(Some(path)) => {
+                self.config.yt_dlp_path = Some(path);
+                let _ = self.config.save(&self.config_path);
+                self.yt_dlp_detected = detect_yt_dlp_binary(self.config.yt_dlp_path.as_deref());
+                self.status_toast = Some("Saved yt-dlp fallback path.".to_string());
+            }
+            Message::YtDlpPicked(None) => {}
+            Message::ClearYtDlpBinary => {
+                self.config.yt_dlp_path = None;
+                let _ = self.config.save(&self.config_path);
+                self.yt_dlp_detected = detect_yt_dlp_binary(None);
+                self.status_toast = Some("Cleared custom yt-dlp path (using PATH auto-detect).".to_string());
             }
             Message::PickLocalFolder => {
                 return Task::perform(
@@ -948,6 +1176,10 @@ impl LumeApp {
             }
             Message::Audio(ev) => match ev {
                 AudioEvent::StateChanged(st) => {
+                    if st == PlaybackStatus::Stopped && self.resolving_stream {
+                        // Ignore stale Stop event from cancelling the previous track while resolving next stream.
+                        return Task::none();
+                    }
                     self.status = st;
                     self.smtc.set_playback(st, self.position_ms);
                 }
@@ -1102,6 +1334,7 @@ impl LumeApp {
                             &self.config,
                             self.scanning_folders,
                             self.scan_summary.as_deref(),
+                            self.yt_dlp_detected.as_deref(),
                             accent,
                         ),
                     ]
@@ -1120,6 +1353,7 @@ impl LumeApp {
                         nav: &self.nav,
                         search_query: &self.search_query,
                         source_filter: self.source_filter,
+                        searching_remote: self.searching_ytm,
                         playlists: &self.playlists,
                         visible_tracks,
                         active_track_uid: self.queue.current().map(|t| t.uid.as_str()),
@@ -1265,11 +1499,29 @@ impl LumeApp {
     }
 
     fn refresh_search_results(&mut self) {
-        if let Ok(db) = self.db.lock() {
-            self.search_results = db
-                .search_cached_tracks(&self.search_query, 200)
-                .unwrap_or_default();
+        let cached = if let Ok(db) = self.db.lock() {
+            db.search_cached_tracks(&self.search_query, 200)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.search_results = merge_search_results(cached, self.ytm_search_results.clone());
+    }
+
+    fn missing_art_keys(&self, tracks: &[Track]) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for t in tracks {
+            if let Some(key) = &t.artwork_ref {
+                if !self.art_handles.contains_key(key) && seen.insert(key.clone()) {
+                    out.push(key.clone());
+                    if out.len() >= MAX_IN_MEM_ART_HANDLES {
+                        break;
+                    }
+                }
+            }
         }
+        out
     }
 
     fn handle_play_pause_toggle(&mut self) -> Task<Message> {
@@ -1288,7 +1540,10 @@ impl LumeApp {
                 self.status = PlaybackStatus::Playing;
                 self.smtc.set_playback(self.status, self.position_ms);
             }
-            PlaybackStatus::Stopped | PlaybackStatus::Buffering => {
+            PlaybackStatus::Buffering => {
+                self.stop_playback();
+            }
+            PlaybackStatus::Stopped => {
                 if let Some(track) = self.queue.current().cloned() {
                     return self.start_playing_track(track);
                 }
@@ -1298,6 +1553,8 @@ impl LumeApp {
     }
 
     fn start_playing_track(&mut self, track: Track) -> Task<Message> {
+        self.play_request_id = self.play_request_id.wrapping_add(1);
+        let req_id = self.play_request_id;
         self.position_ms = 0;
         self.duration_ms = track.duration_ms;
         self.lyrics_spring.snap_to(0.0);
@@ -1320,6 +1577,7 @@ impl LumeApp {
 
         match &track.source {
             TrackSource::Local { path } => {
+                self.resolving_stream = false;
                 self.source_used = Some(PlaybackSourceUsed::LocalFile);
                 if let Some(audio) = &self.audio {
                     let _ = audio.send(AudioCommand::LoadLocal {
@@ -1330,10 +1588,21 @@ impl LumeApp {
                 }
             }
             TrackSource::YouTubeMusic { .. } => {
+                if let Ok(db) = self.db.lock() {
+                    let _ = db.upsert_track(&track, None);
+                }
+                self.resolving_stream = true;
                 self.source_used = Some(PlaybackSourceUsed::YouTubeDirect);
-                self.status_toast = Some("YouTube Music playback arrives in Phase 2.".to_string());
+                self.status = PlaybackStatus::Buffering;
+                self.status_toast = None;
+                if let Some(audio) = &self.audio {
+                    let _ = audio.send(AudioCommand::Stop);
+                }
+                self.smtc.set_playback(PlaybackStatus::Buffering, 0);
+                tasks.push(self.resolve_ytm_stream_task(req_id, track));
             }
             TrackSource::Spotify { .. } => {
+                self.resolving_stream = false;
                 self.source_used = Some(PlaybackSourceUsed::SpotifyNative);
                 self.status_toast =
                     Some("Spotify playback & auto-fallback arrive in Phase 3.".to_string());
@@ -1344,6 +1613,8 @@ impl LumeApp {
     }
 
     fn stop_playback(&mut self) {
+        self.play_request_id = self.play_request_id.wrapping_add(1);
+        self.resolving_stream = false;
         self.status = PlaybackStatus::Stopped;
         self.position_ms = 0;
         if let Some(audio) = &self.audio {
@@ -1387,25 +1658,32 @@ impl LumeApp {
 
         Task::perform(
             async move {
+                let bytes = match art_key.clone() {
+                    Some(key) => fetch_or_cache_art(art_cache, key).await,
+                    None => None,
+                };
                 tokio::task::spawn_blocking(move || {
-                    let bytes = art_key.and_then(|key| {
-                        art_cache
-                            .lock()
-                            .ok()
-                            .and_then(|mut cache| cache.get(&key).ok().flatten())
-                    });
                     let palette = bytes
                         .as_deref()
                         .map(extract_palette)
                         .unwrap_or_else(AlbumPalette::default_dark);
                     let blur_rgba = bytes.as_deref().and_then(decode_art_blur_rgba).map(Arc::new);
-                    (track_uid, palette, bytes, blur_rgba)
+                    (track_uid, art_key, palette, bytes, blur_rgba)
                 })
                 .await
-                .unwrap_or_else(|_| (String::new(), AlbumPalette::default_dark(), None, None))
+                .unwrap_or_else(|_| {
+                    (
+                        String::new(),
+                        None,
+                        AlbumPalette::default_dark(),
+                        None,
+                        None,
+                    )
+                })
             },
-            |(track_uid, palette, art_bytes, art_blur_rgba)| Message::PaletteLoaded {
+            |(track_uid, art_key, palette, art_bytes, art_blur_rgba)| Message::PaletteLoaded {
                 track_uid,
+                art_key,
                 palette,
                 art_bytes,
                 art_blur_rgba,
@@ -1420,21 +1698,65 @@ impl LumeApp {
         let art_cache = Arc::clone(&self.art_cache);
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || {
-                    let mut out = Vec::new();
-                    if let Ok(mut cache) = art_cache.lock() {
-                        for key in keys {
-                            if let Ok(Some(bytes)) = cache.get(&key) {
-                                out.push((key, bytes));
-                            }
+                let mut out = Vec::new();
+                for chunk in keys.chunks(6) {
+                    let mut set = tokio::task::JoinSet::new();
+                    for key in chunk {
+                        let cache = Arc::clone(&art_cache);
+                        let key = key.clone();
+                        set.spawn(async move {
+                            fetch_or_cache_art(cache, key.clone())
+                                .await
+                                .map(|bytes| (key, bytes))
+                        });
+                    }
+                    while let Some(joined) = set.join_next().await {
+                        if let Ok(Some(pair)) = joined {
+                            out.push(pair);
                         }
                     }
-                    out
-                })
-                .await
-                .unwrap_or_default()
+                }
+                out
             },
             Message::ThumbnailsLoaded,
+        )
+    }
+
+    fn spawn_ytm_search_task(&self, query: String, request_id: u64) -> Task<Message> {
+        let yt_dlp_path = self.config.yt_dlp_path.clone();
+        Task::perform(
+            async move {
+                let provider = YouTubeMusicProvider::new(
+                    YouTubeMusicProvider::default_cache_dir(),
+                    yt_dlp_path,
+                )
+                .map_err(|e| e.to_string())?;
+                provider.search(&query, 20).await.map_err(|e| e.to_string())
+            },
+            move |result| Message::YtmSearchFinished { request_id, result },
+        )
+    }
+
+    fn resolve_ytm_stream_task(&self, request_id: u64, track: Track) -> Task<Message> {
+        let yt_dlp_path = self.config.yt_dlp_path.clone();
+        let track_for_msg = track.clone();
+        Task::perform(
+            async move {
+                let provider = YouTubeMusicProvider::new(
+                    YouTubeMusicProvider::default_cache_dir(),
+                    yt_dlp_path,
+                )
+                .map_err(|e| e.to_string())?;
+                provider
+                    .resolve_stream(&track)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::StreamResolved {
+                request_id,
+                track: track_for_msg,
+                result,
+            },
         )
     }
 
@@ -1571,5 +1893,65 @@ mod tests {
         assert!(should_tick_frames(true, false, false, true, false, true));
         assert!(should_tick_frames(true, false, false, false, true, true));
         assert!(should_tick_frames(true, false, false, false, false, false));
+    }
+
+    #[test]
+    fn remote_art_url_helper_detects_http_and_https_only() {
+        assert!(is_remote_art_url("https://lh3.googleusercontent.com/abc=w544-h544"));
+        assert!(is_remote_art_url("http://127.0.0.1:8080/cover.jpg"));
+        assert!(!is_remote_art_url("local:abcdef1234"));
+        assert!(!is_remote_art_url("ytm:dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn merge_search_results_deduplicates_uid_preserving_cached_liked_state() {
+        let local = Track {
+            uid: "local:1".into(),
+            source: TrackSource::Local {
+                path: PathBuf::from(r"D:\Music\A.mp3"),
+            },
+            title: "Song A".into(),
+            artists: vec!["Artist".into()],
+            album: None,
+            duration_ms: 120_000,
+            artwork_ref: None,
+            is_liked: false,
+        };
+        let cached_ytm = Track {
+            uid: "ytm:vid1".into(),
+            source: TrackSource::YouTubeMusic {
+                video_id: "vid1".into(),
+            },
+            title: "YTM Liked".into(),
+            artists: vec!["Band".into()],
+            album: None,
+            duration_ms: 180_000,
+            artwork_ref: Some("https://lh3.googleusercontent.com/cover".into()),
+            is_liked: true,
+        };
+        let fresh_ytm_dup = Track {
+            is_liked: false,
+            ..cached_ytm.clone()
+        };
+        let fresh_ytm_new = Track {
+            uid: "ytm:vid2".into(),
+            source: TrackSource::YouTubeMusic {
+                video_id: "vid2".into(),
+            },
+            title: "YTM Fresh".into(),
+            artists: vec!["Band".into()],
+            album: None,
+            duration_ms: 200_000,
+            artwork_ref: None,
+            is_liked: false,
+        };
+
+        let merged = merge_search_results(
+            vec![local, cached_ytm],
+            vec![fresh_ytm_dup, fresh_ytm_new],
+        );
+        assert_eq!(merged.len(), 3);
+        let ytm1 = merged.iter().find(|t| t.uid == "ytm:vid1").unwrap();
+        assert!(ytm1.is_liked, "cached liked state must be preserved");
     }
 }

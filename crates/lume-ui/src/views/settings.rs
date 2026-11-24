@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use iced::widget::{button, column, container, row, scrollable, space, text, toggler};
 use iced::{Alignment, Background, Color, Element, Length};
 use lume_storage::{AppConfig, GlassmorphismMode, LyricsVisualMode};
@@ -14,6 +16,7 @@ pub fn view_settings<'a>(
     config: &'a AppConfig,
     scanning: bool,
     scan_summary: Option<&'a str>,
+    yt_dlp_detected: Option<&'a Path>,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
 
@@ -197,12 +200,75 @@ pub fn view_settings<'a>(
     ]
     .spacing(12);
 
+    let yt_dlp_status = if let Some(cfg_path) = &config.yt_dlp_path {
+        if cfg_path.is_file() {
+            format!("Configured fallback: {}", cfg_path.display())
+        } else {
+            format!(
+                "Configured path missing: {} (will check PATH instead)",
+                cfg_path.display()
+            )
+        }
+    } else if let Some(found) = yt_dlp_detected {
+        format!("Auto-detected on PATH: {}", found.display())
+    } else {
+        "Not detected on PATH — RustyPipe works anonymously by default. Install yt-dlp (`winget install yt-dlp.yt-dlp`) or pick yt-dlp.exe for anti-bot fallback.".to_string()
+    };
+
+    let mut ytm_actions = row![
+        button(
+            row![
+                icon_folder(13.0, accent.on_primary),
+                text("Select yt-dlp.exe")
+                    .size(12)
+                    .font(FONT_SEMIBOLD)
+                    .color(accent.on_primary),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 16])
+        .style(primary_pill_button_style(accent))
+        .on_press(Message::PickYtDlpBinary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    if config.yt_dlp_path.is_some() {
+        ytm_actions = ytm_actions.push(
+            button(text("Clear").size(12).font(FONT_MEDIUM))
+                .padding([8, 14])
+                .style(glass_button_style(false, accent))
+                .on_press(Message::ClearYtDlpBinary),
+        );
+    }
+
+    let youtube_section = column![
+        row![
+            text("YouTube Music & yt-dlp Fallback")
+                .size(16)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_PRIMARY),
+            space().width(Length::Fill),
+            ytm_actions,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        text(yt_dlp_status).size(12).color(TEXT_SECONDARY),
+    ]
+    .spacing(10);
+
     let appearance_card = container(appearance.width(Length::Fill))
         .padding(18)
         .width(Length::Fill)
         .style(glass_card_style);
 
     let behavior_card = container(behavior.width(Length::Fill))
+        .padding(18)
+        .width(Length::Fill)
+        .style(glass_card_style);
+
+    let youtube_card = container(youtube_section.width(Length::Fill))
         .padding(18)
         .width(Length::Fill)
         .style(glass_card_style);
@@ -218,6 +284,7 @@ pub fn view_settings<'a>(
                 text("Settings").size(24).font(FONT_BOLD).color(TEXT_PRIMARY),
                 appearance_card,
                 behavior_card,
+                youtube_card,
                 local_library_card,
             ]
             .spacing(16)

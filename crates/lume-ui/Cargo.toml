@@ -21,6 +21,7 @@ lume-core.workspace = true
 lume-providers.workspace = true
 lume-storage.workspace = true
 raw-window-handle.workspace = true
+reqwest.workspace = true
 rfd.workspace = true
 souvlaki.workspace = true
 tokio.workspace = true

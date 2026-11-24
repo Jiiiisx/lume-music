@@ -3178,6 +3178,7 @@ dependencies = [
  "lume-providers",
  "lume-storage",
  "raw-window-handle",
+ "reqwest 0.13.5",
  "rfd",
  "souvlaki",
  "tokio",

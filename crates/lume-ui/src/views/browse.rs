@@ -79,6 +79,7 @@ pub struct BrowseViewProps<'a> {
     pub nav: &'a ActiveNav,
     pub search_query: &'a str,
     pub source_filter: SourceFilter,
+    pub searching_remote: bool,
     pub playlists: &'a [Playlist],
     pub visible_tracks: &'a [Track],
     pub active_track_uid: Option<&'a str>,
@@ -758,6 +759,18 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
     let displayed_count: usize = grouped.iter().map(|(_, items)| items.len()).sum();
 
     let mut content_col = column![hero].spacing(12);
+    if props.searching_remote && matches!(props.nav, ActiveNav::Search) {
+        content_col = content_col.push(
+            container(
+                text(format!("Searching YouTube Music for \"{}\"...", props.search_query.trim()))
+                    .size(12)
+                    .font(FONT_MEDIUM)
+                    .color(props.accent.light),
+            )
+            .padding([8, 14])
+            .style(glass_elevated_style),
+        );
+    }
     if let Some(toast) = props.status_banner {
         content_col = content_col.push(
             container(
@@ -876,9 +889,9 @@ fn empty_state_card<'a>(nav: &'a ActiveNav, accent: AccentTheme) -> Element<'a, 
             None,
         ),
         ActiveNav::Search => (
-            "Explore your workspace",
-            "Use the search bar above to filter tracks, or add a local music folder first.",
-            Some(("Add Music Folder", Message::PickLocalFolder)),
+            "Search Local & YouTube Music",
+            "Type to filter Local tracks, or press Enter to search YouTube Music anonymously.",
+            None,
         ),
         ActiveNav::Playlist(_) => (
             "This playlist is empty",
@@ -1063,7 +1076,7 @@ fn track_row<'a>(
                 .style(glass_button_style(false, props.accent))
                 .on_press(Message::AddTrackToPlaylist {
                     playlist_id: pl.id.clone(),
-                    track_uid: track.uid.clone(),
+                    track: track.clone(),
                 }),
         );
     }

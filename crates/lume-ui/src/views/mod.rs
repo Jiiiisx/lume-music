@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lume_audio::AudioEvent;
-use lume_core::{LyricsData, PlaybackSourceUsed, PlaybackStatus, RepeatMode, Track};
+use lume_core::{
+    LyricsData, PlaybackSourceUsed, PlaybackStatus, RepeatMode, ResolvedStream, Track,
+};
 use lume_providers::ScanReport;
 use lume_storage::{GlassmorphismMode, LyricsVisualMode};
 
@@ -83,6 +85,10 @@ pub enum Message {
     SearchInputChanged(String),
     SearchSubmitted,
     SourceFilterChanged(SourceFilter),
+    YtmSearchFinished {
+        request_id: u64,
+        result: Result<Vec<Track>, String>,
+    },
 
     // Playlists & track actions
     NewPlaylistNameChanged(String),
@@ -96,7 +102,7 @@ pub enum Message {
     ImportSpotifyUrlSubmitted,
     AddTrackToPlaylist {
         playlist_id: String,
-        track_uid: String,
+        track: Track,
     },
     RemoveTrackFromPlaylist {
         playlist_id: String,
@@ -135,14 +141,20 @@ pub enum Message {
     QueueRemoveAt(usize),
     ClearQueue,
 
-    // Lyrics & artwork async completions
+    // Lyrics, streaming & artwork async completions
     RetryLyrics,
     LyricsLoaded {
         track_uid: String,
         result: Result<Option<LyricsData>, String>,
     },
+    StreamResolved {
+        request_id: u64,
+        track: Track,
+        result: Result<ResolvedStream, String>,
+    },
     PaletteLoaded {
         track_uid: String,
+        art_key: Option<String>,
         palette: AlbumPalette,
         art_bytes: Option<Vec<u8>>,
         art_blur_rgba: Option<Arc<Vec<u8>>>,
@@ -155,6 +167,9 @@ pub enum Message {
     SetReducedMotion(bool),
     SetCloseToTray(bool),
     SetPreferYoutubeFallback(bool),
+    PickYtDlpBinary,
+    YtDlpPicked(Option<PathBuf>),
+    ClearYtDlpBinary,
     PickLocalFolder,
     FolderPicked(Option<PathBuf>),
     RemoveLocalFolder(PathBuf),
