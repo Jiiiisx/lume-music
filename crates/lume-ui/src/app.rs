@@ -41,7 +41,7 @@ use crate::views::queue_drawer::view_queue_drawer;
 use crate::views::settings::view_settings;
 use crate::views::titlebar::view_titlebar;
 use crate::views::{
-    ActiveNav, Message, NowPlayingInfo, SmtcAction, SourceFilter, SpotifySearchError,
+    ActiveNav, Message, NowPlayingInfo, PlaylistSort, SmtcAction, SourceFilter, SpotifySearchError,
     SpotifySettingsProps, SpotifySyncReport, ViewMode,
 };
 
@@ -264,6 +264,7 @@ pub struct LumeApp {
 
     search_query: String,
     source_filter: SourceFilter,
+    playlist_sorts: HashMap<String, PlaylistSort>,
     playlists: Vec<Playlist>,
     local_tracks: Vec<Track>,
     liked_tracks: Vec<Track>,
@@ -410,6 +411,7 @@ impl LumeApp {
             queue_open: false,
             search_query: String::new(),
             source_filter: SourceFilter::All,
+            playlist_sorts: HashMap::new(),
             playlists,
             local_tracks,
             liked_tracks,
@@ -1093,6 +1095,22 @@ impl LumeApp {
                         }
                         Err(e) => self.status_toast = Some(e.to_string()),
                     }
+                }
+            }
+            Message::SetPlaylistSort(field) => {
+                if let ActiveNav::Playlist(pl_id) = &self.nav {
+                    self.playlist_sorts
+                        .entry(pl_id.clone())
+                        .or_default()
+                        .select(field);
+                }
+            }
+            Message::TogglePlaylistSortDirection => {
+                if let ActiveNav::Playlist(pl_id) = &self.nav {
+                    self.playlist_sorts
+                        .entry(pl_id.clone())
+                        .or_default()
+                        .toggle_direction();
                 }
             }
             Message::ToggleTrackMenu(uid) => {
@@ -2161,10 +2179,19 @@ impl LumeApp {
                         self.status,
                         PlaybackStatus::Playing | PlaybackStatus::Buffering
                     );
+                    let playlist_sort = match &self.nav {
+                        ActiveNav::Playlist(pl_id) => self
+                            .playlist_sorts
+                            .get(pl_id)
+                            .copied()
+                            .unwrap_or_default(),
+                        _ => PlaylistSort::default(),
+                    };
                     view_browse(BrowseViewProps {
                         nav: &self.nav,
                         search_query: &self.search_query,
                         source_filter: self.source_filter,
+                        playlist_sort,
                         searching_remote: self.searching_ytm || self.searching_spotify,
                         playlists: &self.playlists,
                         visible_tracks,

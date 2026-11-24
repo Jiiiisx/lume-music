@@ -7,7 +7,9 @@ use iced::{Alignment, Background, Color, Element, Length};
 use lume_core::{Playlist, Track, TrackSource};
 
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
-use crate::views::{ActiveNav, Message, SourceFilter, ViewMode};
+use crate::views::{
+    ActiveNav, Message, PlaylistSort, PlaylistSortField, SortDirection, SourceFilter, ViewMode,
+};
 use crate::widgets::{
     cover_art_widget, ghost_button_style, glass_button_style, glass_elevated_style,
     glass_input_style, glass_panel, glass_sidebar_style, hero_banner_style, icon_chevron_down,
@@ -66,6 +68,102 @@ pub fn group_tracks_by_source<'a>(
     groups
 }
 
+pub fn matches_source_filter(source: &TrackSource, filter: SourceFilter) -> bool {
+    match filter {
+        SourceFilter::All => true,
+        SourceFilter::Spotify => matches!(source, TrackSource::Spotify { .. }),
+        SourceFilter::YouTubeMusic => matches!(source, TrackSource::YouTubeMusic { .. }),
+        SourceFilter::Local => matches!(source, TrackSource::Local { .. }),
+    }
+}
+
+/// Sorts playlist tracks according to `sort` while preserving each track's original DB `position`
+/// so delete/reorder mutations always target the exact underlying playlist row.
+pub fn sort_playlist_tracks<'a>(
+    tracks: &'a [Track],
+    sort: PlaylistSort,
+) -> Vec<(usize, &'a Track)> {
+    let mut indexed: Vec<(usize, &'a Track)> = tracks.iter().enumerate().collect();
+    let desc = sort.direction == SortDirection::Desc;
+
+    match sort.field {
+        PlaylistSortField::Custom | PlaylistSortField::RecentlyAdded => {
+            if desc {
+                indexed.reverse();
+            }
+        }
+        PlaylistSortField::Title => {
+            indexed.sort_by(|(ia, a), (ib, b)| {
+                let ord = a
+                    .title
+                    .to_ascii_lowercase()
+                    .cmp(&b.title.to_ascii_lowercase())
+                    .then_with(|| {
+                        a.artist_display()
+                            .to_ascii_lowercase()
+                            .cmp(&b.artist_display().to_ascii_lowercase())
+                    })
+                    .then_with(|| ia.cmp(ib));
+                if desc { ord.reverse() } else { ord }
+            });
+        }
+        PlaylistSortField::Artist => {
+            indexed.sort_by(|(ia, a), (ib, b)| {
+                let ord = a
+                    .artist_display()
+                    .to_ascii_lowercase()
+                    .cmp(&b.artist_display().to_ascii_lowercase())
+                    .then_with(|| {
+                        a.title
+                            .to_ascii_lowercase()
+                            .cmp(&b.title.to_ascii_lowercase())
+                    })
+                    .then_with(|| ia.cmp(ib));
+                if desc { ord.reverse() } else { ord }
+            });
+        }
+        PlaylistSortField::Album => {
+            indexed.sort_by(|(ia, a), (ib, b)| {
+                let alb_a = a.album.as_deref().map(str::trim).unwrap_or("");
+                let alb_b = b.album.as_deref().map(str::trim).unwrap_or("");
+                // Keep empty albums at the bottom regardless of Asc/Desc.
+                match (alb_a.is_empty(), alb_b.is_empty()) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => {
+                        let ord = alb_a
+                            .to_ascii_lowercase()
+                            .cmp(&alb_b.to_ascii_lowercase())
+                            .then_with(|| {
+                                a.title
+                                    .to_ascii_lowercase()
+                                    .cmp(&b.title.to_ascii_lowercase())
+                            })
+                            .then_with(|| ia.cmp(ib));
+                        if desc { ord.reverse() } else { ord }
+                    }
+                }
+            });
+        }
+        PlaylistSortField::Duration => {
+            indexed.sort_by(|(ia, a), (ib, b)| {
+                let ord = a
+                    .duration_ms
+                    .cmp(&b.duration_ms)
+                    .then_with(|| {
+                        a.title
+                            .to_ascii_lowercase()
+                            .cmp(&b.title.to_ascii_lowercase())
+                    })
+                    .then_with(|| ia.cmp(ib));
+                if desc { ord.reverse() } else { ord }
+            });
+        }
+    }
+
+    indexed
+}
+
 pub fn validate_playlist_name(raw: &str) -> Result<String, &'static str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -79,6 +177,7 @@ pub struct BrowseViewProps<'a> {
     pub nav: &'a ActiveNav,
     pub search_query: &'a str,
     pub source_filter: SourceFilter,
+    pub playlist_sort: PlaylistSort,
     pub searching_remote: bool,
     pub playlists: &'a [Playlist],
     pub visible_tracks: &'a [Track],
@@ -508,7 +607,10 @@ pub fn view_sidebar<'a>(
     .into()
 }
 
-fn build_hero_banner<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
+fn build_hero_banner<'a>(
+    props: &BrowseViewProps<'a>,
+    playlist_play_order: Option<&[Track]>,
+) -> Element<'a, Message> {
     let accent = props.accent;
     let total_tracks = props.visible_tracks.len();
     let liked_count = props.visible_tracks.iter().filter(|t| t.is_liked).count();
@@ -559,7 +661,8 @@ fn build_hero_banner<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         };
 
         let mut actions = row![].spacing(8).align_y(Alignment::Center);
-        if !props.visible_tracks.is_empty() {
+        let hero_play_tracks = playlist_play_order.unwrap_or(props.visible_tracks);
+        if !hero_play_tracks.is_empty() {
             actions = actions.push(
                 button(
                     row![
@@ -575,7 +678,7 @@ fn build_hero_banner<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
                 .padding([8, 16])
                 .style(primary_pill_button_style(props.accent))
                 .on_press(Message::PlayTrackList {
-                    tracks: props.visible_tracks.to_vec(),
+                    tracks: hero_play_tracks.to_vec(),
                     start_index: 0,
                 }),
             );
@@ -827,6 +930,73 @@ fn build_hero_banner<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
     .into()
 }
 
+fn build_playlist_sort_bar<'a>(sort: PlaylistSort, accent: AccentTheme) -> Element<'a, Message> {
+    let sort_chip = |label: &'static str, field: PlaylistSortField| -> Element<'a, Message> {
+        let active = sort.field == field;
+        let text_col = if active {
+            accent.on_primary
+        } else {
+            TEXT_SECONDARY
+        };
+        let mut inner = row![text(label).size(11).font(FONT_MEDIUM).color(text_col)]
+            .spacing(4)
+            .align_y(Alignment::Center);
+        if active && field != PlaylistSortField::Custom {
+            let chev = if sort.direction == SortDirection::Asc {
+                icon_chevron_up(11.0, accent.on_primary)
+            } else {
+                icon_chevron_down(11.0, accent.on_primary)
+            };
+            inner = inner.push(chev);
+        }
+        button(inner)
+            .padding([5, 11])
+            .style(glass_button_style(active, accent))
+            .on_press(Message::SetPlaylistSort(field))
+            .into()
+    };
+
+    let dir_icon = if sort.direction == SortDirection::Asc {
+        icon_chevron_up(12.0, ICON_LIGHT)
+    } else {
+        icon_chevron_down(12.0, ICON_LIGHT)
+    };
+    let dir_label = if sort.direction == SortDirection::Asc {
+        "Asc"
+    } else {
+        "Desc"
+    };
+
+    row![
+        text("Sort:")
+            .size(11)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_MUTED),
+        sort_chip("Custom", PlaylistSortField::Custom),
+        sort_chip("Recently Added", PlaylistSortField::RecentlyAdded),
+        sort_chip("Title", PlaylistSortField::Title),
+        sort_chip("Artist", PlaylistSortField::Artist),
+        sort_chip("Album", PlaylistSortField::Album),
+        sort_chip("Duration", PlaylistSortField::Duration),
+        space().width(Length::Fill),
+        button(
+            row![
+                dir_icon,
+                text(dir_label).size(11).font(FONT_MEDIUM).color(TEXT_PRIMARY),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding([5, 10])
+        .style(glass_button_style(false, accent))
+        .on_press(Message::TogglePlaylistSortDirection),
+    ]
+    .spacing(6)
+    .padding([0, 6])
+    .align_y(Alignment::Center)
+    .into()
+}
+
 fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
     let active_filter_label = match props.source_filter {
         SourceFilter::All => "All Sources",
@@ -835,10 +1005,39 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         SourceFilter::Local => "Local",
     };
 
-    let hero = build_hero_banner(props);
+    let is_playlist_view = matches!(props.nav, ActiveNav::Playlist(_));
+    let sorted_playlist_entries: Vec<(usize, &Track)> = if is_playlist_view {
+        sort_playlist_tracks(props.visible_tracks, props.playlist_sort)
+            .into_iter()
+            .filter(|(_, t)| matches_source_filter(&t.source, props.source_filter))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let sorted_playlist_tracks: Vec<Track> = if is_playlist_view {
+        sorted_playlist_entries
+            .iter()
+            .map(|(_, t)| (*t).clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let grouped = group_tracks_by_source(props.visible_tracks, props.source_filter);
-    let displayed_count: usize = grouped.iter().map(|(_, items)| items.len()).sum();
+    let hero = build_hero_banner(
+        props,
+        is_playlist_view.then_some(sorted_playlist_tracks.as_slice()),
+    );
+
+    let grouped = if is_playlist_view {
+        Vec::new()
+    } else {
+        group_tracks_by_source(props.visible_tracks, props.source_filter)
+    };
+    let displayed_count: usize = if is_playlist_view {
+        sorted_playlist_entries.len()
+    } else {
+        grouped.iter().map(|(_, items)| items.len()).sum()
+    };
 
     let mut content_col = column![hero].spacing(12);
     if props.searching_remote && matches!(props.nav, ActiveNav::Search) {
@@ -870,8 +1069,47 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         );
     }
 
+    if is_playlist_view && !props.visible_tracks.is_empty() {
+        content_col = content_col.push(build_playlist_sort_bar(props.playlist_sort, props.accent));
+    }
+
     if displayed_count > 0 {
-        let table_header = column![
+        let header_row: Element<'a, Message> = if is_playlist_view {
+            let col_btn = |label: &'static str, field: PlaylistSortField, width: Length| {
+                let active = props.playlist_sort.field == field;
+                let col = if active { props.accent.light } else { TEXT_MUTED };
+                let mut inner = row![text(label).size(11).color(col)]
+                    .spacing(3)
+                    .align_y(Alignment::Center);
+                if active {
+                    inner = inner.push(if props.playlist_sort.direction == SortDirection::Asc {
+                        icon_chevron_up(10.0, props.accent.light)
+                    } else {
+                        icon_chevron_down(10.0, props.accent.light)
+                    });
+                }
+                button(inner)
+                    .padding([2, 0])
+                    .width(width)
+                    .style(ghost_button_style)
+                    .on_press(Message::SetPlaylistSort(field))
+            };
+            row![
+                col_btn("#", PlaylistSortField::Custom, Length::Fixed(30.0)),
+                col_btn("TITLE", PlaylistSortField::Title, Length::FillPortion(4)),
+                col_btn("ALBUM", PlaylistSortField::Album, Length::FillPortion(3)),
+                text("SOURCE")
+                    .size(11)
+                    .color(TEXT_MUTED)
+                    .width(Length::Fixed(72.0)),
+                col_btn("TIME", PlaylistSortField::Duration, Length::Fixed(48.0)),
+                space().width(Length::Fixed(64.0)),
+            ]
+            .spacing(12)
+            .padding([4, 12])
+            .align_y(Alignment::Center)
+            .into()
+        } else {
             row![
                 text("#")
                     .size(11)
@@ -897,7 +1135,12 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
             ]
             .spacing(12)
             .padding([4, 12])
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            .into()
+        };
+
+        let table_header = column![
+            header_row,
             container(space().height(1))
                 .width(Length::Fill)
                 .style(|_| container::Style {
@@ -923,6 +1166,16 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
             .width(Length::Fill)
             .center_x(Length::Fill),
         );
+    } else if is_playlist_view {
+        for (display_idx, (orig_pos, track)) in sorted_playlist_entries.into_iter().enumerate() {
+            track_list = track_list.push(track_row(
+                props,
+                track,
+                display_idx,
+                orig_pos,
+                &sorted_playlist_tracks,
+            ));
+        }
     } else {
         for (section_title, items) in grouped {
             if props.source_filter == SourceFilter::All {
@@ -936,7 +1189,13 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
                     .iter()
                     .position(|t| t.uid == track.uid)
                     .unwrap_or(0);
-                track_list = track_list.push(track_row(props, track, global_idx));
+                track_list = track_list.push(track_row(
+                    props,
+                    track,
+                    global_idx,
+                    global_idx,
+                    props.visible_tracks,
+                ));
             }
         }
     }
@@ -1034,6 +1293,8 @@ fn track_row<'a>(
     props: &BrowseViewProps<'a>,
     track: &'a Track,
     index: usize,
+    orig_playlist_pos: usize,
+    play_tracks: &[Track],
 ) -> Element<'a, Message> {
     let is_active = props.active_track_uid == Some(track.uid.as_str());
     let menu_open = props.open_track_menu_uid == Some(track.uid.as_str());
@@ -1043,7 +1304,7 @@ fn track_row<'a>(
         .and_then(|k| props.art_handles.get(k));
 
     let play_msg = Message::PlayTrackList {
-        tracks: props.visible_tracks.to_vec(),
+        tracks: play_tracks.to_vec(),
         start_index: index,
     };
 
@@ -1178,27 +1439,29 @@ fn track_row<'a>(
             .iter()
             .any(|p| &p.id == pl_id && p.origin.is_editable())
         {
-            if index > 0 {
+            let allow_manual_reorder = props.playlist_sort == PlaylistSort::default()
+                && props.source_filter == SourceFilter::All;
+            if allow_manual_reorder && orig_playlist_pos > 0 {
                 actions = actions.push(
                     button(icon_chevron_up(14.0, ICON_LIGHT))
                         .padding([6, 8])
                         .style(glass_button_style(false, props.accent))
                         .on_press(Message::ReorderPlaylistTrack {
                             playlist_id: pl_id.clone(),
-                            from: index,
-                            to: index - 1,
+                            from: orig_playlist_pos,
+                            to: orig_playlist_pos - 1,
                         }),
                 );
             }
-            if index + 1 < props.visible_tracks.len() {
+            if allow_manual_reorder && orig_playlist_pos + 1 < props.visible_tracks.len() {
                 actions = actions.push(
                     button(icon_chevron_down(14.0, ICON_LIGHT))
                         .padding([6, 8])
                         .style(glass_button_style(false, props.accent))
                         .on_press(Message::ReorderPlaylistTrack {
                             playlist_id: pl_id.clone(),
-                            from: index,
-                            to: index + 1,
+                            from: orig_playlist_pos,
+                            to: orig_playlist_pos + 1,
                         }),
                 );
             }
@@ -1212,7 +1475,7 @@ fn track_row<'a>(
                 .style(glass_button_style(false, props.accent))
                 .on_press(Message::RemoveTrackFromPlaylist {
                     playlist_id: pl_id.clone(),
-                    position: index,
+                    position: orig_playlist_pos,
                 }),
             );
         }
@@ -1302,5 +1565,68 @@ mod tests {
             validate_playlist_name("  Night Drive  "),
             Ok("Night Drive".into())
         );
+    }
+
+    #[test]
+    fn sorts_playlist_by_recently_added_title_artist_album_and_duration_preserving_orig_pos() {
+        let mut t0 = mk_track(TrackSource::Spotify { id: "s0".into() }, "Yellow");
+        t0.artists = vec!["Coldplay".into()];
+        t0.album = Some("Parachutes".into());
+        t0.duration_ms = 266_000;
+
+        let mut t1 = mk_track(TrackSource::Spotify { id: "s1".into() }, "drunk text");
+        t1.artists = vec!["Henry Moodie".into()];
+        t1.album = None;
+        t1.duration_ms = 187_000;
+
+        let mut t2 = mk_track(TrackSource::Spotify { id: "s2".into() }, "Blinding Lights");
+        t2.artists = vec!["The Weeknd".into()];
+        t2.album = Some("After Hours".into());
+        t2.duration_ms = 200_000;
+
+        let tracks = vec![t0, t1, t2];
+
+        // RecentlyAdded defaults to Desc (newest / last added first).
+        let mut sort = PlaylistSort::default();
+        sort.select(PlaylistSortField::RecentlyAdded);
+        assert_eq!(sort.direction, SortDirection::Desc);
+        let recent: Vec<usize> = sort_playlist_tracks(&tracks, sort)
+            .into_iter()
+            .map(|(orig, _)| orig)
+            .collect();
+        assert_eq!(recent, vec![2, 1, 0]);
+
+        // Title Asc (case-insensitive) then click again flips to Desc.
+        sort.select(PlaylistSortField::Title);
+        assert_eq!(sort.direction, SortDirection::Asc);
+        let by_title: Vec<usize> = sort_playlist_tracks(&tracks, sort)
+            .into_iter()
+            .map(|(orig, _)| orig)
+            .collect();
+        assert_eq!(by_title, vec![2, 1, 0]); // Blinding Lights, drunk text, Yellow
+
+        sort.select(PlaylistSortField::Title);
+        assert_eq!(sort.direction, SortDirection::Desc);
+        let by_title_desc: Vec<usize> = sort_playlist_tracks(&tracks, sort)
+            .into_iter()
+            .map(|(orig, _)| orig)
+            .collect();
+        assert_eq!(by_title_desc, vec![0, 1, 2]);
+
+        // Album Asc keeps empty album (`t1`) at the bottom.
+        sort.select(PlaylistSortField::Album);
+        let by_album: Vec<usize> = sort_playlist_tracks(&tracks, sort)
+            .into_iter()
+            .map(|(orig, _)| orig)
+            .collect();
+        assert_eq!(by_album, vec![2, 0, 1]); // After Hours, Parachutes, None
+
+        // Duration Asc.
+        sort.select(PlaylistSortField::Duration);
+        let by_dur: Vec<usize> = sort_playlist_tracks(&tracks, sort)
+            .into_iter()
+            .map(|(orig, _)| orig)
+            .collect();
+        assert_eq!(by_dur, vec![1, 2, 0]); // 187s, 200s, 266s
     }
 }

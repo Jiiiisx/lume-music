@@ -57,6 +57,62 @@ pub enum SourceFilter {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaylistSortField {
+    #[default]
+    Custom,
+    RecentlyAdded,
+    Title,
+    Artist,
+    Album,
+    Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    pub fn flip(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlaylistSort {
+    pub field: PlaylistSortField,
+    pub direction: SortDirection,
+}
+
+impl PlaylistSort {
+    pub fn select(&mut self, field: PlaylistSortField) {
+        if field == PlaylistSortField::Custom {
+            self.field = PlaylistSortField::Custom;
+            self.direction = SortDirection::Asc;
+            return;
+        }
+        if self.field == field {
+            self.direction = self.direction.flip();
+        } else {
+            self.field = field;
+            self.direction = match field {
+                PlaylistSortField::RecentlyAdded => SortDirection::Desc,
+                _ => SortDirection::Asc,
+            };
+        }
+    }
+
+    pub fn toggle_direction(&mut self) {
+        self.direction = self.direction.flip();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveNav {
     Search,
@@ -148,6 +204,8 @@ pub enum Message {
         from: usize,
         to: usize,
     },
+    SetPlaylistSort(PlaylistSortField),
+    TogglePlaylistSortDirection,
     ToggleTrackMenu(String),
     CloseTrackMenu,
 
