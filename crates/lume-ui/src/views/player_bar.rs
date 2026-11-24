@@ -20,6 +20,14 @@ fn format_mm_ss(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+fn truncate_single_line(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", head.trim_end())
+}
+
 pub fn view_player_bar<'a>(
     info: NowPlayingInfo<'a>,
     active_cover: Option<&'a image::Handle>,
@@ -45,27 +53,55 @@ pub fn view_player_bar<'a>(
         info.source_used.map(|s| s.badge_label()).unwrap_or("Idle")
     };
 
-    let track_click_area = mouse_area(
-        row![
-            cover_art_widget(art, 48.0, 10.0),
-            column![
-                text(title).size(13).font(FONT_SEMIBOLD).color(TEXT_PRIMARY),
-                text(artist).size(11).color(TEXT_SECONDARY),
+    let title_display = truncate_single_line(title, 26);
+    let artist_display = truncate_single_line(&artist, 28);
+
+    let track_click_area = container(
+        mouse_area(
+            row![
+                cover_art_widget(art, 48.0, 10.0),
+                container(
+                    column![
+                        text(title_display)
+                            .size(13)
+                            .font(FONT_SEMIBOLD)
+                            .color(TEXT_PRIMARY)
+                            .wrapping(text::Wrapping::None),
+                        text(artist_display)
+                            .size(11)
+                            .color(TEXT_SECONDARY)
+                            .wrapping(text::Wrapping::None),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .clip(true),
             ]
-            .spacing(2),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
+            .spacing(12)
+            .width(Length::Fill)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
     )
-    .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics));
+    .width(Length::Fill)
+    .clip(true);
 
     let like_btn: Element<'a, Message> = if let Some(t) = track {
-        button(if t.is_liked {
-            icon_heart(true, 15.0, ICON_HEART_ACTIVE)
-        } else {
-            icon_heart(false, 15.0, ICON_MUTED)
-        })
-        .padding([7, 7])
+        button(
+            container(if t.is_liked {
+                icon_heart(true, 15.0, ICON_HEART_ACTIVE)
+            } else {
+                icon_heart(false, 15.0, ICON_MUTED)
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .padding(0)
+        .width(Length::Fixed(30.0))
+        .height(Length::Fixed(30.0))
         .style(ghost_button_style)
         .on_press(Message::ToggleLike(t.clone()))
         .into()
@@ -74,15 +110,23 @@ pub fn view_player_bar<'a>(
     };
 
     let more_btn: Element<'a, Message> = if track.is_some() {
-        button(icon_more(
-            15.0,
-            if player_menu_open {
-                accent.on_primary
-            } else {
-                ICON_MUTED
-            },
-        ))
-        .padding([7, 7])
+        button(
+            container(icon_more(
+                15.0,
+                if player_menu_open {
+                    accent.on_primary
+                } else {
+                    ICON_MUTED
+                },
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .padding(0)
+        .width(Length::Fixed(30.0))
+        .height(Length::Fixed(30.0))
         .style(if player_menu_open {
             glass_button_style(true, accent)
         } else {
@@ -96,6 +140,7 @@ pub fn view_player_bar<'a>(
 
     let left_track_info = row![track_click_area, like_btn, more_btn]
         .spacing(6)
+        .width(Length::Fill)
         .align_y(Alignment::Center);
 
     let is_playing = matches!(
