@@ -209,14 +209,32 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
             import_btn.on_press(Message::ImportSpotifyUrlSubmitted)
         };
 
+        let csv_btn = button(
+            row![
+                icon_folder(13.0, ICON_LIGHT),
+                text("Import Exportify .csv")
+                    .size(12)
+                    .font(FONT_MEDIUM),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 14])
+        .style(glass_button_style(false, props.accent));
+        let csv_btn = if props.importing_url {
+            csv_btn
+        } else {
+            csv_btn.on_press(Message::PickExportifyCsv)
+        };
+
         let modal = container(
             column![
-                text("Import Public Spotify Playlist")
+                text("Import Spotify Playlist")
                     .size(20)
                     .font(FONT_BOLD)
                     .color(TEXT_PRIMARY),
-                text("Paste a public open.spotify.com/playlist/... link to save it locally as an editable playlist playable via Spotify Premium or Smart YouTube Fallback.")
-                    .size(13)
+                text("Paste a public open.spotify.com/playlist/... link (full tracklist if Spotify Web API is connected in Settings; Spotify caps anonymous public links at 100 tracks) — or import an Exportify .csv for unlimited tracks without login.")
+                    .size(12)
                     .color(TEXT_SECONDARY),
                 text_input(
                     "https://open.spotify.com/playlist/...",
@@ -232,6 +250,7 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
                     Element::from(space().height(0))
                 },
                 row![
+                    csv_btn,
                     space().width(Length::Fill),
                     button(text("Close").size(13).font(FONT_MEDIUM))
                         .padding([8, 16])
@@ -239,10 +258,11 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
                         .on_press(Message::CloseModal),
                     import_btn,
                 ]
-                .spacing(10),
+                .spacing(10)
+                .align_y(Alignment::Center),
             ]
             .spacing(14)
-            .width(Length::Fixed(420.0)),
+            .width(Length::Fixed(460.0)),
         )
         .padding(24)
         .style(glass_elevated_style);

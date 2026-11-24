@@ -127,7 +127,9 @@ pub enum Message {
     DeletePlaylist(String),
     ImportUrlInputChanged(String),
     ImportSpotifyUrlSubmitted,
-    SpotifyImportFinished(Result<Playlist, String>),
+    PickExportifyCsv,
+    ExportifyCsvPicked(Option<PathBuf>),
+    SpotifyImportFinished(Result<(Playlist, bool), String>),
     RematchYoutubeFallback(Track),
     RematchFinished {
         track: Track,
@@ -192,7 +194,7 @@ pub enum Message {
         art_bytes: Option<Vec<u8>>,
         art_blur_rgba: Option<Arc<Vec<u8>>>,
     },
-    ThumbnailsLoaded(Vec<(String, Vec<u8>)>),
+    ThumbnailsLoaded(Vec<(String, u32, u32, Vec<u8>)>),
     SpotifyArtworkEnriched(Vec<(String, String)>),
 
     // Settings, Spotify auth & local library

@@ -214,6 +214,23 @@ impl SpotifyWebClient {
         Ok(out)
     }
 
+    /// Fetches a single playlist's name and full paginated tracklist (no 100-track embed cap).
+    pub async fn get_playlist_full(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+    ) -> Result<(String, Vec<Track>), SpotifyApiError> {
+        let meta_url = format!("{}/playlists/{}?fields=id,name", self.base_url, playlist_id);
+        let meta: ApiPlaylist = self.get_json(&meta_url, access_token).await?;
+        let tracks = self.get_playlist_tracks(access_token, playlist_id).await?;
+        let name = if meta.name.trim().is_empty() {
+            "Imported Spotify Playlist".to_string()
+        } else {
+            meta.name
+        };
+        Ok((name, tracks))
+    }
+
     pub async fn get_liked_tracks(
         &self,
         access_token: &str,

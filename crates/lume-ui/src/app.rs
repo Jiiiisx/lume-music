@@ -12,9 +12,10 @@ use lume_core::{
     QueueEngine, ResolvedStream, Track, TrackSource,
 };
 use lume_providers::{
-    detect_yt_dlp_binary, ensure_fresh_token, fetch_spotify_track_oembed_cover, find_sidecar_lrc,
-    find_sidecar_ttml, import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api,
-    needs_spotify_album_artwork, parse_lrc, parse_ttml, read_embedded_lyrics,
+    canonical_playlist_url, detect_yt_dlp_binary, ensure_fresh_token,
+    fetch_spotify_track_oembed_cover, find_sidecar_lrc, find_sidecar_ttml,
+    import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api,
+    needs_spotify_album_artwork, parse_exportify_csv, parse_lrc, parse_ttml, read_embedded_lyrics,
     resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient, SpotifyAccountTier,
     SpotifyApiError, SpotifyUserProfile, SpotifyWebClient, YouTubeMusicProvider,
     SPOTIFY_PLAYBACK_CLIENT_ID,
@@ -44,10 +45,24 @@ use crate::views::{
     SpotifySettingsProps, SpotifySyncReport, ViewMode,
 };
 
-const MAX_IN_MEM_ART_HANDLES: usize = 30;
+const MAX_IN_MEM_ART_HANDLES: usize = 250;
+const THUMBNAIL_SIZE_PX: u32 = 96;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
 const PALETTE_TRANSITION_SECS: f32 = 0.6;
 const LRCLIB_BASE_URL: &str = "https://lrclib.net";
+
+fn decode_thumbnail_rgba_96(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let img = ::image::load_from_memory(bytes).ok()?;
+    let thumb = img
+        .resize_to_fill(
+            THUMBNAIL_SIZE_PX,
+            THUMBNAIL_SIZE_PX,
+            ::image::imageops::FilterType::Triangle,
+        )
+        .to_rgba8();
+    let (w, h) = thumb.dimensions();
+    Some((w, h, thumb.into_raw()))
+}
 
 pub fn is_remote_art_url(key: &str) -> bool {
     key.starts_with("https://") || key.starts_with("http://")
@@ -814,26 +829,121 @@ impl LumeApp {
                     return Task::none();
                 }
                 let url = self.import_url_input.trim().to_string();
-                if let Err(err) = lume_providers::extract_spotify_playlist_id(&url) {
-                    self.modal_error = Some(err.to_string());
+                let playlist_id = match lume_providers::extract_spotify_playlist_id(&url) {
+                    Ok(id) => id,
+                    Err(err) => {
+                        self.modal_error = Some(err.to_string());
+                        return Task::none();
+                    }
+                };
+                self.importing_url = true;
+                self.modal_error = None;
+                let db_path = self.db_path.clone();
+                let web_api_ctx = if self.can_query_spotify_web_api() {
+                    self.config
+                        .spotify_client_id
+                        .clone()
+                        .zip(self.tokens.web_api.clone())
+                } else {
+                    None
+                };
+
+                return Task::perform(
+                    async move {
+                        let (name, source_url, tracks, used_embed_cap) =
+                            if let Some((client_id, tok)) = web_api_ctx {
+                                if let Ok((fresh, _)) = ensure_fresh_token(&client_id, tok).await {
+                                    if let Ok((pl_name, pl_tracks)) = SpotifyWebClient::new()
+                                        .get_playlist_full(&fresh.access_token, &playlist_id)
+                                        .await
+                                    {
+                                        if !pl_tracks.is_empty() {
+                                            (
+                                                pl_name,
+                                                canonical_playlist_url(&playlist_id),
+                                                pl_tracks,
+                                                false,
+                                            )
+                                        } else {
+                                            let imp = import_spotify_playlist_url(&url)
+                                                .await
+                                                .map_err(|e| e.to_string())?;
+                                            (imp.name, imp.source_url, imp.tracks, true)
+                                        }
+                                    } else {
+                                        let imp = import_spotify_playlist_url(&url)
+                                            .await
+                                            .map_err(|e| e.to_string())?;
+                                        (imp.name, imp.source_url, imp.tracks, true)
+                                    }
+                                } else {
+                                    let imp = import_spotify_playlist_url(&url)
+                                        .await
+                                        .map_err(|e| e.to_string())?;
+                                    (imp.name, imp.source_url, imp.tracks, true)
+                                }
+                            } else {
+                                let imp = import_spotify_playlist_url(&url)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                (imp.name, imp.source_url, imp.tracks, true)
+                            };
+
+                        let playlist = tokio::task::spawn_blocking(move || {
+                            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+                            db.upsert_imported_spotify_playlist(&name, &source_url, &tracks)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())??;
+                        Ok((playlist, used_embed_cap))
+                    },
+                    Message::SpotifyImportFinished,
+                );
+            }
+            Message::PickExportifyCsv => {
+                if self.importing_url {
                     return Task::none();
                 }
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Exportify CSV", &["csv"])
+                            .pick_file()
+                            .await
+                            .map(|h| h.path().to_path_buf())
+                    },
+                    Message::ExportifyCsvPicked,
+                );
+            }
+            Message::ExportifyCsvPicked(Some(path)) => {
                 self.importing_url = true;
                 self.modal_error = None;
                 let db_path = self.db_path.clone();
                 return Task::perform(
                     async move {
-                        let imported = import_spotify_playlist_url(&url)
-                            .await
-                            .map_err(|e| e.to_string())?;
                         tokio::task::spawn_blocking(move || {
+                            let csv_text = std::fs::read_to_string(&path)
+                                .map_err(|e| format!("Failed to read CSV: {e}"))?;
+                            let stem = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Imported CSV Playlist");
+                            let file_tag = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("playlist.csv");
+                            let imported = parse_exportify_csv(&csv_text, stem, file_tag)
+                                .map_err(|e| e.to_string())?;
                             let db = Database::open(&db_path).map_err(|e| e.to_string())?;
-                            db.upsert_imported_spotify_playlist(
-                                &imported.name,
-                                &imported.source_url,
-                                &imported.tracks,
-                            )
-                            .map_err(|e| e.to_string())
+                            let pl = db
+                                .upsert_imported_spotify_playlist(
+                                    &imported.name,
+                                    &imported.source_url,
+                                    &imported.tracks,
+                                )
+                                .map_err(|e| e.to_string())?;
+                            Ok((pl, false))
                         })
                         .await
                         .map_err(|e| e.to_string())?
@@ -841,10 +951,11 @@ impl LumeApp {
                     Message::SpotifyImportFinished,
                 );
             }
+            Message::ExportifyCsvPicked(None) => {}
             Message::SpotifyImportFinished(res) => {
                 self.importing_url = false;
                 match res {
-                    Ok(playlist) => {
+                    Ok((playlist, used_embed_cap)) => {
                         self.show_import_url_modal = false;
                         self.import_url_input.clear();
                         self.modal_error = None;
@@ -854,10 +965,17 @@ impl LumeApp {
                                 db.get_playlist_tracks(&playlist.id).unwrap_or_default();
                         }
                         self.nav = ActiveNav::Playlist(playlist.id.clone());
-                        self.status_toast = Some(format!(
-                            "Imported \"{}\" ({} tracks) — loading original album covers...",
-                            playlist.name, playlist.track_count
-                        ));
+                        self.status_toast = Some(if used_embed_cap && playlist.track_count >= 95 {
+                            format!(
+                                "Imported \"{}\" ({} tracks — Spotify caps anonymous URLs at 100; connect Web API or use Exportify .csv for full list)",
+                                playlist.name, playlist.track_count
+                            )
+                        } else {
+                            format!(
+                                "Imported \"{}\" ({} tracks) — loading original album covers...",
+                                playlist.name, playlist.track_count
+                            )
+                        });
                         let keys = self.missing_art_keys(&self.playlist_tracks);
                         let tracks_snapshot = self.playlist_tracks.clone();
                         return Task::batch([
@@ -1420,8 +1538,18 @@ impl LumeApp {
                 }
             }
             Message::ThumbnailsLoaded(items) => {
-                for (key, bytes) in items {
-                    self.insert_art_handle(key, image::Handle::from_bytes(bytes));
+                let active_art_key = self
+                    .queue
+                    .current()
+                    .and_then(|t| t.artwork_ref.as_deref())
+                    .map(ToString::to_string);
+                for (key, w, h, rgba) in items {
+                    if active_art_key.as_deref() == Some(key.as_str())
+                        && self.art_handles.contains_key(&key)
+                    {
+                        continue;
+                    }
+                    self.insert_art_handle(key, image::Handle::from_rgba(w, h, rgba));
                 }
             }
             Message::SpotifyArtworkEnriched(pairs) => {
@@ -2453,20 +2581,24 @@ impl LumeApp {
         Task::perform(
             async move {
                 let mut out = Vec::new();
-                for chunk in keys.chunks(6) {
+                for chunk in keys.chunks(8) {
                     let mut set = tokio::task::JoinSet::new();
                     for key in chunk {
                         let cache = Arc::clone(&art_cache);
                         let key = key.clone();
                         set.spawn(async move {
-                            fetch_or_cache_art(cache, key.clone())
-                                .await
-                                .map(|bytes| (key, bytes))
+                            let bytes = fetch_or_cache_art(cache, key.clone()).await?;
+                            let (w, h, rgba) = tokio::task::spawn_blocking(move || {
+                                decode_thumbnail_rgba_96(&bytes)
+                            })
+                            .await
+                            .ok()??;
+                            Some((key, w, h, rgba))
                         });
                     }
                     while let Some(joined) = set.join_next().await {
-                        if let Ok(Some(pair)) = joined {
-                            out.push(pair);
+                        if let Ok(Some(item)) = joined {
+                            out.push(item);
                         }
                     }
                 }

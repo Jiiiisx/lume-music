@@ -347,6 +347,171 @@ fn extract_best_image_url(obj: &Value) -> Option<String> {
         .map(|(_, url)| url)
 }
 
+/// Parses an RFC 4180 CSV line supporting quoted commas and `""` escaped quotes.
+fn parse_csv_row(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    current.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                current.push(ch);
+            }
+        } else {
+            match ch {
+                '"' if current.is_empty() => in_quotes = true,
+                ',' => {
+                    fields.push(std::mem::take(&mut current));
+                }
+                '\r' => {}
+                _ => current.push(ch),
+            }
+        }
+    }
+    fields.push(current);
+    fields
+}
+
+/// Parses an Exportify CSV export (`Track URI`, `Track Name`, `Artist Name(s)`, `Album Name`,
+/// `Duration (ms)`, optional `Album Image URL`) into an `ImportedSpotifyPlaylist` with no 100-track cap.
+pub fn parse_exportify_csv(
+    csv_text: &str,
+    playlist_name: &str,
+    source_tag: &str,
+) -> Result<ImportedSpotifyPlaylist, CoreError> {
+    let stripped = csv_text.trim_start_matches('\u{feff}');
+    let mut lines = stripped.lines().filter(|l| !l.trim().is_empty());
+    let header_line = lines.next().ok_or_else(|| {
+        CoreError::InvalidInput("CSV file is empty.".into())
+    })?;
+    let headers: Vec<String> = parse_csv_row(header_line)
+        .into_iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+
+    let find_col = |candidates: &[&str]| -> Option<usize> {
+        headers
+            .iter()
+            .position(|h| candidates.iter().any(|c| h == c))
+    };
+
+    let uri_col = find_col(&["track uri", "spotify uri", "uri", "track id", "spotify id"])
+        .ok_or_else(|| {
+            CoreError::InvalidInput(
+                "CSV is missing a 'Track URI' column (expected Exportify CSV format).".into(),
+            )
+        })?;
+    let title_col = find_col(&["track name", "title", "name", "song"]).ok_or_else(|| {
+        CoreError::InvalidInput(
+            "CSV is missing a 'Track Name' column (expected Exportify CSV format).".into(),
+        )
+    })?;
+    let artist_col = find_col(&["artist name(s)", "artist name", "artists", "artist"]);
+    let album_col = find_col(&["album name", "album"]);
+    let duration_col = find_col(&["duration (ms)", "track duration (ms)", "duration_ms"]);
+    let art_col = find_col(&["album image url", "image url", "cover url"]);
+
+    let mut tracks = Vec::new();
+    for line in lines {
+        let cols = parse_csv_row(line);
+        let raw_uri = cols.get(uri_col).map(|s| s.trim()).unwrap_or_default();
+        let track_id = if let Some(id) = raw_uri.strip_prefix("spotify:track:") {
+            id.trim()
+        } else if let Some(rest) = raw_uri.split("/track/").nth(1) {
+            rest.split(['?', '/']).next().unwrap_or_default().trim()
+        } else {
+            raw_uri
+        };
+        if !is_valid_spotify_id(track_id) {
+            continue;
+        }
+
+        let title = cols
+            .get(title_col)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Unknown Title")
+            .to_string();
+
+        let raw_artists = artist_col
+            .and_then(|i| cols.get(i))
+            .map(|s| s.trim())
+            .unwrap_or_default();
+        let sep = if raw_artists.contains(';') { ';' } else { ',' };
+        let artists: Vec<String> = raw_artists
+            .split(sep)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        let artists = if artists.is_empty() {
+            vec!["Unknown Artist".to_string()]
+        } else {
+            artists
+        };
+
+        let album = album_col
+            .and_then(|i| cols.get(i))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+
+        let duration_ms = duration_col
+            .and_then(|i| cols.get(i))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let artwork_ref = art_col
+            .and_then(|i| cols.get(i))
+            .map(|s| s.trim())
+            .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+            .map(upgrade_spotify_album_art_url);
+
+        let source = TrackSource::Spotify {
+            id: track_id.to_string(),
+        };
+        tracks.push(Track {
+            uid: source.canonical_uid(),
+            source,
+            title,
+            artists,
+            album,
+            duration_ms,
+            artwork_ref,
+            is_liked: false,
+        });
+    }
+
+    if tracks.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "No valid Spotify tracks found in the selected CSV file.".into(),
+        ));
+    }
+
+    let final_name = if playlist_name.trim().is_empty() {
+        "Imported CSV Playlist".to_string()
+    } else {
+        playlist_name.trim().to_string()
+    };
+
+    Ok(ImportedSpotifyPlaylist {
+        spotify_id: source_tag.to_string(),
+        source_url: format!("csv://{source_tag}"),
+        name: final_name,
+        cover_url: None,
+        tracks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +639,37 @@ mod tests {
             ..base
         };
         assert!(!needs_spotify_album_artwork(&with_real_album_art));
+    }
+
+    #[test]
+    fn parses_exportify_csv_with_bom_quoted_commas_and_semicolon_artists() {
+        let csv = "\u{feff}Track URI,Track Name,Artist Name(s),Album Name,Duration (ms),Album Image URL\n\
+spotify:track:6Uwi2Qk3H7fM4b4W4ExrAp,\"Scott Street\",\"Phoebe Bridgers\",\"Stranger in the Alps\",305000,\n\
+spotify:track:6wf7Yu7cxBSPrRlWeSeK0Q,\"What Was I Made For? [From \"\"Barbie\"\"], Radio\",\"Billie Eilish;FINNEAS\",\"Barbie, The Album\",222000,https://image-cdn-ak.spotifycdn.com/image/ab67616d00001e02abc123\n\
+spotify:local:::skip:123,\"Local Skip\",\"Nobody\",\"None\",1000,\n";
+
+        let imported = parse_exportify_csv(csv, "My 203 Songs", "my_203_songs.csv").unwrap();
+        assert_eq!(imported.name, "My 203 Songs");
+        assert_eq!(imported.source_url, "csv://my_203_songs.csv");
+        assert_eq!(imported.tracks.len(), 2);
+        assert_eq!(imported.tracks[0].uid, "spotify:6Uwi2Qk3H7fM4b4W4ExrAp");
+        assert_eq!(
+            imported.tracks[0].album.as_deref(),
+            Some("Stranger in the Alps")
+        );
+        assert_eq!(imported.tracks[0].duration_ms, 305_000);
+        assert_eq!(
+            imported.tracks[1].title,
+            "What Was I Made For? [From \"Barbie\"], Radio"
+        );
+        assert_eq!(imported.tracks[1].artists, vec!["Billie Eilish", "FINNEAS"]);
+        assert_eq!(
+            imported.tracks[1].album.as_deref(),
+            Some("Barbie, The Album")
+        );
+        assert_eq!(
+            imported.tracks[1].artwork_ref.as_deref(),
+            Some("https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b273abc123")
+        );
     }
 }
