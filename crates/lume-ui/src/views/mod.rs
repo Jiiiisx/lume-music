@@ -44,15 +44,6 @@ pub enum ViewMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayAction {
-    ToggleWindow,
-    PlayPause,
-    Next,
-    Previous,
-    Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmtcAction {
     Play,
     Pause,
@@ -165,7 +156,6 @@ pub enum Message {
     SetGlassmorphismMode(GlassmorphismMode),
     SetLyricsVisualMode(LyricsVisualMode),
     SetReducedMotion(bool),
-    SetCloseToTray(bool),
     SetPreferYoutubeFallback(bool),
     PickYtDlpBinary,
     YtDlpPicked(Option<PathBuf>),
@@ -178,7 +168,6 @@ pub enum Message {
 
     // Background platform & audio events
     Audio(AudioEvent),
-    Tray(TrayAction),
     Smtc(SmtcAction),
     SmtcHwndReady(Option<usize>),
     DismissToast,

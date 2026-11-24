@@ -30,7 +30,6 @@ pub struct AppConfig {
     pub glassmorphism_mode: GlassmorphismMode,
     pub lyrics_visual_mode: LyricsVisualMode,
     pub reduced_motion: bool,
-    pub close_to_tray: bool,
     pub prefer_youtube_fallback: bool,
     pub spotify_client_id: Option<String>,
     pub yt_dlp_path: Option<PathBuf>,
@@ -43,7 +42,6 @@ impl Default for AppConfig {
             glassmorphism_mode: GlassmorphismMode::WindowsAcrylic,
             lyrics_visual_mode: LyricsVisualMode::SpicySmooth,
             reduced_motion: false,
-            close_to_tray: true,
             prefer_youtube_fallback: false,
             spotify_client_id: None,
             yt_dlp_path: None,
@@ -93,16 +91,28 @@ mod tests {
             GlassmorphismMode::WindowsAcrylic
         );
         assert_eq!(default_cfg.lyrics_visual_mode, LyricsVisualMode::SpicySmooth);
-        assert!(default_cfg.close_to_tray);
 
         let mut updated = default_cfg;
         updated.glassmorphism_mode = GlassmorphismMode::DynamicAlbumBlur;
         updated.lyrics_visual_mode = LyricsVisualMode::UltraLight;
-        updated.close_to_tray = false;
         updated.local_folders.push(PathBuf::from(r"D:\Music"));
         updated.save(&path).unwrap();
 
         let reloaded = AppConfig::load_or_default(&path).unwrap();
         assert_eq!(reloaded, updated);
+    }
+
+    #[test]
+    fn app_config_ignores_legacy_close_to_tray_field() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "glassmorphism_mode = \"windows_acrylic\"\nclose_to_tray = true\n",
+        )
+        .unwrap();
+
+        let loaded = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(loaded.glassmorphism_mode, GlassmorphismMode::WindowsAcrylic);
     }
 }

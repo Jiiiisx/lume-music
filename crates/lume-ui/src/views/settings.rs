@@ -86,10 +86,6 @@ pub fn view_settings<'a>(
             .size(16)
             .font(FONT_SEMIBOLD)
             .color(TEXT_PRIMARY),
-        toggler(config.close_to_tray)
-            .label("Close button minimizes to System Tray")
-            .on_toggle(Message::SetCloseToTray)
-            .text_size(13),
         toggler(config.prefer_youtube_fallback)
             .label("Prefer YouTube Fallback when playing Spotify tracks (Phase 3)")
             .on_toggle(Message::SetPreferYoutubeFallback)
