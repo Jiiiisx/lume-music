@@ -27,6 +27,9 @@ souvlaki.workspace = true
 tokio.workspace = true
 window-vibrancy.workspace = true
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Foundation_Numerics",

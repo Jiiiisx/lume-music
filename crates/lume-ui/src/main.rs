@@ -7,6 +7,14 @@ use lume_ui::theme::{
     PLUS_JAKARTA_SEMIBOLD,
 };
 
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icons/lume-music-64.png");
+
+fn load_window_icon() -> Option<window::Icon> {
+    let img = image::load_from_memory(APP_ICON_PNG).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    window::icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 pub fn main() -> iced::Result {
     // Force DX12 + DirectComposition (`DxgiFromVisual`) on Windows 11 so per-pixel
     // window transparency and native Acrylic blur behind the window actually compose.
@@ -23,6 +31,7 @@ pub fn main() -> iced::Result {
     let mut win_settings = window::Settings {
         size: Size::new(1180.0, 760.0),
         min_size: Some(Size::new(860.0, 560.0)),
+        icon: load_window_icon(),
         transparent: true,
         decorations: false,
         exit_on_close_request: false,

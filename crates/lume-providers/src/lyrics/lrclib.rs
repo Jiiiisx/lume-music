@@ -50,7 +50,7 @@ pub struct LrclibClient {
 impl LrclibClient {
     pub fn new(base_url: String) -> Self {
         let http = Client::builder()
-            .user_agent("LumeMusic/0.1")
+            .user_agent("LumeMusic/1.0")
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| Client::new());
