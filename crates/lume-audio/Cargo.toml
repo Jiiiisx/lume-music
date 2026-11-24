@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dirs.workspace = true
 lume-core.workspace = true
+reqwest.workspace = true
 rodio.workspace = true
 tokio.workspace = true
 

@@ -1,11 +1,20 @@
+use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
 
 use rodio::Source;
 
+use crate::stream::ProgressiveStreamReader;
+
 /// Hardware-independent playback backend trait for deterministic testing and WASAPI playback.
 pub trait AudioBackend: Send {
     fn load_local(&mut self, path: &Path) -> Result<Option<u64>, String>;
+    fn load_stream(
+        &mut self,
+        reader: ProgressiveStreamReader,
+        byte_len: Option<u64>,
+        hint: Option<&str>,
+    ) -> Result<Option<u64>, String>;
     fn play(&mut self);
     fn pause(&mut self);
     fn stop(&mut self);
@@ -41,6 +50,41 @@ impl AudioBackend for RodioAudioBackend {
             .map_err(|e| format!("unable to open {}: {e}", path.display()))?;
         let decoder = rodio::Decoder::try_from(file)
             .map_err(|e| format!("unable to decode {}: {e}", path.display()))?;
+        let probed_ms = decoder.total_duration().map(|d| d.as_millis() as u64);
+
+        if let Some(prev) = self.player.take() {
+            prev.stop();
+        }
+
+        let player = rodio::Player::connect_new(self._sink_handle.mixer());
+        player.set_volume(self.volume);
+        player.append(decoder);
+        player.play();
+        self.player = Some(player);
+
+        Ok(probed_ms)
+    }
+
+    fn load_stream(
+        &mut self,
+        reader: ProgressiveStreamReader,
+        byte_len: Option<u64>,
+        hint: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        let mut builder = rodio::Decoder::builder()
+            .with_data(BufReader::new(reader))
+            .with_seekable(true);
+        if let Some(len) = byte_len {
+            if len > 0 {
+                builder = builder.with_byte_len(len);
+            }
+        }
+        if let Some(ext) = hint {
+            builder = builder.with_hint(ext);
+        }
+        let decoder = builder
+            .build()
+            .map_err(|e| format!("unable to decode HTTP stream: {e}"))?;
         let probed_ms = decoder.total_duration().map(|d| d.as_millis() as u64);
 
         if let Some(prev) = self.player.take() {

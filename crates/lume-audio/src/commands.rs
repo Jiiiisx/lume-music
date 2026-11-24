@@ -10,6 +10,12 @@ pub enum AudioCommand {
         track_uid: String,
         duration_ms: u64,
     },
+    LoadHttpStream {
+        url: String,
+        track_uid: String,
+        duration_ms: u64,
+        mime_hint: Option<String>,
+    },
     Pause,
     Resume,
     Seek(u64),
