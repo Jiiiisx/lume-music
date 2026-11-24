@@ -69,6 +69,9 @@ impl QueueEngine {
         let idx = self.natural_order.len();
         self.natural_order.push(track);
         self.order.push(idx);
+        if self.current_pos.is_none() {
+            self.current_pos = Some(0);
+        }
     }
 
     pub fn play_next(&mut self, track: Track) {
@@ -80,6 +83,7 @@ impl QueueEngine {
             }
             _ => {
                 self.order.insert(0, idx);
+                self.current_pos = Some(0);
             }
         }
     }
@@ -316,6 +320,26 @@ impl QueueEngine {
             .and_then(|&idx| self.natural_order.get(idx))
     }
 
+    /// Peeks at the next track that will play after the current track without advancing the queue.
+    pub fn peek_next(&self) -> Option<&Track> {
+        let pos = self.current_pos?;
+        if self.order.is_empty() {
+            return None;
+        }
+        let next_pos = if self.repeat == RepeatMode::One {
+            pos
+        } else if pos + 1 < self.order.len() {
+            pos + 1
+        } else if self.repeat == RepeatMode::All {
+            0
+        } else {
+            return None;
+        };
+        self.order
+            .get(next_pos)
+            .and_then(|&idx| self.natural_order.get(idx))
+    }
+
     pub fn current_pos(&self) -> Option<usize> {
         self.current_pos
     }
@@ -523,6 +547,19 @@ mod tests {
 
         assert_eq!(engine.next(), QueueActionResult::Play(tracks[3].clone()));
         assert_eq!(engine.next(), QueueActionResult::Play(tracks[1].clone()));
+    }
+
+    #[test]
+    fn play_next_and_add_to_queue_initialize_empty_queue() {
+        let tracks = sample_mixed_tracks();
+
+        let mut q1 = QueueEngine::new();
+        q1.add_to_queue(tracks[0].clone());
+        assert_eq!(q1.current().map(|t| t.uid.as_str()), Some(tracks[0].uid.as_str()));
+
+        let mut q2 = QueueEngine::new();
+        q2.play_next(tracks[1].clone());
+        assert_eq!(q2.current().map(|t| t.uid.as_str()), Some(tracks[1].uid.as_str()));
     }
 
     #[test]

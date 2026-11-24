@@ -70,37 +70,37 @@ pub const ICON_HEART_ACTIVE: Color = Color {
     a: 1.0,
 };
 
-/// Ultra-clear neutral crystal glass surface with subtle white top-left refraction sheen
-/// and whisper-thin neutral depth so the blurred desktop shines cleanly through.
+/// Smoked dark obsidian glass surface: keeps subtle top-left glass sheen while providing
+/// a dark translucent backing so white text stays crisp and readable over bright wallpapers.
 pub fn crystal_surface_gradient(top_alpha: f32, mid_alpha: f32, bot_alpha: f32) -> Background {
     Background::Gradient(gradient::Gradient::Linear(
         gradient::Linear::new(Radians(2.42))
-            .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, top_alpha))
-            .add_stop(0.42, Color::from_rgba(1.0, 1.0, 1.0, mid_alpha))
-            .add_stop(1.0, Color::from_rgba(0.05, 0.05, 0.06, bot_alpha)),
+            .add_stop(0.0, Color::from_rgba(0.08, 0.08, 0.11, top_alpha))
+            .add_stop(0.45, Color::from_rgba(0.05, 0.05, 0.07, mid_alpha))
+            .add_stop(1.0, Color::from_rgba(0.03, 0.03, 0.05, bot_alpha)),
     ))
 }
 
 pub fn inner_widget_glass_gradient() -> Background {
     Background::Gradient(gradient::Gradient::Linear(
         gradient::Linear::new(Radians(2.45))
-            .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, 0.075))
-            .add_stop(0.50, Color::from_rgba(1.0, 1.0, 1.0, 0.025))
-            .add_stop(1.0, Color::from_rgba(0.05, 0.05, 0.06, 0.12)),
+            .add_stop(0.0, Color::from_rgba(0.11, 0.11, 0.14, 0.44))
+            .add_stop(0.50, Color::from_rgba(0.07, 0.07, 0.10, 0.48))
+            .add_stop(1.0, Color::from_rgba(0.04, 0.04, 0.06, 0.56)),
     ))
 }
 
 pub fn glass_sidebar_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(crystal_surface_gradient(0.075, 0.025, 0.16)),
+        background: Some(crystal_surface_gradient(0.46, 0.54, 0.62)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.17),
             width: 1.0,
             radius: 20.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.28),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 26.0,
         },
@@ -111,14 +111,14 @@ pub fn glass_sidebar_style(_theme: &iced::Theme) -> container::Style {
 pub fn glass_panel_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(crystal_surface_gradient(0.065, 0.020, 0.13)),
+        background: Some(crystal_surface_gradient(0.42, 0.50, 0.58)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.19),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
             width: 1.0,
             radius: 22.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.16),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.24),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
@@ -131,17 +131,17 @@ pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
         text_color: Some(TEXT_PRIMARY),
         background: Some(Background::Gradient(gradient::Gradient::Linear(
             gradient::Linear::new(Radians(2.40))
-                .add_stop(0.0, Color::from_rgba(0.16, 0.16, 0.18, 0.68))
-                .add_stop(0.45, Color::from_rgba(0.10, 0.10, 0.12, 0.62))
-                .add_stop(1.0, Color::from_rgba(0.06, 0.06, 0.08, 0.72)),
+                .add_stop(0.0, Color::from_rgba(0.12, 0.12, 0.15, 0.80))
+                .add_stop(0.45, Color::from_rgba(0.08, 0.08, 0.10, 0.78))
+                .add_stop(1.0, Color::from_rgba(0.05, 0.05, 0.07, 0.86)),
         ))),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
             width: 1.0,
             radius: 20.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.36),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
             offset: Vector::new(0.0, 16.0),
             blur_radius: 36.0,
         },
@@ -152,14 +152,14 @@ pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
 pub fn floating_dock_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(crystal_surface_gradient(0.10, 0.04, 0.22)),
+        background: Some(crystal_surface_gradient(0.54, 0.62, 0.70)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
             width: 1.0,
             radius: 22.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
@@ -172,12 +172,12 @@ pub fn glass_card_style(_theme: &iced::Theme) -> container::Style {
         text_color: Some(TEXT_PRIMARY),
         background: Some(inner_widget_glass_gradient()),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.14),
             width: 1.0,
             radius: 18.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.14),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
             offset: Vector::new(0.0, 8.0),
             blur_radius: 18.0,
         },
@@ -188,16 +188,19 @@ pub fn glass_card_style(_theme: &iced::Theme) -> container::Style {
 pub fn hero_banner_style(accent: AccentTheme) -> impl Fn(&iced::Theme) -> container::Style {
     move |_theme| {
         let top_tint = Color {
-            a: 0.095,
-            ..accent.light
+            r: accent.light.r * 0.24 + 0.05,
+            g: accent.light.g * 0.24 + 0.05,
+            b: accent.light.b * 0.24 + 0.07,
+            a: 0.46,
         };
-        let bot_tint = Color::from_rgba(0.05, 0.05, 0.06, 0.14);
+        let mid_tint = Color::from_rgba(0.06, 0.06, 0.09, 0.46);
+        let bot_tint = Color::from_rgba(0.04, 0.04, 0.06, 0.56);
         container::Style {
             text_color: Some(TEXT_PRIMARY),
             background: Some(Background::Gradient(gradient::Gradient::Linear(
                 gradient::Linear::new(Radians(2.28))
                     .add_stop(0.0, top_tint)
-                    .add_stop(0.52, Color::from_rgba(1.0, 1.0, 1.0, 0.03))
+                    .add_stop(0.52, mid_tint)
                     .add_stop(1.0, bot_tint),
             ))),
             border: border::Border {
@@ -210,7 +213,7 @@ pub fn hero_banner_style(accent: AccentTheme) -> impl Fn(&iced::Theme) -> contai
             },
             shadow: Shadow {
                 color: Color {
-                    a: 0.12,
+                    a: 0.16,
                     ..accent.glow
                 },
                 offset: Vector::new(0.0, 8.0),
@@ -377,14 +380,14 @@ pub fn glass_button_style(
                 snap: false,
             }
         } else {
-            let (alpha, border_alpha) = match status {
-                button::Status::Hovered => (0.12, 0.26),
-                button::Status::Pressed => (0.18, 0.34),
-                button::Status::Disabled => (0.025, 0.08),
-                button::Status::Active => (0.055, 0.16),
+            let (bg_color, border_alpha) = match status {
+                button::Status::Hovered => (Color::from_rgba(0.14, 0.15, 0.19, 0.62), 0.24),
+                button::Status::Pressed => (Color::from_rgba(0.18, 0.19, 0.24, 0.72), 0.32),
+                button::Status::Disabled => (Color::from_rgba(0.06, 0.06, 0.09, 0.30), 0.08),
+                button::Status::Active => (Color::from_rgba(0.07, 0.08, 0.11, 0.48), 0.15),
             };
             button::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, alpha))),
+                background: Some(Background::Color(bg_color)),
                 text_color: if matches!(status, button::Status::Disabled) {
                     TEXT_MUTED
                 } else {
@@ -525,13 +528,22 @@ pub fn glass_input_style(
     accent: AccentTheme,
 ) -> impl Fn(&iced::Theme, text_input::Status) -> text_input::Style {
     move |_theme, status| {
-        let (bg_alpha, border_col) = match status {
-            text_input::Status::Focused { .. } => (0.11, accent.border),
-            text_input::Status::Hovered => (0.08, Color::from_rgba(1.0, 1.0, 1.0, 0.26)),
-            _ => (0.055, Color::from_rgba(1.0, 1.0, 1.0, 0.15)),
+        let (bg_color, border_col) = match status {
+            text_input::Status::Focused { .. } => (
+                Color::from_rgba(0.08, 0.09, 0.13, 0.68),
+                accent.border,
+            ),
+            text_input::Status::Hovered => (
+                Color::from_rgba(0.07, 0.08, 0.11, 0.58),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.24),
+            ),
+            _ => (
+                Color::from_rgba(0.05, 0.06, 0.09, 0.50),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.15),
+            ),
         };
         text_input::Style {
-            background: Background::Color(Color::from_rgba(1.0, 1.0, 1.0, bg_alpha)),
+            background: Background::Color(bg_color),
             border: border::Border {
                 color: border_col,
                 width: 1.0,
@@ -548,20 +560,23 @@ pub fn glass_input_style(
     }
 }
 
+pub fn hidden_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(0)
+        .scroller_width(0)
+        .margin(0)
+}
+
 pub fn thin_scrollable_style(
     _theme: &iced::Theme,
-    status: scrollable::Status,
+    _status: scrollable::Status,
 ) -> scrollable::Style {
-    let scroller_alpha = match status {
-        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. } => 0.38,
-        _ => 0.16,
-    };
     let rail = scrollable::Rail {
         background: None,
         border: border::Border::default(),
         scroller: scrollable::Scroller {
-            background: Background::Color(Color::from_rgba(1.0, 1.0, 1.0, scroller_alpha)),
-            border: border::rounded(4.0),
+            background: Background::Color(Color::TRANSPARENT),
+            border: border::Border::default(),
         },
     };
     scrollable::Style {

@@ -90,20 +90,36 @@ pub struct Playlist {
     pub track_count: usize,
 }
 
-/// Word-level timing span for enhanced karaoke-style synced lyrics.
+/// Word- or syllable-level timing span for enhanced karaoke-style synced lyrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LyricsWord {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// True when this syllable connects directly to the next syllable without an intervening space
+    /// (e.g. `"da"` + `"tang"` -> `"datang"`), mirroring Spicy Lyrics' `IsPartOfWord`.
+    #[serde(default)]
+    pub is_part_of_word: bool,
+    /// True when this syllable belongs to a background vocal span.
+    #[serde(default)]
+    pub is_background: bool,
 }
 
-/// A single line of synced lyrics with optional word-level timing spans.
+/// A single line of synced lyrics with optional word/syllable-level timing spans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LyricsLine {
     pub time_ms: u64,
+    /// Optional explicit line end timestamp (ms) from TTML / LyricsPlus / Spicy-style payloads.
+    #[serde(default)]
+    pub end_ms: Option<u64>,
     pub text: String,
     pub words: Option<Vec<LyricsWord>>,
+    /// True for secondary duet singer lines (`OppositeAligned` in Spicy Lyrics).
+    #[serde(default)]
+    pub opposite_aligned: bool,
+    /// True for dedicated background vocal lines (`bg-line` in Spicy Lyrics).
+    #[serde(default)]
+    pub is_background: bool,
 }
 
 /// Complete lyrics payload for a track.
@@ -112,6 +128,15 @@ pub struct LyricsData {
     pub synced: Vec<LyricsLine>,
     pub plain: Option<String>,
     pub provider: String,
+}
+
+impl LyricsData {
+    /// Returns true if at least one synced line has native word/syllable timing spans.
+    pub fn has_native_syllables(&self) -> bool {
+        self.synced
+            .iter()
+            .any(|l| l.words.as_ref().is_some_and(|w| !w.is_empty()))
+    }
 }
 
 /// Concrete backend used to stream the currently playing track.

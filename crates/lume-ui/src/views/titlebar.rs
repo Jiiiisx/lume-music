@@ -35,7 +35,13 @@ fn source_chip<'a>(
         TEXT_PRIMARY
     };
     let font = if active { FONT_SEMIBOLD } else { FONT_MEDIUM };
-    button(text(label).size(11).font(font).color(col))
+    button(
+        text(label)
+            .size(11)
+            .font(font)
+            .color(col)
+            .wrapping(text::Wrapping::None),
+    )
         .padding([5, 12])
         .style(glass_button_style(active, accent))
         .on_press(Message::SourceFilterChanged(target))
@@ -57,38 +63,49 @@ pub fn view_titlebar<'a>(
     .spacing(8)
     .align_y(Alignment::Center);
 
+    let mut brand_row = row![text("Lume")
+        .size(15)
+        .font(FONT_BOLD)
+        .color(TEXT_PRIMARY)
+        .wrapping(text::Wrapping::None)]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    if let Some(badge) = source_status_badge {
+        brand_row = brand_row.push(
+            container(
+                text(badge)
+                    .size(10)
+                    .font(FONT_SEMIBOLD)
+                    .color(accent.light)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding([3, 7])
+            .style(move |_| container::Style {
+                background: Some(Background::Color(accent.soft_bg)),
+                border: iced::border::Border {
+                    color: accent.border,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            }),
+        );
+    }
+
     let drag_brand = mouse_area(
-        row![
-            text("Lume").size(15).font(FONT_BOLD).color(TEXT_PRIMARY),
-            if let Some(badge) = source_status_badge {
-                Element::from(
-                    container(text(badge).size(10).font(FONT_SEMIBOLD).color(accent.light))
-                        .padding([2, 8])
-                        .style(move |_| container::Style {
-                            background: Some(Background::Color(accent.soft_bg)),
-                            border: iced::border::Border {
-                                color: accent.border,
-                                width: 1.0,
-                                radius: 10.0.into(),
-                            },
-                            ..Default::default()
-                        }),
-                )
-            } else {
-                Element::from(space().width(0))
-            },
-            space().width(Length::Fill),
-        ]
-        .spacing(8)
-        .padding([6, 4])
-        .align_y(Alignment::Center),
+        container(brand_row)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
     )
     .on_press(Message::DragWindow);
 
     let left_section = row![traffic_lights, drag_brand]
-        .spacing(14)
+        .spacing(12)
         .align_y(Alignment::Center)
-        .width(Length::Fixed(224.0));
+        .width(Length::Fixed(224.0))
+        .height(Length::Fill);
 
     let center_search = container(
         row![
@@ -152,7 +169,8 @@ pub fn view_titlebar<'a>(
                     accent.on_primary
                 } else {
                     TEXT_PRIMARY
-                }),
+                })
+                .wrapping(text::Wrapping::None),
         ]
         .spacing(6)
         .align_y(Alignment::Center),

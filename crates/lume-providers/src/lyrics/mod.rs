@@ -1,5 +1,6 @@
 pub mod lrc;
 pub mod lrclib;
+pub mod lyricsplus;
 pub mod ttml;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,9 @@ use lume_storage::{Database, LyricsCacheLookup};
 use crate::local::{find_sidecar_lrc, find_sidecar_ttml, read_embedded_lyrics};
 pub use lrc::parse_lrc;
 pub use lrclib::LrclibClient;
+pub use lyricsplus::{
+    join_syllable_words_text, parse_lyricsplus_json, LyricsPlusClient, DEFAULT_LYRICSPLUS_BASES,
+};
 pub use ttml::parse_ttml;
 
 fn now_epoch_s() -> i64 {
@@ -19,15 +23,26 @@ fn now_epoch_s() -> i64 {
         .unwrap_or(0)
 }
 
-/// Multi-step lyrics resolver: SQLite cache -> local sidecar/embedded -> LRCLIB.
+/// Multi-step lyrics resolver:
+/// SQLite cache -> local sidecar/embedded -> LyricsPlus (Apple/Musixmatch syllable-synced) -> LRCLIB.
 #[derive(Debug, Clone)]
 pub struct ChainedLyricsProvider {
+    lyricsplus: Option<LyricsPlusClient>,
     lrclib: LrclibClient,
 }
 
 impl ChainedLyricsProvider {
     pub fn new(lrclib_base_url: String) -> Self {
         Self {
+            lyricsplus: Some(LyricsPlusClient::default_public()),
+            lrclib: LrclibClient::new(lrclib_base_url),
+        }
+    }
+
+    pub fn with_lyricsplus_bases(lrclib_base_url: String, lyricsplus_bases: Vec<String>) -> Self {
+        Self {
+            lyricsplus: (!lyricsplus_bases.is_empty())
+                .then(|| LyricsPlusClient::new(lyricsplus_bases)),
             lrclib: LrclibClient::new(lrclib_base_url),
         }
     }
@@ -84,16 +99,49 @@ impl ChainedLyricsProvider {
             }
         }
 
-        match self.lrclib.fetch(track).await? {
-            Some(data) => {
+        // Try syllable-synced LyricsPlus first (Apple Music TTML / Musixmatch Word / QQ).
+        let mut lyricsplus_line_fallback: Option<LyricsData> = None;
+        if let Some(lp) = &self.lyricsplus {
+            if let Ok(Some(data)) = lp.fetch(track).await {
+                if data.has_native_syllables() {
+                    db.put_cached_lyrics(&track.uid, &data, now)
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    return Ok(Some(data));
+                }
+                // Prefer synced Apple/LyricsPlus line data that includes exact per-line `end_ms`
+                // over LRCLIB (which lacks end timestamps), falling back to LRCLIB otherwise.
+                if data.synced.iter().any(|l| l.end_ms.is_some()) {
+                    db.put_cached_lyrics(&track.uid, &data, now)
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    return Ok(Some(data));
+                }
+                lyricsplus_line_fallback = Some(data);
+            }
+        }
+
+        match self.lrclib.fetch(track).await {
+            Ok(Some(data)) => {
                 db.put_cached_lyrics(&track.uid, &data, now)
                     .map_err(|e| CoreError::Storage(e.to_string()))?;
                 Ok(Some(data))
             }
-            None => {
+            Ok(None) => {
+                if let Some(lp_data) = lyricsplus_line_fallback {
+                    db.put_cached_lyrics(&track.uid, &lp_data, now)
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    return Ok(Some(lp_data));
+                }
                 db.put_negative_lyrics_hit(&track.uid, now)
                     .map_err(|e| CoreError::Storage(e.to_string()))?;
                 Ok(None)
+            }
+            Err(err) => {
+                if let Some(lp_data) = lyricsplus_line_fallback {
+                    db.put_cached_lyrics(&track.uid, &lp_data, now)
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    return Ok(Some(lp_data));
+                }
+                Err(err)
             }
         }
     }
@@ -127,8 +175,11 @@ mod tests {
         let cached = LyricsData {
             synced: vec![LyricsLine {
                 time_ms: 5000,
+                end_ms: None,
                 text: "From SQLite".into(),
                 words: None,
+                opposite_aligned: false,
+                is_background: false,
             }],
             plain: Some("From SQLite".into()),
             provider: "lrclib".into(),
@@ -137,7 +188,7 @@ mod tests {
             .unwrap();
 
         // Closed/unreachable port proves no HTTP request is made on cache hit.
-        let provider = ChainedLyricsProvider::new("http://127.0.0.1:9".into());
+        let provider = ChainedLyricsProvider::with_lyricsplus_bases("http://127.0.0.1:9".into(), Vec::new());
         let got = provider.fetch(&track, &db, false).await.unwrap();
         assert_eq!(got, Some(cached));
     }
@@ -165,7 +216,7 @@ mod tests {
         db.put_negative_lyrics_hit(&track.uid, now_epoch_s())
             .unwrap();
 
-        let provider = ChainedLyricsProvider::new(format!("http://{addr}"));
+        let provider = ChainedLyricsProvider::with_lyricsplus_bases(format!("http://{addr}"), Vec::new());
         // Without force_refresh, returns None immediately from negative cache.
         assert_eq!(provider.fetch(&track, &db, false).await.unwrap(), None);
 

@@ -56,6 +56,13 @@ fn now_epoch_s() -> i64 {
         .unwrap_or(0)
 }
 
+fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn source_parts(source: &TrackSource) -> (&'static str, String) {
     match source {
         TrackSource::Spotify { id } => ("spotify", id.clone()),
@@ -1017,6 +1024,49 @@ impl Database {
             muted: muted != 0,
         }))
     }
+
+    pub fn record_play_history(&self, track: &Track) -> Result<(), StorageError> {
+        self.upsert_track(track, None)?;
+        let now_ms = now_epoch_ms();
+        self.conn.execute(
+            r#"
+            INSERT INTO play_history (track_uid, played_at, play_count)
+            VALUES (?1, ?2, 1)
+            ON CONFLICT(track_uid) DO UPDATE SET
+                played_at = CASE
+                    WHEN excluded.played_at > play_history.played_at THEN excluded.played_at
+                    ELSE play_history.played_at + 1
+                END,
+                play_count = play_history.play_count + 1
+            "#,
+            params![track.uid, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_recent_tracks(&self, limit: usize) -> Result<Vec<Track>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT t.uid, t.source_type, t.source_id, t.title, t.artists_json, t.album,
+                   t.duration_ms, t.artwork_ref,
+                   CASE WHEN t.is_liked = 1 OR lf.track_uid IS NOT NULL THEN 1 ELSE 0 END AS is_liked
+            FROM play_history ph
+            INNER JOIN tracks t ON t.uid = ph.track_uid
+            LEFT JOIN local_favorites lf ON lf.track_uid = t.uid
+            ORDER BY ph.played_at DESC, ph.rowid DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map([limit as i64], row_to_track)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1194,8 +1244,11 @@ mod tests {
         let lyrics = LyricsData {
             synced: vec![LyricsLine {
                 time_ms: 1000,
+                end_ms: None,
                 text: "Hello".into(),
                 words: None,
+                opposite_aligned: false,
+                is_background: false,
             }],
             plain: Some("Hello".into()),
             provider: "lrclib".into(),
@@ -1320,5 +1373,26 @@ mod tests {
         let reloaded = db.get_track(&t.uid).unwrap().unwrap();
         assert_eq!(reloaded.artwork_ref, t.artwork_ref);
         assert_eq!(reloaded.album.as_deref(), Some("Stranger in the Alps"));
+    }
+
+    #[test]
+    fn play_history_deduplicates_and_orders_most_recent_first() {
+        let db = Database::open_in_memory().unwrap();
+        let a = track_sp("sp_a", "Track A", false);
+        let b = track_ytm("yt_b", "Track B");
+        let c = track_local("C:\\music\\c.mp3", "Track C");
+
+        db.record_play_history(&a).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.record_play_history(&b).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.record_play_history(&c).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Re-playing Track A moves it back to index 0 without duplicating.
+        db.record_play_history(&a).unwrap();
+
+        let recent = db.list_recent_tracks(10).unwrap();
+        let uids: Vec<&str> = recent.iter().map(|t| t.uid.as_str()).collect();
+        assert_eq!(uids, vec![a.uid.as_str(), c.uid.as_str(), b.uid.as_str()]);
     }
 }

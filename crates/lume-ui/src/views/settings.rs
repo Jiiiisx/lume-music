@@ -8,9 +8,9 @@ use lume_storage::{AppConfig, GlassmorphismMode, LyricsVisualMode};
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::{Message, SpotifySettingsProps};
 use crate::widgets::{
-    glass_button_style, glass_card_style, glass_input_style, glass_panel, icon_folder, icon_link,
-    icon_plus, icon_refresh, icon_trash, primary_pill_button_style, thin_scrollable_style,
-    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_button_style, glass_card_style, glass_input_style, glass_panel, hidden_scrollbar,
+    icon_folder, icon_link, icon_plus, icon_refresh, icon_trash, primary_pill_button_style,
+    thin_scrollable_style, ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn view_settings<'a>(
@@ -442,6 +442,7 @@ pub fn view_settings<'a>(
             .spacing(16)
             .padding(20),
         )
+        .direction(scrollable::Direction::Vertical(hidden_scrollbar()))
         .style(thin_scrollable_style)
         .height(Length::Fill),
     )

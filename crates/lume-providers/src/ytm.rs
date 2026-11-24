@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use lume_core::{
@@ -7,6 +9,18 @@ use lume_core::{
 };
 use rustypipe::client::{ClientType, RustyPipe};
 use rustypipe::model::{AudioCodec, AudioFormat, AudioStream, AudioTrackType, Thumbnail, TrackItem};
+use tokio::sync::RwLock;
+
+const VISITOR_DATA_TTL: Duration = Duration::from_secs(4 * 60 * 60);
+const STREAM_CACHE_DEFAULT_TTL: Duration = Duration::from_secs(25 * 60);
+const STREAM_CACHE_MAX_TTL: Duration = Duration::from_secs(30 * 60);
+const STREAM_CACHE_MAX_ENTRIES: usize = 256;
+const INNERTUBE_PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const YOUTUBE_SW_JS_DATA_URL: &str = "https://www.youtube.com/sw.js_data";
+const VISIONOS_USER_AGENT: &str =
+    "com.google.ios.youtube/0.1 (RealityDevice14,1; U; CPU OS 17_0 like Mac OS X; en_US)";
+const VISIONOS_CLIENT_NAME_HEADER: &str = "101";
+const VISIONOS_CLIENT_VERSION: &str = "0.1";
 
 /// Format filter passed to `yt-dlp` so resolved streams decode cleanly in `symphonia`/`rodio`
 /// (preferring M4A/AAC over WebM/Opus).
@@ -198,12 +212,162 @@ pub fn parse_yt_dlp_stdout(stdout: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// Anonymous YouTube Music catalog & stream provider powered by `rustypipe` + `yt-dlp` fallback.
+/// Extracts YouTube's `visitorData` token (starting with `Cg...`) from `sw.js_data` JSON payload.
+pub fn extract_visitor_data_from_sw_js(body: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i] == b'"' && bytes[i + 1] == b'C' && bytes[i + 2] == b'g' {
+            let start = i + 1;
+            let mut end = start + 2;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += 1;
+            }
+            if end < bytes.len() && end - start >= 12 {
+                let candidate = &body[start..end];
+                if candidate
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'%'))
+                {
+                    return Some(candidate.to_string());
+                }
+            }
+            i = end;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parses InnerTube `/youtubei/v1/player` JSON into direct `AudioStreamCandidate`s.
+///
+/// Returns `Ok(candidates)` when `playabilityStatus.status == "OK"`, or `Err((retryable, reason))`
+/// when YouTube rejects playback (e.g. stale `visitorData` returning `UNPLAYABLE`/`LOGIN_REQUIRED`).
+pub fn parse_innertube_audio_candidates(
+    json: &serde_json::Value,
+) -> Result<Vec<AudioStreamCandidate>, (bool, String)> {
+    let status = json
+        .pointer("/playabilityStatus/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN");
+    if status != "OK" {
+        let reason = json
+            .pointer("/playabilityStatus/reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unplayable");
+        let retryable = matches!(status, "UNPLAYABLE" | "LOGIN_REQUIRED");
+        return Err((retryable, format!("InnerTube status={status}: {reason}")));
+    }
+
+    let Some(formats) = json
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(|v| v.as_array())
+    else {
+        return Err((false, "InnerTube response missing adaptiveFormats".into()));
+    };
+
+    let mut out = Vec::new();
+    for fmt in formats {
+        let Some(url) = fmt.get("url").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if url.trim().is_empty() {
+            continue;
+        }
+        let mime = fmt
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let mime_lower = mime.to_ascii_lowercase();
+        if !mime_lower.starts_with("audio/") {
+            continue;
+        }
+        let is_m4a_aac = mime_lower.contains("audio/mp4") || mime_lower.contains("mp4a");
+        let is_opus = mime_lower.contains("opus");
+        let bitrate = fmt
+            .get("bitrate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let size = fmt
+            .get("contentLength")
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or_else(|| v.as_u64())
+            })
+            .unwrap_or(0);
+        let is_original_track = fmt
+            .get("audioTrack")
+            .map(|t| {
+                t.get("audioIsDefault")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || t.get("displayName")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_ascii_lowercase().contains("original"))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(true);
+        let is_drm = fmt
+            .get("drmFamilies")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+
+        out.push(AudioStreamCandidate {
+            url: url.to_string(),
+            bitrate,
+            is_m4a_aac,
+            is_opus,
+            is_original_track,
+            is_drm,
+            size,
+        });
+    }
+
+    Ok(out)
+}
+
+fn compute_stream_cache_expiry(url: &str, now: Instant) -> Instant {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some((_, expire_str)) = parsed.query_pairs().find(|(k, _)| k == "expire") {
+            if let Ok(expire_epoch) = expire_str.parse::<u64>() {
+                let now_epoch = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if expire_epoch > now_epoch.saturating_add(120) {
+                    let remaining = Duration::from_secs(expire_epoch - now_epoch - 120);
+                    return now + remaining.min(STREAM_CACHE_MAX_TTL);
+                }
+            }
+        }
+    }
+    now + STREAM_CACHE_DEFAULT_TTL
+}
+
+#[derive(Debug, Clone)]
+struct CachedVisitorData {
+    value: String,
+    fetched_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedStreamUrl {
+    url: String,
+    expires_at: Instant,
+}
+
+/// Anonymous YouTube Music catalog & stream provider powered by direct InnerTube (`VISIONOS`),
+/// `rustypipe`, and `yt-dlp` fallback, with session `visitorData` and stream URL caching.
 #[derive(Clone)]
 pub struct YouTubeMusicProvider {
     client: RustyPipe,
     http: reqwest::Client,
     yt_dlp_path: Option<PathBuf>,
+    yt_dlp_resolved: Option<PathBuf>,
+    visitor_data: Arc<RwLock<Option<CachedVisitorData>>>,
+    stream_cache: Arc<Mutex<HashMap<String, CachedStreamUrl>>>,
 }
 
 impl YouTubeMusicProvider {
@@ -219,14 +383,195 @@ impl YouTubeMusicProvider {
             .build()
             .map_err(|e| CoreError::ProviderUnavailable(format!("rustypipe init failed: {e}")))?;
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(12))
+            .pool_max_idle_per_host(8)
             .build()
             .map_err(|e| CoreError::Network(format!("http client init failed: {e}")))?;
+        let yt_dlp_resolved = detect_yt_dlp_binary(yt_dlp_path.as_deref());
         Ok(Self {
             client,
             http,
             yt_dlp_path,
+            yt_dlp_resolved,
+            visitor_data: Arc::new(RwLock::new(None)),
+            stream_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Pre-warms YouTube `visitorData` in the background so the very first song click avoids
+    /// an extra roundtrip.
+    pub async fn warm_up(&self) {
+        let _ = self.get_visitor_data(false).await;
+    }
+
+    /// Removes a cached stream URL for `video_id` (e.g. after an expired or HTTP 403 error).
+    pub fn invalidate_stream_cache(&self, video_id: &str) {
+        if let Ok(mut cache) = self.stream_cache.lock() {
+            cache.remove(video_id.trim());
+        }
+    }
+
+    /// Builds a `yt-dlp` progressive fallback handle for `video_id` when available.
+    pub fn yt_dlp_fallback_for_video_id(&self, video_id: &str) -> Option<ResolvedStream> {
+        let trimmed = video_id.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let binary = self
+            .yt_dlp_resolved
+            .clone()
+            .or_else(|| detect_yt_dlp_binary(self.yt_dlp_path.as_deref()))?;
+        Some(ResolvedStream::YtDlpProcess {
+            binary,
+            watch_url: format!("https://music.youtube.com/watch?v={trimmed}"),
+            format_selector: YT_DLP_FORMAT_SELECTOR.to_string(),
+            source: PlaybackSourceUsed::YouTubeDirect,
+        })
+    }
+
+    fn get_cached_stream_url(&self, video_id: &str) -> Option<String> {
+        let now = Instant::now();
+        let mut cache = self.stream_cache.lock().ok()?;
+        if let Some(entry) = cache.get(video_id) {
+            if entry.expires_at > now {
+                return Some(entry.url.clone());
+            }
+        }
+        cache.remove(video_id);
+        None
+    }
+
+    fn put_cached_stream_url(&self, video_id: &str, url: &str) {
+        let now = Instant::now();
+        let expires_at = compute_stream_cache_expiry(url, now);
+        if let Ok(mut cache) = self.stream_cache.lock() {
+            if cache.len() >= STREAM_CACHE_MAX_ENTRIES {
+                cache.retain(|_, v| v.expires_at > now);
+                if cache.len() >= STREAM_CACHE_MAX_ENTRIES {
+                    if let Some(oldest_key) = cache
+                        .iter()
+                        .min_by_key(|(_, v)| v.expires_at)
+                        .map(|(k, _)| k.clone())
+                    {
+                        cache.remove(&oldest_key);
+                    }
+                }
+            }
+            cache.insert(
+                video_id.to_string(),
+                CachedStreamUrl {
+                    url: url.to_string(),
+                    expires_at,
+                },
+            );
+        }
+    }
+
+    async fn get_visitor_data(&self, force_refresh: bool) -> Option<String> {
+        if !force_refresh {
+            let guard = self.visitor_data.read().await;
+            if let Some(cached) = guard.as_ref() {
+                if cached.fetched_at.elapsed() < VISITOR_DATA_TTL {
+                    return Some(cached.value.clone());
+                }
+            }
+        }
+
+        let resp = self
+            .http
+            .get(YOUTUBE_SW_JS_DATA_URL)
+            .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.text().await.ok()?;
+        let token = extract_visitor_data_from_sw_js(&body)?;
+        let mut guard = self.visitor_data.write().await;
+        *guard = Some(CachedVisitorData {
+            value: token.clone(),
+            fetched_at: Instant::now(),
+        });
+        Some(token)
+    }
+
+    async fn call_innertube_visionos(
+        &self,
+        video_id: &str,
+        visitor_data: Option<&str>,
+    ) -> Result<serde_json::Value, CoreError> {
+        let mut client_obj = serde_json::json!({
+            "clientName": "VISIONOS",
+            "clientVersion": VISIONOS_CLIENT_VERSION,
+            "osName": "visionOS",
+            "osVersion": "1.0",
+            "hl": "en",
+            "gl": "US",
+        });
+        if let Some(vd) = visitor_data {
+            client_obj["visitorData"] = serde_json::Value::String(vd.to_string());
+        }
+        let payload = serde_json::json!({
+            "videoId": video_id,
+            "context": {
+                "client": client_obj,
+            },
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+        });
+
+        let mut req = self
+            .http
+            .post(INNERTUBE_PLAYER_URL)
+            .header(reqwest::header::USER_AGENT, VISIONOS_USER_AGENT)
+            .header("X-YouTube-Client-Name", VISIONOS_CLIENT_NAME_HEADER)
+            .header("X-YouTube-Client-Version", VISIONOS_CLIENT_VERSION)
+            .json(&payload);
+        if let Some(vd) = visitor_data {
+            req = req.header("X-Goog-Visitor-Id", vd);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CoreError::Network(format!("InnerTube VISIONOS request failed: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(CoreError::ProviderUnavailable(format!(
+                "InnerTube VISIONOS HTTP {}",
+                status.as_u16()
+            )));
+        }
+        resp.json::<serde_json::Value>()
+            .await
+            .map_err(|e| CoreError::Network(format!("InnerTube VISIONOS JSON decode failed: {e}")))
+    }
+
+    /// Fast direct InnerTube `VISIONOS` player API resolution (~120-200 ms, returns direct
+    /// non-PO-token `audio/mp4` CDN URL without spawning `yt-dlp`).
+    async fn resolve_via_innertube_visionos(&self, video_id: &str) -> Result<String, CoreError> {
+        let vd = self.get_visitor_data(false).await;
+        let json = self
+            .call_innertube_visionos(video_id, vd.as_deref())
+            .await?;
+
+        match parse_innertube_audio_candidates(&json) {
+            Ok(candidates) => select_best_audio_stream(&candidates).map(|b| b.url.clone()),
+            Err((true, _)) => {
+                // Retry once with a fresh visitorData token in case the cached token expired.
+                let fresh_vd = self.get_visitor_data(true).await;
+                let retry_json = self
+                    .call_innertube_visionos(video_id, fresh_vd.as_deref())
+                    .await?;
+                let candidates = parse_innertube_audio_candidates(&retry_json)
+                    .map_err(|(_, msg)| CoreError::ProviderUnavailable(msg))?;
+                select_best_audio_stream(&candidates).map(|b| b.url.clone())
+            }
+            Err((false, msg)) => Err(CoreError::ProviderUnavailable(msg)),
+        }
     }
 
     /// Lightweight plain-`GET` header probe (no `Range` header, body dropped immediately).
@@ -357,8 +702,11 @@ impl YouTubeMusicProvider {
         })
     }
 
-    /// Resolve a playable audio stream for a YouTube video ID (`rustypipe` primary,
-    /// automatic `yt-dlp` progressive pipe fallback on extraction or HTTP 403 PO-token rejection).
+    /// Resolve a playable audio stream for a YouTube video ID:
+    /// 1. In-memory stream URL cache (0 ms hit)
+    /// 2. Direct InnerTube `VISIONOS` player API (~120-200 ms, direct M4A CDN URL)
+    /// 3. `rustypipe` fallback
+    /// 4. `yt-dlp` progressive pipe fallback
     pub async fn resolve_stream_for_video_id(
         &self,
         video_id: &str,
@@ -368,12 +716,33 @@ impl YouTubeMusicProvider {
             return Err(CoreError::InvalidInput("empty YouTube video_id".into()));
         }
 
-        let yt_dlp_bin = detect_yt_dlp_binary(self.yt_dlp_path.as_deref());
-        match self.resolve_via_rustypipe(trimmed, yt_dlp_bin.is_some()).await {
-            Ok(url) => Ok(ResolvedStream::HttpUrl {
+        if let Some(cached_url) = self.get_cached_stream_url(trimmed) {
+            return Ok(ResolvedStream::HttpUrl {
+                url: cached_url,
+                source: PlaybackSourceUsed::YouTubeDirect,
+            });
+        }
+
+        if let Ok(url) = self.resolve_via_innertube_visionos(trimmed).await {
+            self.put_cached_stream_url(trimmed, &url);
+            return Ok(ResolvedStream::HttpUrl {
                 url,
                 source: PlaybackSourceUsed::YouTubeDirect,
-            }),
+            });
+        }
+
+        let yt_dlp_bin = self
+            .yt_dlp_resolved
+            .clone()
+            .or_else(|| detect_yt_dlp_binary(self.yt_dlp_path.as_deref()));
+        match self.resolve_via_rustypipe(trimmed, yt_dlp_bin.is_some()).await {
+            Ok(url) => {
+                self.put_cached_stream_url(trimmed, &url);
+                Ok(ResolvedStream::HttpUrl {
+                    url,
+                    source: PlaybackSourceUsed::YouTubeDirect,
+                })
+            }
             Err(primary_err) => {
                 if let Some(binary) = yt_dlp_bin {
                     Ok(ResolvedStream::YtDlpProcess {
@@ -389,6 +758,138 @@ impl YouTubeMusicProvider {
                 }
             }
         }
+    }
+
+    /// Search YouTube Music videos (official music videos, official lyric videos, and uploads)
+    /// as a fallback when a studio track is not distributed under YouTube Music's Songs catalog.
+    pub async fn search_videos(&self, query: &str, limit: usize) -> Result<Vec<Track>, CoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let res = self
+            .client
+            .query()
+            .music_search_videos(trimmed)
+            .await
+            .map_err(|e| CoreError::Network(format!("YouTube Music video search failed: {e}")))?;
+
+        let tracks = res
+            .items
+            .items
+            .into_iter()
+            .take(limit)
+            .map(map_track_item)
+            .collect();
+        Ok(tracks)
+    }
+
+    /// Searches both YouTube Music Songs and YouTube Music Videos concurrently for user-facing
+    /// Explore search so songs distributed only as official videos (e.g. *Waiting Room* by
+    /// Phoebe Bridgers or *Pelangi* by HiVi!) still appear in search results.
+    pub async fn search_catalog(
+        &self,
+        query: &str,
+        song_limit: usize,
+        video_limit: usize,
+    ) -> Result<Vec<Track>, CoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || (song_limit == 0 && video_limit == 0) {
+            return Ok(Vec::new());
+        }
+
+        let (songs_res, videos_res) = tokio::join!(
+            self.search(trimmed, song_limit),
+            self.search_videos(trimmed, video_limit)
+        );
+
+        let mut merged = Vec::with_capacity(song_limit + video_limit);
+        let mut seen = std::collections::HashSet::with_capacity(song_limit + video_limit);
+        let mut first_err: Option<CoreError> = None;
+
+        match songs_res {
+            Ok(songs) => {
+                for t in songs {
+                    if seen.insert(t.uid.clone()) {
+                        merged.push(t);
+                    }
+                }
+            }
+            Err(e) => first_err = Some(e),
+        }
+
+        match videos_res {
+            Ok(videos) => {
+                for t in videos {
+                    if seen.insert(t.uid.clone()) {
+                        merged.push(t);
+                    }
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        if merged.is_empty() {
+            if let Some(err) = first_err {
+                return Err(err);
+            }
+        }
+        Ok(merged)
+    }
+
+    /// Fetches trending / top chart tracks from YouTube Music for Indonesia (`Country::Id`) or
+    /// Global (`Country::Zz`), falling back gracefully to a curated regional chart search if the
+    /// charts endpoint returns no items.
+    pub async fn fetch_charts(
+        &self,
+        indonesia: bool,
+        limit: usize,
+    ) -> Result<Vec<Track>, CoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let country = if indonesia {
+            rustypipe::param::Country::Id
+        } else {
+            rustypipe::param::Country::Zz
+        };
+
+        let mut tracks = Vec::with_capacity(limit);
+        let mut seen = std::collections::HashSet::with_capacity(limit);
+
+        if let Ok(charts) = self.client.query().music_charts(Some(country)).await {
+            for item in charts
+                .top_tracks
+                .into_iter()
+                .chain(charts.trending_tracks.into_iter())
+            {
+                let t = map_track_item(item);
+                if seen.insert(t.uid.clone()) {
+                    tracks.push(t);
+                    if tracks.len() >= limit {
+                        return Ok(tracks);
+                    }
+                }
+            }
+        }
+
+        if !tracks.is_empty() {
+            return Ok(tracks);
+        }
+
+        // Graceful fallback if YouTube Music's charts browse layout returns empty items.
+        let fallback_query = if indonesia {
+            "lagu hits indonesia terbaru"
+        } else {
+            "top global hits songs"
+        };
+        self.search(fallback_query, limit).await
     }
 }
 
@@ -630,5 +1131,137 @@ mod tests {
         let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), Some(script)).unwrap();
         let url = provider.resolve_via_yt_dlp("dQw4w9WgXcQ").await.unwrap();
         assert_eq!(url, "https://mock.googlevideo.com/audio.m4a");
+    }
+
+    #[test]
+    fn extracts_visitor_data_token_from_sw_js_payload() {
+        let payload = r#")]}'
+[["something",null,"CgtHTTZENnkyanpyVSir0pTYBjIKCgJJRBIEGgAgZEgB%3D","other"]]"#;
+        assert_eq!(
+            extract_visitor_data_from_sw_js(payload).as_deref(),
+            Some("CgtHTTZENnkyanpyVSir0pTYBjIKCgJJRBIEGgAgZEgB%3D")
+        );
+        assert_eq!(extract_visitor_data_from_sw_js(r#"{"empty": true}"#), None);
+    }
+
+    #[test]
+    fn parses_innertube_adaptive_audio_formats_and_flags_retryable_status() {
+        let ok_json = serde_json::json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "adaptiveFormats": [
+                    {
+                        "itag": 251,
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=251",
+                        "mimeType": "audio/webm; codecs=\"opus\"",
+                        "bitrate": 160000,
+                        "contentLength": "3500000"
+                    },
+                    {
+                        "itag": 140,
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=140",
+                        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                        "bitrate": 130677,
+                        "contentLength": "3449447"
+                    }
+                ]
+            }
+        });
+        let cands = parse_innertube_audio_candidates(&ok_json).expect("should parse OK");
+        assert_eq!(cands.len(), 2);
+        let best = select_best_audio_stream(&cands).expect("should pick m4a 140");
+        assert_eq!(best.url, "https://rr1.googlevideo.com/videoplayback?itag=140");
+        assert_eq!(best.size, 3_449_447);
+
+        let bot_json = serde_json::json!({
+            "playabilityStatus": {
+                "status": "UNPLAYABLE",
+                "reason": "Sign in to confirm you're not a bot"
+            }
+        });
+        let (retryable, _) = parse_innertube_audio_candidates(&bot_json).unwrap_err();
+        assert!(retryable);
+    }
+
+    #[test]
+    fn stream_cache_hits_and_invalidates_cleanly() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), None).unwrap();
+        assert!(provider.get_cached_stream_url("abc123").is_none());
+
+        provider.put_cached_stream_url("abc123", "https://rr1.googlevideo.com/audio.m4a");
+        assert_eq!(
+            provider.get_cached_stream_url("abc123").as_deref(),
+            Some("https://rr1.googlevideo.com/audio.m4a")
+        );
+
+        provider.invalidate_stream_cache("abc123");
+        assert!(provider.get_cached_stream_url("abc123").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "live network latency check"]
+    async fn live_visionos_resolve_latency() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), None).unwrap();
+
+        let t_warm = Instant::now();
+        provider.warm_up().await;
+        println!("warm_up: {} ms", t_warm.elapsed().as_millis());
+
+        for vid in ["JGwWNGJdvx8", "kJQP7kiw5Fk"] {
+            let t0 = Instant::now();
+            let resolved = provider.resolve_stream_for_video_id(vid).await.unwrap();
+            let elapsed = t0.elapsed().as_millis();
+            match &resolved {
+                ResolvedStream::HttpUrl { url, .. } => {
+                    println!("{vid}: HttpUrl in {elapsed} ms (len={})", url.len());
+                }
+                other => panic!("expected fast HttpUrl, got {other:?}"),
+            }
+
+            let t_cache = Instant::now();
+            let cached = provider.resolve_stream_for_video_id(vid).await.unwrap();
+            assert!(matches!(cached, ResolvedStream::HttpUrl { .. }));
+            println!("{vid}: cached hit in {} us", t_cache.elapsed().as_micros());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live network charts check"]
+    async fn live_fetch_home_charts_indonesia_and_global() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), None).unwrap();
+
+        let ytm_id = provider.fetch_charts(true, 10).await.unwrap();
+        let ytm_gl = provider.fetch_charts(false, 10).await.unwrap();
+        let sp_id = crate::spotify::fetch_spotify_chart_tracks(true, 10).await.unwrap();
+        let sp_gl = crate::spotify::fetch_spotify_chart_tracks(false, 10).await.unwrap();
+
+        println!(
+            "YTM ID ({}): {:?}",
+            ytm_id.len(),
+            ytm_id.first().map(|t| (&t.title, t.artist_display()))
+        );
+        println!(
+            "YTM Global ({}): {:?}",
+            ytm_gl.len(),
+            ytm_gl.first().map(|t| (&t.title, t.artist_display()))
+        );
+        println!(
+            "Spotify ID ({}): {:?}",
+            sp_id.len(),
+            sp_id.first().map(|t| (&t.title, t.artist_display()))
+        );
+        println!(
+            "Spotify Global ({}): {:?}",
+            sp_gl.len(),
+            sp_gl.first().map(|t| (&t.title, t.artist_display()))
+        );
+
+        assert!(!ytm_id.is_empty());
+        assert!(!ytm_gl.is_empty());
+        assert!(!sp_id.is_empty());
+        assert!(!sp_gl.is_empty());
     }
 }

@@ -8,7 +8,8 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 /// Default bytes downloaded before handing the stream to `symphonia`/`rodio` for probing.
-pub const DEFAULT_PREBUFFER_BYTES: u64 = 128 * 1024;
+/// 48 KiB holds ISO-BMFF `ftyp`/`moov`/`sidx` plus ~3 seconds of 128 kbps AAC audio for fast start.
+pub const DEFAULT_PREBUFFER_BYTES: u64 = 48 * 1024;
 
 static STREAM_FILE_GEN: AtomicU64 = AtomicU64::new(1);
 
@@ -297,8 +298,17 @@ pub fn allocate_stream_temp_path(cache_dir: &Path) -> io::Result<PathBuf> {
     Ok(cache_dir.join(format!("stream-{pid}-{gen}.tmp")))
 }
 
-/// Chunk size used when falling back to HTTP `Range` streaming (256 KiB).
-pub const HTTP_RANGE_CHUNK_BYTES: u64 = 256 * 1024;
+/// Initial chunk size for HTTP `Range` streaming (64 KiB) so playback begins after a single tiny RTT.
+pub const INITIAL_HTTP_RANGE_CHUNK_BYTES: u64 = 64 * 1024;
+
+/// Subsequent chunk size for HTTP `Range` streaming (512 KiB) so full track buffering finishes in <1s.
+pub const HTTP_RANGE_CHUNK_BYTES: u64 = 512 * 1024;
+
+/// YouTube `googlevideo.com` throttles plain un-ranged `GET` requests to ~35 KiB/s, whereas
+/// chunked `Range: bytes=start-end` requests stream at full CDN speed (5-10 MiB/s).
+pub fn should_prefer_chunked_range(url: &str) -> bool {
+    url.to_ascii_lowercase().contains("googlevideo.com")
+}
 
 fn parse_content_range_total(header_val: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
     let text = header_val?.to_str().ok()?;
@@ -309,8 +319,9 @@ fn parse_content_range_total(header_val: Option<&reqwest::header::HeaderValue>) 
 /// Download `url` progressively into `temp_path`, invoking `on_ready` as soon as the initial
 /// prebuffer threshold is reached (or the full response finishes if smaller).
 ///
-/// Tries a standard streaming `GET` first; if the CDN rejects full-file `GET` with HTTP 403,
-/// falls back automatically to chunked `Range: bytes=start-end` (`256 KiB`) requests.
+/// Uses chunked `Range: bytes=start-end` directly for YouTube `googlevideo.com` CDNs to avoid
+/// YouTube's plain-`GET` bandwidth throttle; for other URLs tries a standard streaming `GET`
+/// first and falls back automatically to chunked `Range` on HTTP 403.
 pub async fn download_http_stream<F>(
     client: reqwest::Client,
     url: String,
@@ -322,6 +333,18 @@ pub async fn download_http_stream<F>(
 where
     F: FnOnce(ProgressiveStreamReader, Option<u64>) + Send + 'static,
 {
+    if should_prefer_chunked_range(&url) {
+        return download_http_stream_chunked_range(
+            client,
+            url,
+            temp_path,
+            state,
+            prebuffer_bytes,
+            on_ready,
+        )
+        .await;
+    }
+
     let resp = client
         .get(&url)
         .send()
@@ -442,9 +465,14 @@ where
             }
         }
 
+        let chunk_span = if offset == 0 {
+            INITIAL_HTTP_RANGE_CHUNK_BYTES.max(prebuffer_bytes)
+        } else {
+            HTTP_RANGE_CHUNK_BYTES
+        };
         let end = match total_bytes {
-            Some(total) => (offset + HTTP_RANGE_CHUNK_BYTES - 1).min(total.saturating_sub(1)),
-            None => offset + HTTP_RANGE_CHUNK_BYTES - 1,
+            Some(total) => (offset + chunk_span - 1).min(total.saturating_sub(1)),
+            None => offset + chunk_span - 1,
         };
         let mut resp = client
             .get(&url)
@@ -524,7 +552,9 @@ where
 
 pub fn build_stream_http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(12))
+        .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(8)
+        .tcp_nodelay(true)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -835,6 +865,14 @@ where
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn prefers_chunked_range_for_googlevideo_cdns_only() {
+        assert!(should_prefer_chunked_range(
+            "https://rr1---sn-cp1oxu.googlevideo.com/videoplayback?itag=140"
+        ));
+        assert!(!should_prefer_chunked_range("http://127.0.0.1:8080/track.m4a"));
+    }
 
     #[test]
     fn parses_content_range_total_bytes() {

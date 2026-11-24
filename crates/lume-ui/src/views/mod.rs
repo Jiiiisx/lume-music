@@ -14,6 +14,7 @@ use lume_core::{
 };
 use lume_providers::{ScanReport, SpotifyAccountTier, SpotifyUserProfile};
 use lume_storage::{GlassmorphismMode, LyricsVisualMode, SpotifyTokenSet};
+pub use lume_storage::{PlaylistSort, PlaylistSortField, SortDirection};
 
 use crate::theme::AlbumPalette;
 
@@ -57,67 +58,32 @@ pub enum SourceFilter {
     Local,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlaylistSortField {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChartRegion {
     #[default]
-    Custom,
-    RecentlyAdded,
-    Title,
-    Artist,
-    Album,
-    Duration,
+    Indonesia,
+    Global,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortDirection {
-    #[default]
-    Asc,
-    Desc,
-}
-
-impl SortDirection {
-    pub fn flip(self) -> Self {
+impl ChartRegion {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Asc => Self::Desc,
-            Self::Desc => Self::Asc,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PlaylistSort {
-    pub field: PlaylistSortField,
-    pub direction: SortDirection,
-}
-
-impl PlaylistSort {
-    pub fn select(&mut self, field: PlaylistSortField) {
-        if field == PlaylistSortField::Custom {
-            self.field = PlaylistSortField::Custom;
-            self.direction = SortDirection::Asc;
-            return;
-        }
-        if self.field == field {
-            self.direction = self.direction.flip();
-        } else {
-            self.field = field;
-            self.direction = match field {
-                PlaylistSortField::RecentlyAdded => SortDirection::Desc,
-                _ => SortDirection::Asc,
-            };
+            Self::Indonesia => "Indonesia",
+            Self::Global => "Global",
         }
     }
 
-    pub fn toggle_direction(&mut self) {
-        self.direction = self.direction.flip();
+    pub fn is_indonesia(self) -> bool {
+        matches!(self, Self::Indonesia)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveNav {
+    #[default]
+    Home,
     Search,
     LikedSongs,
-    #[default]
     LocalFiles,
     Playlist(String),
     Settings,
@@ -153,6 +119,18 @@ pub enum Message {
 
     // Navigation & modals
     SelectNav(ActiveNav),
+    SelectHomeRegion(ChartRegion),
+    RefreshHomeCharts,
+    ToggleExpandSpotifyTrending,
+    ToggleExpandYtmTrending,
+    HomeSpotifyChartsLoaded {
+        region: ChartRegion,
+        result: Result<Vec<Track>, String>,
+    },
+    HomeYtmChartsLoaded {
+        region: ChartRegion,
+        result: Result<Vec<Track>, String>,
+    },
     SetViewMode(ViewMode),
     ToggleQueueDrawer,
     OpenNewPlaylistModal,
@@ -208,6 +186,8 @@ pub enum Message {
     TogglePlaylistSortDirection,
     ToggleTrackMenu(String),
     CloseTrackMenu,
+    TogglePlayerMenu,
+    ClosePlayerMenu,
 
     // Playback & queue controls
     PlayTrackList {
@@ -243,6 +223,7 @@ pub enum Message {
     StreamResolved {
         request_id: u64,
         track: Track,
+        video_id: Option<String>,
         result: Result<ResolvedStream, String>,
     },
     PaletteLoaded {
@@ -296,6 +277,8 @@ pub enum Message {
     Smtc(SmtcAction),
     SmtcHwndReady(Option<usize>),
     DismissToast,
+    ExpireToast(u64),
+    BackgroundTaskDone,
 }
 
 #[derive(Debug, Clone)]

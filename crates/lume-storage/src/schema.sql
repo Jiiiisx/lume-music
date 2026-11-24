@@ -79,3 +79,13 @@ CREATE TABLE IF NOT EXISTS playback_session (
     muted INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS play_history (
+    track_uid TEXT PRIMARY KEY,
+    played_at INTEGER NOT NULL,
+    play_count INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (track_uid) REFERENCES tracks(uid) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_play_history_recent
+    ON play_history(played_at DESC);

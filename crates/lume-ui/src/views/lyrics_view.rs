@@ -2,28 +2,28 @@ use std::collections::HashMap;
 
 use iced::alignment::Horizontal;
 use iced::widget::{
-    button, column, container, image, mouse_area, rich_text, row, scrollable, slider, space, span,
-    text, Id,
+    button, column, container, image, mouse_area, row, scrollable, slider, space, text, Id,
 };
 use iced::{Alignment, Background, Color, Element, Length, Padding, Shadow, Vector};
-use lume_core::{LyricsData, PlaybackStatus, RepeatMode};
+use lume_core::{LyricsData, PlaybackStatus, RepeatMode, Track};
 use lume_storage::LyricsVisualMode;
 
 use crate::lyrics_anim::{
-    active_display_index, bloom_sweep_runs, build_display_timeline, interlude_dot_states,
+    active_display_index, bloom_interlude_state, build_display_timeline, interlude_dot_states,
     line_visual_style, lyrics_bottom_spacer_px, lyrics_top_spacer_px, lyrics_viewport_metrics,
     resolve_line_words, LyricsDisplayItem, LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX,
     LYRICS_LINE_HEIGHT_MULT,
 };
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
+use crate::views::queue_drawer::view_inline_queue;
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    cover_art_widget, ghost_button_style, glass_button_style, glass_elevated_style, icon_back,
-    icon_heart, icon_lyrics, icon_music, icon_next, icon_pause, icon_play, icon_prev, icon_queue,
-    icon_refresh, icon_repeat, icon_shuffle, icon_volume, play_circle_button_style,
-    primary_pill_button_style, seek_slider_style, thin_scrollable_style,
-    traffic_light_button_style, ICON_HEART_ACTIVE, ICON_LIGHT, ICON_MUTED, TEXT_MUTED,
-    TEXT_PRIMARY, TEXT_SECONDARY,
+    cover_art_widget, ghost_button_style, glass_button_style, glass_elevated_style,
+    hidden_scrollbar, icon_back, icon_heart, icon_lyrics, icon_more, icon_music, icon_next,
+    icon_pause, icon_play, icon_prev, icon_queue, icon_refresh, icon_repeat, icon_shuffle,
+    icon_volume, play_circle_button_style, primary_pill_button_style, seek_slider_style,
+    thin_scrollable_style, traffic_light_button_style, SpicyLyricLine, ICON_HEART_ACTIVE,
+    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn lyrics_scroll_id() -> Id {
@@ -67,6 +67,8 @@ pub struct LyricsViewProps<'a> {
     pub art_handles: &'a HashMap<String, image::Handle>,
     pub time_s: f32,
     pub queue_open: bool,
+    pub queue_tracks: Vec<&'a Track>,
+    pub queue_current_pos: Option<usize>,
     pub status_banner: Option<&'a str>,
     pub accent: AccentTheme,
 }
@@ -127,16 +129,19 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         "Searching...".to_string()
     } else if let Some(data) = props.lyrics {
         let provider_label = match data.provider.as_str() {
+            "apple" => "Apple Music",
+            "musixmatch" => "Musixmatch",
+            "qq" => "QQ Music",
+            "lyricsplus" => "LyricsPlus",
+            "spotify" => "Spotify",
+            "netease" => "NetEase",
             "sidecar_ttml" => "TTML",
             "sidecar_lrc" => "Local .lrc",
             "embedded" => "Embedded",
-            "lrclib" => "LRCLIB",
+            "lrclib" | "lrclib_checked" | "lrclib_v2" => "LRCLIB",
             other => other,
         };
-        let has_native_words = data
-            .synced
-            .iter()
-            .any(|l| l.words.as_ref().is_some_and(|w| !w.is_empty()));
+        let has_native_words = data.has_native_syllables();
         if !data.synced.is_empty() {
             if has_native_words {
                 format!("Syllable • {provider_label}")
@@ -320,8 +325,18 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         } else {
             Element::from(space().width(0))
         },
+        if track.is_some() {
+            Element::from(
+                button(icon_more(16.0, ICON_LIGHT))
+                    .padding([6, 7])
+                    .style(ghost_button_style)
+                    .on_press(Message::TogglePlayerMenu),
+            )
+        } else {
+            Element::from(space().width(0))
+        },
     ]
-    .spacing(6)
+    .spacing(4)
     .align_y(Alignment::Center);
 
     let meta_row = row![meta_text, meta_actions]
@@ -470,7 +485,16 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         );
     }
 
-    right_col = right_col.push(build_lyrics_column(&props));
+    if props.queue_open {
+        right_col = right_col.push(view_inline_queue(
+            &props.queue_tracks,
+            props.queue_current_pos,
+            props.art_handles,
+            accent,
+        ));
+    } else {
+        right_col = right_col.push(build_lyrics_column(&props));
+    }
 
     let right_cinema_stage = container(right_col)
         .width(Length::Fill)
@@ -526,23 +550,34 @@ fn render_interlude_dots<'a>(
     pos_ms: u64,
     is_active: bool,
     fallback_opacity: f32,
+    mode: LyricsVisualMode,
 ) -> Element<'a, Message> {
-    let states = if is_active {
-        interlude_dot_states(start_ms, end_ms, pos_ms)
+    let states: [(f32, f32); 3] = if is_active {
+        if mode == LyricsVisualMode::SpicySmooth {
+            let b = bloom_interlude_state(start_ms, end_ms, pos_ms);
+            [
+                (b.dot_opacities[0] * b.group_opacity, b.group_scale),
+                (b.dot_opacities[1] * b.group_opacity, b.group_scale),
+                (b.dot_opacities[2] * b.group_opacity, b.group_scale),
+            ]
+        } else {
+            interlude_dot_states(start_ms, end_ms, pos_ms)
+        }
     } else {
         [(fallback_opacity, 0.78); 3]
     };
 
     let mut dots = row![].spacing(12).align_y(Alignment::Center);
     for (opacity, scale) in states {
-        let diameter = (14.0 * scale).clamp(9.0, 18.0);
+        let diameter = (13.0 * scale).clamp(7.0, 19.0);
+        let dot_alpha = opacity.clamp(0.0, 1.0);
         let dot = container(space().width(diameter).height(diameter)).style(move |_| {
             container::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, opacity))),
+                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, dot_alpha))),
                 border: iced::border::rounded(diameter * 0.5),
-                shadow: if is_active && opacity > 0.65 {
+                shadow: if is_active && dot_alpha > 0.55 {
                     Shadow {
-                        color: Color::from_rgba(1.0, 1.0, 1.0, (opacity - 0.5) * 0.45),
+                        color: Color::from_rgba(1.0, 1.0, 1.0, (dot_alpha - 0.45) * 0.45),
                         offset: Vector::ZERO,
                         blur_radius: 10.0,
                     }
@@ -566,17 +601,7 @@ fn subtle_lyrics_scrollable_style(
     theme: &iced::Theme,
     status: scrollable::Status,
 ) -> scrollable::Style {
-    let mut style = thin_scrollable_style(theme, status);
-    let thumb_alpha = match status {
-        scrollable::Status::Active { .. } => 0.08,
-        scrollable::Status::Hovered { .. } => 0.22,
-        scrollable::Status::Dragged { .. } => 0.36,
-    };
-    style.vertical_rail.background = None;
-    style.vertical_rail.scroller.background =
-        Background::Color(Color::from_rgba(1.0, 1.0, 1.0, thumb_alpha));
-    style.vertical_rail.scroller.border = iced::border::rounded(3.0);
-    style
+    thin_scrollable_style(theme, status)
 }
 
 fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> {
@@ -622,19 +647,30 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
     };
 
     if props.lyrics_loading {
+        let phase = props.time_s * 3.4;
+        let mut dots = row![].spacing(10).align_y(Alignment::Center);
+        for i in 0..3 {
+            let wave = ((phase - (i as f32) * 0.65).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let alpha = 0.28 + 0.58 * wave;
+            let size = 8.0 + 2.5 * wave;
+            dots = dots.push(
+                container(space().width(size).height(size)).style(move |_| container::Style {
+                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, alpha))),
+                    border: iced::border::rounded(size * 0.5),
+                    ..Default::default()
+                }),
+            );
+        }
+
         return container(
             column![
-                empty_medallion(icon_lyrics(26.0, accent.light), accent),
-                text("Searching lyrics...")
-                    .size(21)
-                    .font(FONT_BOLD)
-                    .color(TEXT_PRIMARY),
-                text("Checking SQLite cache, .ttml/.lrc files & LRCLIB")
-                    .size(13)
-                    .color(TEXT_SECONDARY)
-                    .align_x(Horizontal::Center),
+                dots,
+                text("Loading lyrics...")
+                    .size(14)
+                    .font(FONT_MEDIUM)
+                    .color(Color::from_rgba(1.0, 1.0, 1.0, 0.62)),
             ]
-            .spacing(10)
+            .spacing(12)
             .align_x(Alignment::Center),
         )
         .width(Length::Fill)
@@ -716,7 +752,11 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
             let is_active = distance == 0;
 
             let row_el: Element<'a, Message> = match *item {
-                LyricsDisplayItem::Interlude { start_ms, end_ms } => {
+                LyricsDisplayItem::Interlude {
+                    start_ms,
+                    end_ms,
+                    opposite_aligned,
+                } => {
                     let dot_alpha = if distance < 0 {
                         (style.opacity * 0.55).max(0.08)
                     } else {
@@ -728,91 +768,121 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                         props.info.position_ms,
                         is_active,
                         dot_alpha,
+                        props.lyrics_mode,
                     );
-                    mouse_area(
-                        container(dots)
-                            .width(Length::Fill)
-                            .align_x(Horizontal::Left),
-                    )
-                    .on_press(Message::SeekTo(start_ms))
-                    .into()
+                    let h_align = if opposite_aligned {
+                        Horizontal::Right
+                    } else {
+                        Horizontal::Left
+                    };
+                    mouse_area(container(dots).width(Length::Fill).align_x(h_align))
+                        .on_press(Message::SeekTo(start_ms))
+                        .into()
                 }
                 LyricsDisplayItem::Line {
                     line_idx,
                     start_ms,
+                    end_ms,
                     is_bg_vocal,
+                    opposite_aligned,
                 } => {
                     let line = &lyrics.synced[line_idx];
+                    let pos_ms = props.info.position_ms;
+                    let bloom_fx = props.lyrics_mode == LyricsVisualMode::SpicySmooth;
                     let base_active = if is_bg_vocal { 26.0 } else { 36.0 };
                     let base_idle = if is_bg_vocal { 23.0 } else { 31.0 };
-                    let spring_scale = if props.lyrics_mode == LyricsVisualMode::SpicySmooth {
-                        props.active_scale
+
+                    // Support overlapping duet / background lines and Bloom's 500ms settling tail
+                    // (`RushMs` + Flame settle) so lines never snap abruptly when finishing.
+                    let is_overlapping_active =
+                        !is_active && pos_ms >= start_ms && pos_ms <= end_ms;
+                    let is_settling = !is_active
+                        && distance == -1
+                        && pos_ms > end_ms
+                        && pos_ms <= end_ms.saturating_add(500);
+
+                    let h_align = if opposite_aligned {
+                        Horizontal::Right
                     } else {
-                        1.0
-                    };
-                    let font_size = if is_active {
-                        base_active * spring_scale
-                    } else {
-                        base_idle * style.scale
+                        Horizontal::Left
                     };
 
-                    let line_content: Element<'a, Message> = if is_active {
+                    if is_active || is_overlapping_active || is_settling {
                         let resolved_words =
                             resolve_line_words(&lyrics.synced, line_idx, props.info.duration_ms);
-                        let runs = bloom_sweep_runs(&resolved_words, props.info.position_ms);
-                        if !runs.is_empty() {
-                            let bg_dim = if is_bg_vocal { 0.85 } else { 1.0 };
-                            let spans: Vec<iced::widget::text::Span<'a, ()>> = runs
-                                .into_iter()
-                                .map(|(chunk, alpha)| {
-                                    span(chunk)
-                                        .size(font_size)
-                                        .font(FONT_BOLD)
-                                        .color(Color::from_rgba(
-                                            1.0,
-                                            1.0,
-                                            1.0,
-                                            (alpha * bg_dim).clamp(0.0, 1.0),
-                                        ))
-                                })
-                                .collect();
-                            rich_text(spans)
-                                .line_height(LYRICS_LINE_HEIGHT_MULT)
-                                .align_x(Horizontal::Left)
-                                .into()
+                        let settle_opacity = if is_settling {
+                            let t = ((pos_ms.saturating_sub(end_ms)) as f32 / 500.0).clamp(0.0, 1.0);
+                            1.0 - t * (1.0 - (style.opacity * 0.72).max(0.24))
+                        } else if is_overlapping_active {
+                            0.94
                         } else {
-                            text(line.text.as_str())
-                                .size(font_size)
-                                .font(FONT_BOLD)
-                                .line_height(LYRICS_LINE_HEIGHT_MULT)
-                                .color(Color::WHITE)
-                                .align_x(Horizontal::Left)
-                                .into()
+                            1.0
+                        };
+                        let active_size = if is_settling {
+                            let t = ((pos_ms.saturating_sub(end_ms)) as f32 / 500.0).clamp(0.0, 1.0);
+                            base_active + (base_idle * style.scale - base_active) * t
+                        } else {
+                            base_active
+                        };
+
+                        if !resolved_words.is_empty() {
+                            container(
+                                SpicyLyricLine::new(
+                                    resolved_words,
+                                    pos_ms,
+                                    active_size,
+                                    FONT_BOLD,
+                                    is_bg_vocal,
+                                    opposite_aligned,
+                                    bloom_fx,
+                                    settle_opacity,
+                                )
+                                .on_press(Message::SeekTo(start_ms)),
+                            )
+                            .padding([0, 6])
+                            .width(Length::Fill)
+                            .into()
+                        } else {
+                            mouse_area(
+                                container(
+                                    text(line.text.as_str())
+                                        .size(active_size)
+                                        .font(FONT_BOLD)
+                                        .line_height(LYRICS_LINE_HEIGHT_MULT)
+                                        .color(Color::from_rgba(1.0, 1.0, 1.0, settle_opacity))
+                                        .align_x(h_align),
+                                )
+                                .padding([2, 6])
+                                .width(Length::Fill)
+                                .align_x(h_align),
+                            )
+                            .on_press(Message::SeekTo(start_ms))
+                            .into()
                         }
                     } else {
+                        let font_size = base_idle * style.scale;
                         let bg_dim = if is_bg_vocal { 0.78 } else { 1.0 };
                         let alpha = if distance < 0 {
                             (style.opacity * 0.68 * bg_dim).max(0.08)
                         } else {
                             (style.opacity * bg_dim).max(0.08)
                         };
-                        text(line.text.as_str())
-                            .size(font_size)
-                            .font(FONT_BOLD)
-                            .line_height(LYRICS_LINE_HEIGHT_MULT)
-                            .color(Color::from_rgba(1.0, 1.0, 1.0, alpha))
-                            .align_x(Horizontal::Left)
-                            .into()
-                    };
-
-                    mouse_area(
-                        container(line_content)
+                        mouse_area(
+                            container(
+                                text(line.text.as_str())
+                                    .size(font_size)
+                                    .font(FONT_BOLD)
+                                    .line_height(LYRICS_LINE_HEIGHT_MULT)
+                                    .color(Color::from_rgba(1.0, 1.0, 1.0, alpha))
+                                    .align_x(h_align),
+                            )
                             .padding([2, 6])
                             .width(Length::Fill)
-                            .align_x(Horizontal::Left),
-                    )
-                    .on_press(Message::SeekTo(start_ms))
-                    .into()
+                            .align_x(h_align),
+                        )
+                        .on_press(Message::SeekTo(start_ms))
+                        .into()
+                    }
                 }
             };
 
@@ -824,6 +894,7 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
         return container(
             scrollable(lines_col)
                 .id(lyrics_scroll_id())
+                .direction(scrollable::Direction::Vertical(hidden_scrollbar()))
                 .height(Length::Fill)
                 .width(Length::Fill)
                 .style(subtle_lyrics_scrollable_style),
@@ -849,6 +920,7 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                 .padding([28, 36])
                 .align_x(Horizontal::Left),
             )
+            .direction(scrollable::Direction::Vertical(hidden_scrollbar()))
             .height(Length::Fill)
             .width(Length::Fill)
             .style(thin_scrollable_style),

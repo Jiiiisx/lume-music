@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, mouse_area, row, slider, space, text};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, slider, space, text};
 use iced::{Alignment, Background, Element, Length};
-use lume_core::{PlaybackStatus, RepeatMode};
+use lume_core::{PlaybackStatus, Playlist, RepeatMode, Track, TrackSource};
 
-use crate::theme::{AccentTheme, FONT_MEDIUM, FONT_SEMIBOLD};
+use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    cover_art_widget, floating_dock_style, ghost_button_style, glass_button_style, icon_heart,
-    icon_lyrics, icon_next, icon_pause, icon_play, icon_prev, icon_queue, icon_repeat,
-    icon_shuffle, icon_volume, play_circle_button_style, seek_slider_style, ICON_HEART_ACTIVE,
-    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    cover_art_widget, floating_dock_style, ghost_button_style, glass_button_style,
+    glass_elevated_style, hidden_scrollbar, icon_heart, icon_lyrics, icon_more, icon_next,
+    icon_pause, icon_play, icon_playlist, icon_plus, icon_prev, icon_queue, icon_refresh,
+    icon_repeat, icon_shuffle, icon_volume, play_circle_button_style, seek_slider_style,
+    thin_scrollable_style, GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE, ICON_LIGHT, ICON_MUTED,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 fn format_mm_ss(ms: u64) -> String {
@@ -22,6 +24,7 @@ pub fn view_player_bar<'a>(
     info: NowPlayingInfo<'a>,
     art_handles: &'a HashMap<String, image::Handle>,
     queue_open: bool,
+    player_menu_open: bool,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
     let track = info.track;
@@ -67,8 +70,29 @@ pub fn view_player_bar<'a>(
         space().width(0).into()
     };
 
-    let left_track_info = row![track_click_area, like_btn]
-        .spacing(8)
+    let more_btn: Element<'a, Message> = if track.is_some() {
+        button(icon_more(
+            15.0,
+            if player_menu_open {
+                accent.on_primary
+            } else {
+                ICON_MUTED
+            },
+        ))
+        .padding([7, 7])
+        .style(if player_menu_open {
+            glass_button_style(true, accent)
+        } else {
+            glass_button_style(false, accent)
+        })
+        .on_press(Message::TogglePlayerMenu)
+        .into()
+    } else {
+        space().width(0).into()
+    };
+
+    let left_track_info = row![track_click_area, like_btn, more_btn]
+        .spacing(6)
         .align_y(Alignment::Center);
 
     let is_playing = matches!(
@@ -237,4 +261,174 @@ pub fn view_player_bar<'a>(
     })
     .width(Length::Fill)
     .into()
+}
+
+/// Floating smoked-glass action menu for the currently playing track (opened via `•••` on the
+/// player bar or Now Playing lyrics view).
+pub fn view_player_menu_popover<'a>(
+    track: &'a Track,
+    playlists: &'a [Playlist],
+    accent: AccentTheme,
+) -> Element<'a, Message> {
+    let mut items = column![
+        column![
+            text(track.title.as_str())
+                .size(13)
+                .font(FONT_BOLD)
+                .color(TEXT_PRIMARY),
+            text(track.artist_display())
+                .size(11)
+                .color(TEXT_SECONDARY),
+        ]
+        .spacing(2)
+        .padding([2, 6]),
+        container(space().height(1))
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(GLASS_SUBTLE_BORDER)),
+                ..Default::default()
+            }),
+        button(
+            row![
+                icon_play(12.0, ICON_LIGHT),
+                text("Play Next").size(12).font(FONT_MEDIUM).color(TEXT_PRIMARY),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(ghost_button_style)
+        .on_press(Message::PlayNext(track.clone())),
+        button(
+            row![
+                icon_queue(13.0, ICON_LIGHT),
+                text("Add to Queue")
+                    .size(12)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_PRIMARY),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(ghost_button_style)
+        .on_press(Message::AddToQueue(track.clone())),
+    ]
+    .spacing(4)
+    .width(Length::Fixed(248.0));
+
+    if matches!(track.source, TrackSource::Spotify { .. }) {
+        items = items.push(
+            button(
+                row![
+                    icon_refresh(12.0, accent.light),
+                    text("Wrong version? Re-match")
+                        .size(12)
+                        .font(FONT_MEDIUM)
+                        .color(accent.light),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([7, 10])
+            .style(ghost_button_style)
+            .on_press(Message::RematchYoutubeFallback(track.clone())),
+        );
+    }
+
+    items = items.push(
+        container(space().height(1))
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(GLASS_SUBTLE_BORDER)),
+                ..Default::default()
+            }),
+    );
+
+    items = items.push(
+        container(
+            text("ADD TO PLAYLIST")
+                .size(10)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_MUTED),
+        )
+        .padding([4, 8]),
+    );
+
+    let editable_playlists: Vec<&Playlist> = playlists
+        .iter()
+        .filter(|pl| pl.origin.is_editable())
+        .collect();
+
+    if editable_playlists.is_empty() {
+        items = items.push(
+            container(
+                text("No custom playlists yet")
+                    .size(11)
+                    .color(TEXT_MUTED),
+            )
+            .padding([4, 8]),
+        );
+    } else {
+        let mut pl_col = column![].spacing(2);
+        for pl in editable_playlists {
+            pl_col = pl_col.push(
+                button(
+                    row![
+                        icon_playlist(13.0, accent.light),
+                        text(pl.name.as_str())
+                            .size(12)
+                            .font(FONT_MEDIUM)
+                            .color(TEXT_PRIMARY)
+                            .width(Length::Fill),
+                        text(format!("{}", pl.track_count))
+                            .size(10)
+                            .color(TEXT_MUTED),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([7, 10])
+                .style(ghost_button_style)
+                .on_press(Message::AddTrackToPlaylist {
+                    playlist_id: pl.id.clone(),
+                    track: track.clone(),
+                }),
+            );
+        }
+        items = items.push(
+            scrollable(pl_col)
+                .direction(scrollable::Direction::Vertical(hidden_scrollbar()))
+                .height(Length::Shrink)
+                .style(thin_scrollable_style),
+        );
+    }
+
+    items = items.push(
+        button(
+            row![
+                icon_plus(12.0, accent.light),
+                text("New Playlist")
+                    .size(12)
+                    .font(FONT_SEMIBOLD)
+                    .color(accent.light),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(ghost_button_style)
+        .on_press(Message::OpenNewPlaylistModal),
+    );
+
+    container(items)
+        .padding(10)
+        .max_height(380.0)
+        .style(glass_elevated_style)
+        .into()
 }

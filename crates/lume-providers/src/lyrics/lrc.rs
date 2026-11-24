@@ -90,6 +90,8 @@ fn parse_inline_words(body: &str) -> (String, Option<Vec<LyricsWord>>) {
                 start_ms,
                 end_ms: start_ms,
                 text,
+                is_part_of_word: false,
+                is_background: false,
             })
             .collect();
         (clean_trimmed, Some(words))
@@ -137,8 +139,11 @@ pub fn parse_lrc(raw: &str, provider: &str) -> LyricsData {
         for ts in timestamps {
             synced.push(LyricsLine {
                 time_ms: ts,
+                end_ms: None,
                 text: text.clone(),
                 words: words.clone(),
+                opposite_aligned: false,
+                is_background: false,
             });
         }
     }

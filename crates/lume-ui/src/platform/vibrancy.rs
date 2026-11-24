@@ -80,22 +80,22 @@ mod win_backdrop {
     fn backdrop_tint(mode: GlassmorphismMode) -> Color {
         match mode {
             GlassmorphismMode::PureClear => Color {
-                A: 4,
-                R: 16,
-                G: 16,
-                B: 18,
+                A: 78,
+                R: 10,
+                G: 10,
+                B: 14,
             },
             GlassmorphismMode::WindowsAcrylic => Color {
-                A: 12,
-                R: 16,
-                G: 16,
-                B: 18,
+                A: 118,
+                R: 10,
+                G: 10,
+                B: 14,
             },
             GlassmorphismMode::DynamicAlbumBlur => Color {
-                A: 24,
-                R: 14,
-                G: 14,
-                B: 16,
+                A: 142,
+                R: 10,
+                G: 10,
+                B: 14,
             },
         }
     }

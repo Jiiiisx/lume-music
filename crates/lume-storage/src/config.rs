@@ -1,8 +1,66 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::StorageError;
+
+/// Sort field for tracks inside a playlist view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistSortField {
+    #[default]
+    Custom,
+    RecentlyAdded,
+    Title,
+    Artist,
+    Album,
+    Duration,
+}
+
+/// Sort direction for playlist track ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    pub fn flip(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+}
+
+/// Per-playlist sort preference persisted in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PlaylistSort {
+    pub field: PlaylistSortField,
+    pub direction: SortDirection,
+}
+
+impl PlaylistSort {
+    pub fn select(&mut self, field: PlaylistSortField) {
+        if self.field == field {
+            self.direction = self.direction.flip();
+        } else {
+            self.field = field;
+            self.direction = match field {
+                PlaylistSortField::RecentlyAdded => SortDirection::Desc,
+                _ => SortDirection::Asc,
+            };
+        }
+    }
+
+    pub fn toggle_direction(&mut self) {
+        self.direction = self.direction.flip();
+    }
+}
 
 /// Glassmorphism backdrop strategy in Browse mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -34,6 +92,7 @@ pub struct AppConfig {
     pub spotify_client_id: Option<String>,
     pub yt_dlp_path: Option<PathBuf>,
     pub local_folders: Vec<PathBuf>,
+    pub playlist_sorts: BTreeMap<String, PlaylistSort>,
 }
 
 impl Default for AppConfig {
@@ -46,6 +105,7 @@ impl Default for AppConfig {
             spotify_client_id: None,
             yt_dlp_path: None,
             local_folders: Vec::new(),
+            playlist_sorts: BTreeMap::new(),
         }
     }
 }
@@ -96,10 +156,24 @@ mod tests {
         updated.glassmorphism_mode = GlassmorphismMode::DynamicAlbumBlur;
         updated.lyrics_visual_mode = LyricsVisualMode::UltraLight;
         updated.local_folders.push(PathBuf::from(r"D:\Music"));
+        updated.playlist_sorts.insert(
+            "pl-1".to_string(),
+            PlaylistSort {
+                field: PlaylistSortField::Custom,
+                direction: SortDirection::Desc,
+            },
+        );
         updated.save(&path).unwrap();
 
         let reloaded = AppConfig::load_or_default(&path).unwrap();
         assert_eq!(reloaded, updated);
+        assert_eq!(
+            reloaded.playlist_sorts.get("pl-1"),
+            Some(&PlaylistSort {
+                field: PlaylistSortField::Custom,
+                direction: SortDirection::Desc,
+            })
+        );
     }
 
     #[test]

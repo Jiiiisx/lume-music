@@ -101,11 +101,25 @@ pub fn parse_ttml(xml: &str, provider: &str) -> LyricsData {
 
         let p_begin = extract_attr(p_attrs, "begin").and_then(|v| parse_ttml_time_ms(&v));
         let p_end = extract_attr(p_attrs, "end").and_then(|v| parse_ttml_time_ms(&v));
+        let p_agent = extract_attr(p_attrs, "ttm:agent")
+            .or_else(|| extract_attr(p_attrs, "agent"))
+            .unwrap_or_default();
+        let opposite_aligned = matches!(p_agent.trim(), "v2" | "v3" | "v4");
+        let p_is_bg = extract_attr(p_attrs, "ttm:role")
+            .is_some_and(|r| r.eq_ignore_ascii_case("x-bg"));
 
         // Parse nested `<span begin="..." end="...">text</span>` syllable/word elements.
-        let mut words = Vec::new();
+        let mut words: Vec<LyricsWord> = Vec::new();
         let mut s_cursor = 0usize;
         while let Some(rel_s) = p_inner[s_cursor..].find("<span") {
+            let gap_before = &p_inner[s_cursor..s_cursor + rel_s];
+            let has_space_before = gap_before.chars().any(|c| c.is_whitespace());
+            if !words.is_empty() && !has_space_before {
+                if let Some(prev) = words.last_mut() {
+                    prev.is_part_of_word = true;
+                }
+            }
+
             let s_start = s_cursor + rel_s;
             let Some(rel_s_gt) = p_inner[s_start..].find('>') else {
                 break;
@@ -120,24 +134,33 @@ pub fn parse_ttml(xml: &str, provider: &str) -> LyricsData {
 
             let w_start = extract_attr(s_attrs, "begin").and_then(|v| parse_ttml_time_ms(&v));
             let w_end = extract_attr(s_attrs, "end").and_then(|v| parse_ttml_time_ms(&v));
-            let text = unescape_xml(&strip_tags(s_body)).trim().to_string();
+            let is_bg_span = p_is_bg
+                || extract_attr(s_attrs, "ttm:role")
+                    .is_some_and(|r| r.eq_ignore_ascii_case("x-bg"));
+            let raw_text = unescape_xml(&strip_tags(s_body));
+            let text = raw_text.trim().to_string();
             if let (Some(start_ms), Some(end_ms)) = (w_start, w_end) {
                 if !text.is_empty() {
                     words.push(LyricsWord {
                         start_ms,
                         end_ms: end_ms.max(start_ms + 1),
                         text,
+                        is_part_of_word: false,
+                        is_background: is_bg_span,
                     });
                 }
             }
         }
 
         let line_text = if !words.is_empty() {
-            words
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+            let mut joined = String::new();
+            for (idx, w) in words.iter().enumerate() {
+                joined.push_str(&w.text);
+                if idx + 1 < words.len() && !w.is_part_of_word {
+                    joined.push(' ');
+                }
+            }
+            joined
         } else {
             unescape_xml(&strip_tags(p_inner))
                 .split_whitespace()
@@ -152,11 +175,14 @@ pub fn parse_ttml(xml: &str, provider: &str) -> LyricsData {
 
         let time_ms = p_begin.or_else(|| words.first().map(|w| w.start_ms));
         if let Some(time_ms) = time_ms {
-            let _ = p_end;
+            let end_ms = p_end.or_else(|| words.last().map(|w| w.end_ms));
             synced.push(LyricsLine {
                 time_ms,
+                end_ms,
                 text: line_text,
                 words: (!words.is_empty()).then_some(words),
+                opposite_aligned,
+                is_background: p_is_bg,
             });
         }
     }

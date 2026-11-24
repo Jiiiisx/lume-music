@@ -5,7 +5,9 @@ pub mod error;
 pub mod tokens;
 
 pub use art_cache::ArtCache;
-pub use config::{AppConfig, GlassmorphismMode, LyricsVisualMode};
+pub use config::{
+    AppConfig, GlassmorphismMode, LyricsVisualMode, PlaylistSort, PlaylistSortField, SortDirection,
+};
 pub use db::{
     Database, LyricsCacheLookup, PendingMutation, PlaybackSession, YtMapping, NEGATIVE_LYRICS_TTL_S,
 };

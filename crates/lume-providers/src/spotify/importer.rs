@@ -66,6 +66,27 @@ pub async fn fetch_spotify_track_oembed_cover(
         .map(|u| upgrade_spotify_album_art_url(&u))
 }
 
+/// Public Spotify editorial chart playlist IDs (work without authentication via embed endpoint).
+pub const SPOTIFY_TOP_50_INDONESIA_ID: &str = "37i9dQZEVXbObFQZ3JLcXt";
+pub const SPOTIFY_TOP_50_GLOBAL_ID: &str = "37i9dQZEVXbMDoHDwVN2tF";
+
+/// Fetches trending tracks from Spotify's public Top 50 Indonesia or Top 50 Global chart.
+pub async fn fetch_spotify_chart_tracks(
+    indonesia: bool,
+    limit: usize,
+) -> Result<Vec<Track>, CoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let playlist_id = if indonesia {
+        SPOTIFY_TOP_50_INDONESIA_ID
+    } else {
+        SPOTIFY_TOP_50_GLOBAL_ID
+    };
+    let imported = import_spotify_playlist_url(&canonical_playlist_url(playlist_id)).await?;
+    Ok(imported.tracks.into_iter().take(limit).collect())
+}
+
 /// Parsed result of importing a public Spotify playlist URL via its embed payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedSpotifyPlaylist {
