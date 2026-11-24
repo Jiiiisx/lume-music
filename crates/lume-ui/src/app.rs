@@ -1016,6 +1016,24 @@ impl LumeApp {
                             });
                         }
                     }
+                    Ok(ResolvedStream::YtDlpProcess {
+                        binary,
+                        watch_url,
+                        format_selector,
+                        source,
+                    }) => {
+                        self.source_used = Some(source);
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.send(AudioCommand::LoadYtDlpStream {
+                                binary,
+                                video_url: watch_url,
+                                format_selector,
+                                track_uid: track.uid,
+                                duration_ms: track.duration_ms,
+                                mime_hint: Some("m4a".to_string()),
+                            });
+                        }
+                    }
                     Ok(ResolvedStream::LocalFile(path)) => {
                         self.source_used = Some(PlaybackSourceUsed::LocalFile);
                         if let Some(audio) = &self.audio {

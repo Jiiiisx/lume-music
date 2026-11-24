@@ -171,6 +171,12 @@ pub enum ResolvedStream {
         url: String,
         source: PlaybackSourceUsed,
     },
+    YtDlpProcess {
+        binary: PathBuf,
+        watch_url: String,
+        format_selector: String,
+        source: PlaybackSourceUsed,
+    },
     SpotifyTrack {
         id: String,
     },

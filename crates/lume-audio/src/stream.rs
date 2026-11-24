@@ -509,6 +509,130 @@ pub fn build_stream_http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Stream audio from `yt-dlp -f <selector> --no-playlist --no-part --fixup never -o - <url>`
+/// into `temp_path`, killing the child process automatically if cancelled/aborted.
+pub async fn download_yt_dlp_stream<F>(
+    binary: PathBuf,
+    video_url: String,
+    format_selector: String,
+    temp_path: PathBuf,
+    state: Arc<StreamBufferState>,
+    on_ready: F,
+) -> Result<(), String>
+where
+    F: FnOnce(ProgressiveStreamReader, Option<u64>) + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args([
+        "-f",
+        &format_selector,
+        "--no-playlist",
+        "--no-part",
+        "--fixup",
+        "never",
+        "--no-warnings",
+        "-o",
+        "-",
+        &video_url,
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start yt-dlp ({}): {e}", binary.display()))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "yt-dlp stdout pipe unavailable".to_string())?;
+    let mut stderr = child.stderr.take();
+
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut err_pipe) = stderr {
+            let _ = err_pipe.read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|e| format!("unable to create temp stream file: {e}"))?;
+
+    let mut buf = vec![0u8; 32 * 1024];
+    let mut downloaded = 0u64;
+
+    loop {
+        if state.is_cancelled() {
+            let _ = child.kill().await;
+            drop(writer);
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(());
+        }
+
+        let n = stdout
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("yt-dlp stdout read failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| format!("temp stream write failed: {e}"))?;
+        downloaded = state.advance(n as u64);
+    }
+
+    let _ = writer.flush();
+    drop(writer);
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("yt-dlp wait failed: {e}"))?;
+
+    if state.is_cancelled() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok(());
+    }
+
+    if !status.success() || downloaded == 0 {
+        let stderr_text = stderr_task.await.unwrap_or_default();
+        let detail = stderr_text
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no audio data received")
+            .trim()
+            .to_string();
+        let _ = std::fs::remove_file(&temp_path);
+        let msg = format!("yt-dlp stream failed ({status}): {detail}");
+        state.mark_error(msg.clone());
+        return Err(msg);
+    }
+
+    state.set_total_bytes(Some(downloaded));
+    state.mark_finished();
+    let reader = ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
+        .map_err(|e| format!("temp stream open failed: {e}"))?;
+    on_ready(reader, Some(downloaded));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

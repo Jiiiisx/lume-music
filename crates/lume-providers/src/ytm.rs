@@ -131,7 +131,8 @@ pub fn map_track_item(item: TrackItem) -> Track {
     }
 }
 
-/// Locate a usable `yt-dlp` binary, checking the user-configured path first and then `PATH`.
+/// Locate a usable `yt-dlp` binary, checking the user-configured path first, then `PATH`,
+/// then standard Windows `WinGet\Links` so newly installed `yt-dlp` works without a reboot.
 pub fn detect_yt_dlp_binary(configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(cfg) = configured {
         if cfg.is_file() {
@@ -139,21 +140,52 @@ pub fn detect_yt_dlp_binary(configured: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
-    let path_var = std::env::var_os("PATH")?;
     let candidates: &[&str] = if cfg!(windows) {
         &["yt-dlp.exe", "yt-dlp.cmd", "yt-dlp.bat", "yt-dlp"]
     } else {
         &["yt-dlp"]
     };
 
-    for dir in std::env::split_paths(&path_var) {
-        for name in candidates {
-            let full = dir.join(name);
-            if full.is_file() {
-                return Some(full);
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for name in candidates {
+                let full = dir.join(name);
+                if full.is_file() {
+                    return Some(full);
+                }
             }
         }
     }
+
+    #[cfg(windows)]
+    {
+        if let Some(local_app) = dirs::data_local_dir() {
+            let winget_link = local_app
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links")
+                .join("yt-dlp.exe");
+            if winget_link.is_file() {
+                return Some(winget_link);
+            }
+            let packages_dir = local_app
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Packages");
+            if let Ok(entries) = std::fs::read_dir(&packages_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with("yt-dlp.yt-dlp") {
+                        let bin = entry.path().join("yt-dlp.exe");
+                        if bin.is_file() {
+                            return Some(bin);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -327,8 +359,8 @@ impl YouTubeMusicProvider {
         })
     }
 
-    /// Resolve a playable audio stream URL for a YouTube video ID (`rustypipe` primary,
-    /// automatic `yt-dlp` fallback on extraction or HTTP 403 rejection).
+    /// Resolve a playable audio stream for a YouTube video ID (`rustypipe` primary,
+    /// automatic `yt-dlp` progressive pipe fallback on extraction or HTTP 403 PO-token rejection).
     pub async fn resolve_stream_for_video_id(
         &self,
         video_id: &str,
@@ -343,15 +375,20 @@ impl YouTubeMusicProvider {
                 url,
                 source: PlaybackSourceUsed::YouTubeDirect,
             }),
-            Err(primary_err) => match self.resolve_via_yt_dlp(trimmed).await {
-                Ok(url) => Ok(ResolvedStream::HttpUrl {
-                    url,
-                    source: PlaybackSourceUsed::YouTubeDirect,
-                }),
-                Err(fallback_err) => Err(CoreError::ProviderUnavailable(format!(
-                    "YouTube stream failed ({primary_err}); fallback: {fallback_err}"
-                ))),
-            },
+            Err(primary_err) => {
+                if let Some(binary) = detect_yt_dlp_binary(self.yt_dlp_path.as_deref()) {
+                    Ok(ResolvedStream::YtDlpProcess {
+                        binary,
+                        watch_url: format!("https://music.youtube.com/watch?v={trimmed}"),
+                        format_selector: YT_DLP_FORMAT_SELECTOR.to_string(),
+                        source: PlaybackSourceUsed::YouTubeDirect,
+                    })
+                } else {
+                    Err(CoreError::ProviderUnavailable(format!(
+                        "YouTube stream blocked ({primary_err}). Install yt-dlp (`winget install yt-dlp.yt-dlp`) or configure yt-dlp.exe in Settings."
+                    )))
+                }
+            }
         }
     }
 }

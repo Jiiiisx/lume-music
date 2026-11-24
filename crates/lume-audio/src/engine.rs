@@ -10,8 +10,8 @@ use crate::backend::{AudioBackend, RodioAudioBackend};
 use crate::commands::{AudioCommand, AudioEvent};
 use crate::stream::{
     allocate_stream_temp_path, build_stream_http_client, cleanup_stale_stream_files,
-    default_stream_cache_dir, download_http_stream, ActiveHttpStream, ProgressiveStreamReader,
-    StreamBufferState, DEFAULT_PREBUFFER_BYTES,
+    default_stream_cache_dir, download_http_stream, download_yt_dlp_stream, ActiveHttpStream,
+    ProgressiveStreamReader, StreamBufferState, DEFAULT_PREBUFFER_BYTES,
 };
 
 enum WorkerMsg {
@@ -269,6 +269,78 @@ fn handle_command(
                     path_for_task,
                     Arc::clone(&state_for_task),
                     DEFAULT_PREBUFFER_BYTES,
+                    move |reader, byte_len| {
+                        ready_flag_cb.store(true, std::sync::atomic::Ordering::Release);
+                        let _ = tx_ready.send(WorkerMsg::StreamReady {
+                            gen,
+                            track_uid,
+                            duration_ms,
+                            reader,
+                            byte_len,
+                            hint: mime_hint,
+                        });
+                    },
+                )
+                .await;
+
+                if let Err(error) = result {
+                    let sent_ready = ready_flag.load(std::sync::atomic::Ordering::Acquire);
+                    if !sent_ready && !state_for_task.is_cancelled() {
+                        let _ = tx_err.send(WorkerMsg::StreamError { gen, error });
+                    }
+                }
+            });
+
+            state.active_stream = Some(ActiveHttpStream::new(buf_state, task, temp_path));
+            true
+        }
+        AudioCommand::LoadYtDlpStream {
+            binary,
+            video_url,
+            format_selector,
+            track_uid,
+            duration_ms,
+            mime_hint,
+        } => {
+            state.load_gen = state.load_gen.wrapping_add(1);
+            let gen = state.load_gen;
+            state.cancel_active_stream();
+            backend.stop();
+
+            let temp_path = match allocate_stream_temp_path(&stream_rt.cache_dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    state.status = PlaybackStatus::Stopped;
+                    emit(
+                        evt_tx,
+                        AudioEvent::Error(format!("unable to allocate stream buffer: {e}")),
+                    );
+                    emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Stopped));
+                    return true;
+                }
+            };
+
+            state.current_uid = Some(track_uid.clone());
+            state.duration_ms = duration_ms;
+            state.ended_emitted = false;
+            state.status = PlaybackStatus::Buffering;
+            emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Buffering));
+
+            let buf_state = StreamBufferState::new(None);
+            let tx_ready = stream_rt.worker_tx.clone();
+            let tx_err = stream_rt.worker_tx.clone();
+            let path_for_task = temp_path.clone();
+            let state_for_task = Arc::clone(&buf_state);
+
+            let task = stream_rt.rt.spawn(async move {
+                let ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let ready_flag_cb = Arc::clone(&ready_flag);
+                let result = download_yt_dlp_stream(
+                    binary,
+                    video_url,
+                    format_selector,
+                    path_for_task,
+                    Arc::clone(&state_for_task),
                     move |reader, byte_len| {
                         ready_flag_cb.store(true, std::sync::atomic::Ordering::Release);
                         let _ = tx_ready.send(WorkerMsg::StreamReady {
@@ -922,5 +994,71 @@ mod tests {
             .expect("seek on ProgressiveStreamReader should succeed");
         drop(decoder);
         assert!(!path.exists(), "temp file must be deleted when decoder drops");
+    }
+
+    #[tokio::test]
+    async fn load_yt_dlp_stream_pipes_stdout_emits_playing_and_cleans_up() {
+        let dir = TempDir::new().unwrap();
+        let wav_path = dir.path().join("source.wav");
+        write_wav_file(&wav_path);
+
+        #[cfg(windows)]
+        let script = {
+            let p = dir.path().join("mock-ytdlp-pipe.cmd");
+            // Output the binary wav file directly to stdout via `type`.
+            std::fs::write(&p, format!("@echo off\r\ntype \"{}\"\r\n", wav_path.display())).unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let script = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.path().join("mock-ytdlp-pipe.sh");
+            std::fs::write(&p, format!("#!/bin/sh\ncat \"{}\"\n", wav_path.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let cache_dir = dir.path().join("pipe_cache");
+        let (backend, state) = MockAudioBackend::new();
+        let (handle, mut rx) = AudioEngineHandle::spawn_with_backend_and_cache_dir(
+            Box::new(backend),
+            cache_dir.clone(),
+        );
+
+        handle
+            .send(AudioCommand::LoadYtDlpStream {
+                binary: script,
+                video_url: "https://music.youtube.com/watch?v=test".into(),
+                format_selector: "bestaudio".into(),
+                track_uid: "ytm:pipe1".into(),
+                duration_ms: 1_000,
+                mime_hint: Some("wav".into()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            AudioEvent::StateChanged(PlaybackStatus::Buffering)
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            AudioEvent::StateChanged(PlaybackStatus::Playing)
+        );
+        assert_eq!(state.lock().unwrap().stream_loads, 1);
+        assert_eq!(state.lock().unwrap().last_stream_bytes_read, 44);
+
+        handle.send(AudioCommand::Stop).unwrap();
+        loop {
+            match rx.recv().await.unwrap() {
+                AudioEvent::StateChanged(PlaybackStatus::Stopped) => break,
+                AudioEvent::PositionTick { .. } => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        handle.send(AudioCommand::Shutdown).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let remaining: Vec<_> = std::fs::read_dir(&cache_dir).unwrap().flatten().collect();
+        assert!(remaining.is_empty(), "temp file must be deleted after Stop/Shutdown");
     }
 }
