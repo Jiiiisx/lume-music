@@ -197,13 +197,23 @@ impl YouTubeMusicProvider {
         })
     }
 
-    /// Lightweight HTTP range probe (`bytes=0-1`) to catch PO-token / HTTP 403 stream rejections
-    /// before handing the URL to the audio engine.
-    async fn probe_stream_url(&self, url: &str) -> Result<(), CoreError> {
+    /// Lightweight HTTP range probe catching PO-token / HTTP 403 stream rejections before handing
+    /// the URL to the audio engine.
+    ///
+    /// YouTube's GVS CDN allows the first 1 MiB (`0..=1_048_575`) of unauthenticated streams
+    /// without a PO token and rejects byte `1_048_576+` with `403 Forbidden`. When a stream is
+    /// larger than 1 MiB, probing past 1 MiB catches the block immediately so we fall back to
+    /// `yt-dlp` instead of stalling mid-song.
+    async fn probe_stream_url(&self, url: &str, known_size: u64) -> Result<(), CoreError> {
+        let range = if known_size > 1_048_576 {
+            "bytes=1048576-1048577"
+        } else {
+            "bytes=0-1"
+        };
         let resp = self
             .http
             .get(url)
-            .header(reqwest::header::RANGE, "bytes=0-1")
+            .header(reqwest::header::RANGE, range)
             .send()
             .await
             .map_err(|e| CoreError::Network(format!("stream probe failed: {e}")))?;
@@ -212,17 +222,18 @@ impl YouTubeMusicProvider {
             Ok(())
         } else {
             Err(CoreError::ProviderUnavailable(format!(
-                "YouTube stream rejected with HTTP {}",
+                "YouTube stream rejected with HTTP {} (PO token required)",
                 status.as_u16()
             )))
         }
     }
 
     async fn resolve_via_rustypipe(&self, video_id: &str) -> Result<String, CoreError> {
+        // Prefer Ios first (no JS signature deobfuscation needed, ~180ms), then fall back.
         let clients = [
+            ClientType::Ios,
             ClientType::Tv,
             ClientType::Android,
-            ClientType::Ios,
             ClientType::Desktop,
         ];
         let mut last_err = CoreError::ProviderUnavailable("no rustypipe client succeeded".into());
@@ -256,7 +267,7 @@ impl YouTubeMusicProvider {
                 }
             };
 
-            match self.probe_stream_url(&best.url).await {
+            match self.probe_stream_url(&best.url, best.size).await {
                 Ok(()) => return Ok(best.url.clone()),
                 Err(e) => {
                     last_err = e;
@@ -547,11 +558,11 @@ mod tests {
         let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), None).unwrap();
 
         assert!(provider
-            .probe_stream_url(&format!("http://{addr}/ok"))
+            .probe_stream_url(&format!("http://{addr}/ok"), 500_000)
             .await
             .is_ok());
         let err = provider
-            .probe_stream_url(&format!("http://{addr}/forbidden"))
+            .probe_stream_url(&format!("http://{addr}/forbidden"), 2_000_000)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("403"));

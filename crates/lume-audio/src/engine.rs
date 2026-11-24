@@ -829,11 +829,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut req_buf = [0u8; 1024];
-            let _ = sock.read(&mut req_buf).await;
-            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            sock.write_all(resp.as_bytes()).await.unwrap();
+            for _ in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut req_buf = [0u8; 1024];
+                let _ = sock.read(&mut req_buf).await;
+                let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
         });
 
         let dir = TempDir::new().unwrap();

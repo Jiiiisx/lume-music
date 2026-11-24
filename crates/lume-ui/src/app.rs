@@ -210,6 +210,8 @@ pub struct LumeApp {
     status: PlaybackStatus,
     source_used: Option<PlaybackSourceUsed>,
     position_ms: u64,
+    last_audio_pos_ms: u64,
+    last_audio_pos_at: Instant,
     duration_ms: u64,
     volume: f32,
     muted: bool,
@@ -339,6 +341,8 @@ impl LumeApp {
             status: PlaybackStatus::Stopped,
             source_used: None,
             position_ms: 0,
+            last_audio_pos_ms: 0,
+            last_audio_pos_at: now,
             duration_ms: 0,
             volume,
             muted,
@@ -525,6 +529,19 @@ impl LumeApp {
                 let dt = (now - self.last_frame_at).as_secs_f32().clamp(0.0, 0.05);
                 self.last_frame_at = now;
                 self.time_s = (now - self.anim_start).as_secs_f32();
+
+                if self.status == PlaybackStatus::Playing {
+                    let extra_ms = (now
+                        .saturating_duration_since(self.last_audio_pos_at)
+                        .as_millis() as u64)
+                        .min(250);
+                    let interp = self.last_audio_pos_ms.saturating_add(extra_ms);
+                    self.position_ms = if self.duration_ms > 0 {
+                        interp.min(self.duration_ms)
+                    } else {
+                        interp
+                    };
+                }
 
                 if let Some(start) = self.palette_transition_start {
                     let progress =
@@ -904,6 +921,8 @@ impl LumeApp {
             }
             Message::SeekSliderChanged(pos_ms) | Message::SeekTo(pos_ms) => {
                 self.position_ms = pos_ms;
+                self.last_audio_pos_ms = pos_ms;
+                self.last_audio_pos_at = Instant::now();
                 if let Some(audio) = &self.audio {
                     let _ = audio.send(AudioCommand::Seek(pos_ms));
                 }
@@ -1188,6 +1207,8 @@ impl LumeApp {
                     duration_ms,
                 } => {
                     self.position_ms = position_ms;
+                    self.last_audio_pos_ms = position_ms;
+                    self.last_audio_pos_at = Instant::now();
                     if duration_ms > 0 {
                         self.duration_ms = duration_ms;
                     }
@@ -1293,6 +1314,7 @@ impl LumeApp {
                     art_handles: &self.art_handles,
                     time_s: self.time_s,
                     queue_open: self.queue_open,
+                    status_banner: self.status_toast.as_deref(),
                     accent,
                 });
 
@@ -1556,6 +1578,8 @@ impl LumeApp {
         self.play_request_id = self.play_request_id.wrapping_add(1);
         let req_id = self.play_request_id;
         self.position_ms = 0;
+        self.last_audio_pos_ms = 0;
+        self.last_audio_pos_at = Instant::now();
         self.duration_ms = track.duration_ms;
         self.lyrics_spring.snap_to(0.0);
         self.last_scrolled_line = None;

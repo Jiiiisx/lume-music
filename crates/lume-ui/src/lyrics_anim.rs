@@ -82,23 +82,23 @@ pub fn line_visual_style(distance_from_active: isize, mode: LyricsVisualMode) ->
                 glow: 0.85,
             },
             1 => LineStyle {
-                scale: 0.98,
-                opacity: 0.62,
+                scale: 0.94,
+                opacity: 0.36,
                 glow: 0.0,
             },
             2 => LineStyle {
-                scale: 0.94,
-                opacity: 0.40,
+                scale: 0.90,
+                opacity: 0.24,
                 glow: 0.0,
             },
             3 => LineStyle {
-                scale: 0.90,
-                opacity: 0.25,
+                scale: 0.88,
+                opacity: 0.16,
                 glow: 0.0,
             },
             _ => LineStyle {
-                scale: 0.88,
-                opacity: 0.16,
+                scale: 0.86,
+                opacity: 0.10,
                 glow: 0.0,
             },
         },
@@ -131,6 +131,75 @@ pub fn word_progress(word: &LyricsWord, pos_ms: u64) -> f32 {
     }
     let span = (word.end_ms - word.start_ms) as f32;
     ((pos_ms - word.start_ms) as f32 / span).clamp(0.0, 1.0)
+}
+
+/// Return real enhanced-LRC word timings if present, or synthesize smooth proportional
+/// per-word timings across the line's vocal window so line-synced tracks (e.g. LRCLIB)
+/// still deliver Spicy-Lyrics-style word-by-word karaoke highlighting.
+pub fn resolve_line_words(
+    lines: &[LyricsLine],
+    idx: usize,
+    track_duration_ms: u64,
+) -> Vec<LyricsWord> {
+    let Some(line) = lines.get(idx) else {
+        return Vec::new();
+    };
+    if let Some(words) = &line.words {
+        if !words.is_empty() {
+            return words.clone();
+        }
+    }
+
+    let tokens: Vec<&str> = line.text.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let start_ms = line.time_ms;
+    let next_ms = lines
+        .get(idx + 1)
+        .map(|l| l.time_ms)
+        .filter(|&t| t > start_ms)
+        .unwrap_or_else(|| {
+            let fallback = start_ms.saturating_add((tokens.len() as u64 * 480).clamp(1_600, 5_000));
+            if track_duration_ms > start_ms {
+                track_duration_ms.min(fallback)
+            } else {
+                fallback
+            }
+        });
+
+    let raw_span = next_ms.saturating_sub(start_ms).max(400);
+    // Cap synthesized vocal duration so long instrumental breaks don't stretch short lines.
+    let max_vocal_ms = (tokens.len() as u64 * 580).clamp(1_400, 6_500);
+    let vocal_span = ((raw_span as f32 * 0.88) as u64)
+        .min(max_vocal_ms)
+        .max(raw_span.min(400));
+
+    let weights: Vec<f32> = tokens
+        .iter()
+        .map(|w| (w.chars().count().max(2) as f32) + 1.0)
+        .collect();
+    let total_weight: f32 = weights.iter().sum::<f32>().max(1.0);
+
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut cursor = start_ms as f32;
+    for (i, (tok, w)) in tokens.into_iter().zip(weights).enumerate() {
+        let dur = (vocal_span as f32) * (w / total_weight);
+        let w_start = cursor.round() as u64;
+        cursor += dur;
+        let w_end = if i + 1 == out.capacity() {
+            start_ms.saturating_add(vocal_span).max(w_start + 1)
+        } else {
+            (cursor.round() as u64).max(w_start + 1)
+        };
+        out.push(LyricsWord {
+            start_ms: w_start,
+            end_ms: w_end,
+            text: tok.to_string(),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -196,5 +265,31 @@ mod tests {
         assert_eq!(word_progress(&word, 500), 0.0);
         assert!((word_progress(&word, 1500) - 0.5).abs() < 0.001);
         assert_eq!(word_progress(&word, 2500), 1.0);
+    }
+
+    #[test]
+    fn resolve_line_words_synthesizes_monotonic_spans_and_caps_long_breaks() {
+        let lines = vec![
+            LyricsLine {
+                time_ms: 10_000,
+                text: "And I miss my lover, man".into(),
+                words: None,
+            },
+            LyricsLine {
+                time_ms: 40_000, // 30s instrumental gap
+                text: "Next line".into(),
+                words: None,
+            },
+        ];
+        let words = resolve_line_words(&lines, 0, 217_000);
+        assert_eq!(words.len(), 6);
+        assert_eq!(words[0].start_ms, 10_000);
+        assert_eq!(words[0].text, "And");
+        assert_eq!(words[5].text, "man");
+        assert!(words[5].end_ms <= 16_500, "should cap long instrumental break");
+        for pair in words.windows(2) {
+            assert!(pair[0].end_ms <= pair[1].end_ms);
+            assert!(pair[0].start_ms < pair[0].end_ms);
+        }
     }
 }

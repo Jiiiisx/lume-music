@@ -277,8 +277,20 @@ pub fn allocate_stream_temp_path(cache_dir: &Path) -> io::Result<PathBuf> {
     Ok(cache_dir.join(format!("stream-{pid}-{gen}.tmp")))
 }
 
+/// Chunk size used when falling back to HTTP `Range` streaming (256 KiB).
+pub const HTTP_RANGE_CHUNK_BYTES: u64 = 256 * 1024;
+
+fn parse_content_range_total(header_val: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    let text = header_val?.to_str().ok()?;
+    let total_str = text.rsplit('/').next()?;
+    total_str.trim().parse::<u64>().ok()
+}
+
 /// Download `url` progressively into `temp_path`, invoking `on_ready` as soon as the initial
 /// prebuffer threshold is reached (or the full response finishes if smaller).
+///
+/// Tries a standard streaming `GET` first; if the CDN rejects full-file `GET` with HTTP 403,
+/// falls back automatically to chunked `Range: bytes=start-end` (`256 KiB`) requests.
 pub async fn download_http_stream<F>(
     client: reqwest::Client,
     url: String,
@@ -290,17 +302,30 @@ pub async fn download_http_stream<F>(
 where
     F: FnOnce(ProgressiveStreamReader, Option<u64>) + Send + 'static,
 {
-    let mut resp = client
+    let resp = client
         .get(&url)
         .send()
         .await
         .map_err(|e| format!("stream request failed: {e}"))?;
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return download_http_stream_chunked_range(
+            client,
+            url,
+            temp_path,
+            state,
+            prebuffer_bytes,
+            on_ready,
+        )
+        .await;
+    }
 
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("stream HTTP error {}", status.as_u16()));
     }
 
+    let mut resp = resp;
     let total_bytes = resp.content_length();
     state.set_total_bytes(total_bytes);
 
@@ -363,6 +388,120 @@ where
     }
 }
 
+async fn download_http_stream_chunked_range<F>(
+    client: reqwest::Client,
+    url: String,
+    temp_path: PathBuf,
+    state: Arc<StreamBufferState>,
+    prebuffer_bytes: u64,
+    on_ready: F,
+) -> Result<(), String>
+where
+    F: FnOnce(ProgressiveStreamReader, Option<u64>) + Send + 'static,
+{
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|e| format!("unable to create temp stream file: {e}"))?;
+
+    let mut on_ready = Some(on_ready);
+    let mut offset = 0u64;
+    let mut total_bytes: Option<u64> = None;
+
+    loop {
+        if state.is_cancelled() {
+            drop(writer);
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(());
+        }
+        if let Some(total) = total_bytes {
+            if offset >= total {
+                break;
+            }
+        }
+
+        let end = match total_bytes {
+            Some(total) => (offset + HTTP_RANGE_CHUNK_BYTES - 1).min(total.saturating_sub(1)),
+            None => offset + HTTP_RANGE_CHUNK_BYTES - 1,
+        };
+        let mut resp = client
+            .get(&url)
+            .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+            .send()
+            .await
+            .map_err(|e| format!("chunked stream request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            let msg = format!("stream HTTP error {}", status.as_u16());
+            state.mark_error(msg.clone());
+            return Err(msg);
+        }
+
+        if total_bytes.is_none() {
+            total_bytes = parse_content_range_total(resp.headers().get(reqwest::header::CONTENT_RANGE))
+                .or_else(|| {
+                    if status == reqwest::StatusCode::OK {
+                        resp.content_length()
+                    } else {
+                        None
+                    }
+                });
+            state.set_total_bytes(total_bytes);
+        }
+
+        let target_prebuffer = total_bytes
+            .map(|len| len.min(prebuffer_bytes))
+            .unwrap_or(prebuffer_bytes);
+
+        let mut chunk_read = 0u64;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("chunked stream interrupted: {e}"))?
+        {
+            if state.is_cancelled() {
+                drop(writer);
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(());
+            }
+            if !chunk.is_empty() {
+                writer
+                    .write_all(&chunk)
+                    .map_err(|e| format!("temp stream write failed: {e}"))?;
+                chunk_read += chunk.len() as u64;
+                let downloaded = state.advance(chunk.len() as u64);
+                if downloaded >= target_prebuffer {
+                    if let Some(cb) = on_ready.take() {
+                        let _ = writer.flush();
+                        let reader =
+                            ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
+                                .map_err(|e| format!("temp stream open failed: {e}"))?;
+                        cb(reader, total_bytes);
+                    }
+                }
+            }
+        }
+
+        offset = offset.saturating_add(chunk_read);
+        if chunk_read == 0 || status == reqwest::StatusCode::OK {
+            break;
+        }
+    }
+
+    let _ = writer.flush();
+    state.mark_finished();
+    if let Some(cb) = on_ready.take() {
+        let final_len = state.total_bytes();
+        let reader = ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
+            .map_err(|e| format!("temp stream open failed: {e}"))?;
+        cb(reader, final_len);
+    }
+    Ok(())
+}
+
 pub fn build_stream_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(12))
@@ -374,6 +513,14 @@ pub fn build_stream_http_client() -> reqwest::Client {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn parses_content_range_total_bytes() {
+        let hv = reqwest::header::HeaderValue::from_static("bytes 0-131071/3512688");
+        assert_eq!(parse_content_range_total(Some(&hv)), Some(3_512_688));
+        let invalid = reqwest::header::HeaderValue::from_static("bytes 0-10/*");
+        assert_eq!(parse_content_range_total(Some(&invalid)), None);
+    }
 
     #[test]
     fn progressive_reader_waits_for_chunks_and_supports_seeking() {

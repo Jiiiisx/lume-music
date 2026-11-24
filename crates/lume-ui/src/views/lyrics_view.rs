@@ -9,23 +9,23 @@ use iced::{Alignment, Background, Color, Element, Length, Padding, Shadow, Vecto
 use lume_core::{LyricsData, PlaybackStatus, RepeatMode};
 use lume_storage::LyricsVisualMode;
 
-use crate::lyrics_anim::{active_line_index, line_visual_style, word_progress};
+use crate::lyrics_anim::{active_line_index, line_visual_style, resolve_line_words, word_progress};
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    cover_art_widget, ghost_button_style, glass_button_style, glass_panel_style,
-    glass_sidebar_style, icon_back, icon_heart, icon_lyrics, icon_music, icon_next, icon_pause,
-    icon_play, icon_prev, icon_queue, icon_refresh, icon_repeat, icon_shuffle, icon_volume,
-    play_circle_button_style, primary_pill_button_style, seek_slider_style, thin_scrollable_style,
-    traffic_light_button_style, GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE, ICON_LIGHT, ICON_MUTED,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    cover_art_widget, ghost_button_style, glass_button_style, glass_elevated_style,
+    glass_panel_style, glass_sidebar_style, icon_back, icon_heart, icon_lyrics, icon_music,
+    icon_next, icon_pause, icon_play, icon_prev, icon_queue, icon_refresh, icon_repeat,
+    icon_shuffle, icon_volume, play_circle_button_style, primary_pill_button_style,
+    seek_slider_style, thin_scrollable_style, traffic_light_button_style, ICON_HEART_ACTIVE,
+    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn lyrics_scroll_id() -> Id {
     Id::new("lyrics_scroll")
 }
 
-pub const LYRIC_LINE_STRIDE_PX: f32 = 58.0;
+pub const LYRIC_LINE_STRIDE_PX: f32 = 76.0;
 
 pub fn format_timestamp_ms(ms: u64) -> String {
     let total_secs = ms / 1000;
@@ -59,6 +59,7 @@ pub struct LyricsViewProps<'a> {
     pub art_handles: &'a HashMap<String, image::Handle>,
     pub time_s: f32,
     pub queue_open: bool,
+    pub status_banner: Option<&'a str>,
     pub accent: AccentTheme,
 }
 
@@ -171,7 +172,11 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
     let album_label = track
         .and_then(|t| t.album.as_deref())
         .filter(|a| !a.is_empty());
-    let source_badge = props.info.source_used.map(|s| s.badge_label()).unwrap_or("Idle");
+    let source_badge = if props.info.status == PlaybackStatus::Buffering {
+        "Buffering..."
+    } else {
+        props.info.source_used.map(|s| s.badge_label()).unwrap_or("Idle")
+    };
 
     let max_dur = props.info.duration_ms.max(1) as f32;
     let cur_pos = (props.info.position_ms.min(props.info.duration_ms.max(1))) as f32;
@@ -386,50 +391,64 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         "Unavailable".to_string()
     };
 
-    let lyrics_header = column![
-        row![
-            icon_lyrics(14.0, ICON_MUTED),
-            text("LYRICS")
-                .size(11)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT_MUTED),
-            space().width(Length::Fill),
-            container(
-                text(lyrics_status_pill)
-                    .size(10)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_SECONDARY),
-            )
-            .padding([3, 10])
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
-                border: iced::border::Border {
-                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.14),
-                    width: 1.0,
-                    radius: 10.0.into(),
-                },
-                ..Default::default()
-            }),
-        ]
-        .spacing(8)
-        .padding([14, 22])
-        .align_y(Alignment::Center),
-        container(space().height(1))
-            .width(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(GLASS_SUBTLE_BORDER)),
-                ..Default::default()
-            }),
-    ];
+    let lyrics_header = row![
+        space().width(Length::Fill),
+        container(
+            text(lyrics_status_pill)
+                .size(10)
+                .font(FONT_MEDIUM)
+                .color(TEXT_SECONDARY),
+        )
+        .padding([4, 11])
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+            border: iced::border::Border {
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.14),
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..Default::default()
+        }),
+        button(icon_refresh(12.0, ICON_MUTED))
+            .padding([5, 7])
+            .style(ghost_button_style)
+            .on_press(Message::RetryLyrics),
+    ]
+    .spacing(8)
+    .padding([12, 24])
+    .align_y(Alignment::Center);
 
-    let right_lyrics_panel = container(
-        column![lyrics_header, build_lyrics_column(&props)]
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(glass_panel_style);
+    let mut right_col = column![lyrics_header]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    if let Some(toast) = props.status_banner {
+        right_col = right_col.push(
+            container(
+                container(
+                    row![
+                        text(toast).size(12).color(TEXT_PRIMARY).width(Length::Fill),
+                        button(text("Dismiss").size(11))
+                            .padding([4, 10])
+                            .style(glass_button_style(false, accent))
+                            .on_press(Message::DismissToast),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .padding([10, 14])
+                .style(glass_elevated_style),
+            )
+            .padding([0, 24]),
+        );
+    }
+
+    right_col = right_col.push(build_lyrics_column(&props));
+
+    let right_lyrics_panel = container(right_col)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(glass_panel_style);
 
     let body = row![left_player_card, right_lyrics_panel]
         .spacing(16)
@@ -595,17 +614,10 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
 
     if !lyrics.synced.is_empty() {
         let active_idx = active_line_index(&lyrics.synced, props.info.position_ms);
-        let mut lines_col = column![space().height(140.0)]
-            .spacing(10)
+        let mut lines_col = column![space().height(96.0)]
+            .spacing(18)
             .width(Length::Fill)
-            .align_x(Alignment::Center);
-
-        let active_tint = Color {
-            r: (0.88 + accent.light.r * 0.12).clamp(0.0, 1.0),
-            g: (0.88 + accent.light.g * 0.12).clamp(0.0, 1.0),
-            b: (0.88 + accent.light.b * 0.12).clamp(0.0, 1.0),
-            a: 1.0,
-        };
+            .align_x(Alignment::Start);
 
         for (idx, line) in lyrics.synced.iter().enumerate() {
             let distance = match active_idx {
@@ -613,108 +625,71 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                 None => idx as isize + 1,
             };
             let style = line_visual_style(distance, props.lyrics_mode);
-            let font_size = 22.0 * style.scale;
             let is_active = distance == 0;
+            let font_size = if is_active {
+                34.0 * style.scale
+            } else {
+                30.0 * style.scale
+            };
 
-            let line_content: Element<'a, Message> = if let Some(words) = &line.words {
-                let spans: Vec<iced::widget::text::Span<'a, ()>> = words
-                    .iter()
+            let resolved_words = resolve_line_words(&lyrics.synced, idx, props.info.duration_ms);
+            let word_count = resolved_words.len();
+
+            let line_content: Element<'a, Message> = if !resolved_words.is_empty() && is_active {
+                // Spicy / Beautiful Lyrics word-by-word progressive karaoke lighting:
+                // sung words shine crisp solid white, active word eases in smoothly,
+                // upcoming words on the same line stay softly translucent.
+                let spans: Vec<iced::widget::text::Span<'a, ()>> = resolved_words
+                    .into_iter()
                     .enumerate()
                     .map(|(w_idx, word)| {
-                        let prog = if is_active {
-                            word_progress(word, props.info.position_ms)
-                        } else if distance < 0 {
-                            1.0
-                        } else {
-                            0.0
-                        };
-                        let alpha = if is_active {
-                            0.48 + 0.52 * prog
-                        } else {
-                            style.opacity
-                        };
-                        let col = if is_active && prog > 0.45 {
-                            Color {
-                                a: alpha,
-                                ..active_tint
-                            }
-                        } else {
-                            Color::from_rgba(1.0, 1.0, 1.0, alpha)
-                        };
-                        let suffix = if w_idx + 1 < words.len() { " " } else { "" };
+                        let raw_prog = word_progress(&word, props.info.position_ms);
+                        // Smooth ease-out curve for crisp word attack like Spicy Lyrics.
+                        let eased = 1.0 - (1.0 - raw_prog) * (1.0 - raw_prog);
+                        let alpha = 0.34 + 0.66 * eased;
+                        let col = Color::from_rgba(1.0, 1.0, 1.0, alpha);
+                        let suffix = if w_idx + 1 < word_count { " " } else { "" };
                         span(format!("{}{}", word.text, suffix))
                             .size(font_size)
-                            .font(if is_active { FONT_BOLD } else { FONT_MEDIUM })
+                            .font(FONT_BOLD)
                             .color(col)
                     })
                     .collect();
-                rich_text(spans).align_x(Horizontal::Center).into()
+                rich_text(spans)
+                    .line_height(1.22)
+                    .align_x(Horizontal::Left)
+                    .into()
             } else {
                 let text_label = if line.text.is_empty() {
                     "•  •  •"
                 } else {
                     line.text.as_str()
                 };
-                let color = if is_active {
-                    Color {
-                        a: style.opacity,
-                        ..active_tint
-                    }
+                let alpha = if distance < 0 {
+                    // Lines already sung fade slightly more softly than immediate upcoming lines.
+                    (style.opacity * 0.72).max(0.08)
                 } else {
-                    Color::from_rgba(1.0, 1.0, 1.0, style.opacity)
+                    style.opacity
                 };
                 text(text_label)
                     .size(font_size)
-                    .font(if is_active { FONT_BOLD } else { FONT_MEDIUM })
-                    .color(color)
-                    .align_x(Horizontal::Center)
+                    .font(FONT_BOLD)
+                    .line_height(1.22)
+                    .color(Color::from_rgba(1.0, 1.0, 1.0, alpha))
+                    .align_x(Horizontal::Left)
                     .into()
             };
 
-            // Centered Pill Highlight: active line wrapped in a crisp frosted glass pill.
-            let line_box = if is_active {
-                container(line_content)
-                    .padding([12, 24])
-                    .max_width(640.0)
-                    .align_x(Horizontal::Center)
-                    .style(move |_| container::Style {
-                        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.095))),
-                        border: iced::border::Border {
-                            color: Color {
-                                a: 0.26,
-                                ..accent.light
-                            },
-                            width: 1.0,
-                            radius: 18.0.into(),
-                        },
-                        shadow: Shadow {
-                            color: Color {
-                                a: 0.16,
-                                ..accent.glow
-                            },
-                            offset: Vector::new(0.0, 6.0),
-                            blur_radius: 22.0,
-                        },
-                        ..Default::default()
-                    })
-            } else {
-                container(line_content)
-                    .padding([6, 20])
-                    .max_width(620.0)
-                    .align_x(Horizontal::Center)
-            };
+            let line_box = container(line_content)
+                .padding([4, 8])
+                .width(Length::Fill)
+                .align_x(Horizontal::Left);
 
-            let clickable = mouse_area(
-                container(line_box)
-                    .width(Length::Fill)
-                    .align_x(Horizontal::Center),
-            )
-            .on_press(Message::SeekTo(line.time_ms));
-
+            let clickable = mouse_area(line_box).on_press(Message::SeekTo(line.time_ms));
             lines_col = lines_col.push(clickable);
         }
 
-        lines_col = lines_col.push(space().height(180.0));
+        lines_col = lines_col.push(space().height(260.0));
 
         return container(
             scrollable(lines_col)
@@ -725,7 +700,7 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([8, 24])
+        .padding([4, 38])
         .into();
     }
 
