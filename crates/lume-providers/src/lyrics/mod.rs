@@ -1,14 +1,16 @@
 pub mod lrc;
 pub mod lrclib;
+pub mod ttml;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lume_core::{CoreError, LyricsData, Track, TrackSource};
 use lume_storage::{Database, LyricsCacheLookup};
 
-use crate::local::{find_sidecar_lrc, read_embedded_lyrics};
+use crate::local::{find_sidecar_lrc, find_sidecar_ttml, read_embedded_lyrics};
 pub use lrc::parse_lrc;
 pub use lrclib::LrclibClient;
+pub use ttml::parse_ttml;
 
 fn now_epoch_s() -> i64 {
     SystemTime::now()
@@ -50,6 +52,17 @@ impl ChainedLyricsProvider {
         }
 
         if let TrackSource::Local { path } = &track.source {
+            if let Some(ttml_path) = find_sidecar_ttml(path) {
+                if let Ok(raw) = std::fs::read_to_string(&ttml_path) {
+                    let parsed = parse_ttml(&raw, "sidecar_ttml");
+                    if !parsed.synced.is_empty() || parsed.plain.is_some() {
+                        db.put_cached_lyrics(&track.uid, &parsed, now)
+                            .map_err(|e| CoreError::Storage(e.to_string()))?;
+                        return Ok(Some(parsed));
+                    }
+                }
+            }
+
             if let Some(lrc_path) = find_sidecar_lrc(path) {
                 if let Ok(raw) = std::fs::read_to_string(&lrc_path) {
                     let parsed = parse_lrc(&raw, "sidecar_lrc");

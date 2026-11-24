@@ -146,6 +146,11 @@ impl LocalProvider {
     }
 }
 
+pub fn find_sidecar_ttml(audio_path: &Path) -> Option<PathBuf> {
+    let candidate = audio_path.with_extension("ttml");
+    candidate.is_file().then_some(candidate)
+}
+
 pub fn find_sidecar_lrc(audio_path: &Path) -> Option<PathBuf> {
     let candidate = audio_path.with_extension("lrc");
     candidate.is_file().then_some(candidate)

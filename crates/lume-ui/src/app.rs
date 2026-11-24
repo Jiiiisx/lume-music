@@ -12,13 +12,15 @@ use lume_core::{
     QueueEngine, ResolvedStream, Track, TrackSource,
 };
 use lume_providers::{
-    detect_yt_dlp_binary, find_sidecar_lrc, parse_lrc, read_embedded_lyrics, LocalProvider,
-    LrclibClient, YouTubeMusicProvider,
+    detect_yt_dlp_binary, find_sidecar_lrc, find_sidecar_ttml, parse_lrc, parse_ttml,
+    read_embedded_lyrics, LocalProvider, LrclibClient, YouTubeMusicProvider,
 };
 use lume_storage::{AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup};
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 
-use crate::lyrics_anim::{active_line_index, LyricsSpringState};
+use crate::lyrics_anim::{
+    active_display_index, build_display_timeline, LyricsSpringState,
+};
 use crate::platform::smtc::{extract_hwnd, SmtcController};
 use crate::platform::{apply_window_glass_mode, TrayController};
 use crate::theme::{
@@ -555,7 +557,10 @@ impl LumeApp {
 
                 if self.view_mode == ViewMode::NowPlayingLyrics {
                     if let Some(lyrics) = &self.current_lyrics {
-                        if let Some(idx) = active_line_index(&lyrics.synced, self.position_ms) {
+                        let timeline = build_display_timeline(&lyrics.synced);
+                        let idx = active_display_index(&timeline, self.position_ms);
+                        self.lyrics_spring.notify_active_item(idx);
+                        if let Some(idx) = idx {
                             let target_y = (idx as f32) * LYRIC_LINE_STRIDE_PX;
                             self.lyrics_spring.update(dt, target_y);
                             if !self.lyrics_spring.is_settled()
@@ -1329,6 +1334,7 @@ impl LumeApp {
                     lyrics: self.current_lyrics.as_ref(),
                     lyrics_loading: self.lyrics_loading,
                     lyrics_mode: self.config.lyrics_visual_mode,
+                    active_scale: self.lyrics_spring.active_scale(),
                     art_handles: &self.art_handles,
                     time_s: self.time_s,
                     queue_open: self.queue_open,
@@ -1450,7 +1456,7 @@ impl LumeApp {
         let outer_pad = if self.maximized { 0 } else { 4 };
         let has_playing_art = has_active_playback && self.art_blur_rgba.is_some();
 
-        // Ultra-clear crystal glass: <=15% whispered album reflection in Browse only while playing.
+        // Ultra-clear crystal glass in Browse; lush full-bleed Spicy Lyrics album blur in NowPlayingLyrics.
         let backdrop_cfg: Option<(f32, f32)> = match self.config.glassmorphism_mode {
             GlassmorphismMode::PureClear => match self.view_mode {
                 ViewMode::Browse => {
@@ -1461,7 +1467,7 @@ impl LumeApp {
                     }
                 }
                 ViewMode::NowPlayingLyrics => {
-                    Some((0.18, if has_playing_art { 0.20 } else { 0.0 }))
+                    Some((0.50, if has_playing_art { 0.62 } else { 0.0 }))
                 }
             },
             GlassmorphismMode::WindowsAcrylic => match self.view_mode {
@@ -1470,7 +1476,7 @@ impl LumeApp {
                     if has_playing_art { 0.15 } else { 0.0 },
                 )),
                 ViewMode::NowPlayingLyrics => {
-                    Some((0.26, if has_playing_art { 0.26 } else { 0.0 }))
+                    Some((0.68, if has_playing_art { 0.76 } else { 0.0 }))
                 }
             },
             GlassmorphismMode::DynamicAlbumBlur => match self.view_mode {
@@ -1479,7 +1485,7 @@ impl LumeApp {
                     if has_playing_art { 0.48 } else { 0.0 },
                 )),
                 ViewMode::NowPlayingLyrics => {
-                    Some((0.52, if has_playing_art { 0.65 } else { 0.0 }))
+                    Some((0.86, if has_playing_art { 0.88 } else { 0.0 }))
                 }
             },
         };
@@ -1827,6 +1833,15 @@ impl LumeApp {
                     }
 
                     if let TrackSource::Local { path } = &track_pre.source {
+                        if let Some(ttml_path) = find_sidecar_ttml(path) {
+                            if let Ok(raw) = std::fs::read_to_string(&ttml_path) {
+                                let parsed = parse_ttml(&raw, "sidecar_ttml");
+                                if !parsed.synced.is_empty() || parsed.plain.is_some() {
+                                    let _ = db.put_cached_lyrics(&track_pre.uid, &parsed, now);
+                                    return Ok(Some(Some(parsed)));
+                                }
+                            }
+                        }
                         if let Some(lrc_path) = find_sidecar_lrc(path) {
                             if let Ok(raw) = std::fs::read_to_string(&lrc_path) {
                                 let parsed = parse_lrc(&raw, "sidecar_lrc");
