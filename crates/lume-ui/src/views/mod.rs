@@ -193,6 +193,7 @@ pub enum Message {
         art_blur_rgba: Option<Arc<Vec<u8>>>,
     },
     ThumbnailsLoaded(Vec<(String, Vec<u8>)>),
+    SpotifyArtworkEnriched(Vec<(String, String)>),
 
     // Settings, Spotify auth & local library
     SetGlassmorphismMode(GlassmorphismMode),

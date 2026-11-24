@@ -47,6 +47,7 @@ struct BufferProgress {
 pub struct StreamBufferState {
     progress: Mutex<BufferProgress>,
     cvar: Condvar,
+    active_readers: std::sync::atomic::AtomicUsize,
 }
 
 impl StreamBufferState {
@@ -60,7 +61,19 @@ impl StreamBufferState {
                 error: None,
             }),
             cvar: Condvar::new(),
+            active_readers: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.progress.lock().map(|p| p.finished).unwrap_or(false)
+    }
+
+    pub fn downloaded_bytes(&self) -> u64 {
+        self.progress
+            .lock()
+            .map(|p| p.downloaded_bytes)
+            .unwrap_or(0)
     }
 
     pub fn set_total_bytes(&self, total: Option<u64>) {
@@ -164,6 +177,7 @@ pub struct ProgressiveStreamReader {
 impl ProgressiveStreamReader {
     pub fn open(temp_path: PathBuf, state: Arc<StreamBufferState>) -> io::Result<Self> {
         let file = File::open(&temp_path)?;
+        state.active_readers.fetch_add(1, Ordering::AcqRel);
         Ok(Self {
             file: Some(file),
             pos: 0,
@@ -174,6 +188,10 @@ impl ProgressiveStreamReader {
 
     pub fn temp_path(&self) -> &Path {
         &self.temp_path
+    }
+
+    pub fn state(&self) -> Arc<StreamBufferState> {
+        Arc::clone(&self.state)
     }
 
     pub fn total_bytes(&self) -> Option<u64> {
@@ -265,7 +283,9 @@ impl Drop for ProgressiveStreamReader {
     fn drop(&mut self) {
         // Close the file handle first so Windows permits immediate deletion.
         self.file.take();
-        let _ = std::fs::remove_file(&self.temp_path);
+        if self.state.active_readers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
     }
 }
 
@@ -509,14 +529,158 @@ pub fn build_stream_http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Inspects the leading ISO-BMFF boxes of an MP4/M4A stream.
+///
+/// Returns `(has_leading_moov, exact_total_bytes_from_sidx)`:
+/// - `has_leading_moov`: `true` if a `moov` box appears before `mdat` (or stream is not ISO-BMFF).
+/// - `exact_total_bytes_from_sidx`: exact byte length of the complete DASH MP4 file computed from
+///   the `sidx` (Segment Index) box if present in `header`.
+pub fn probe_mp4_stream_header(header: &[u8]) -> (bool, Option<u64>) {
+    if header.len() < 8 || &header[4..8] != b"ftyp" {
+        return (true, None);
+    }
+
+    let mut off = 0usize;
+    let mut saw_moov = false;
+    let mut saw_mdat_before_moov = false;
+    let mut sidx_total: Option<u64> = None;
+
+    while off + 8 <= header.len() {
+        let size32 = u32::from_be_bytes([
+            header[off],
+            header[off + 1],
+            header[off + 2],
+            header[off + 3],
+        ]) as u64;
+        let box_type = &header[off + 4..off + 8];
+        let (box_size, header_len) = if size32 == 1 {
+            if off + 16 > header.len() {
+                break;
+            }
+            let size64 = u64::from_be_bytes([
+                header[off + 8],
+                header[off + 9],
+                header[off + 10],
+                header[off + 11],
+                header[off + 12],
+                header[off + 13],
+                header[off + 14],
+                header[off + 15],
+            ]);
+            (size64, 16usize)
+        } else if size32 == 0 {
+            break;
+        } else {
+            (size32, 8usize)
+        };
+
+        if box_size < header_len as u64 {
+            break;
+        }
+
+        if box_type == b"moov" {
+            saw_moov = true;
+        } else if box_type == b"mdat" && !saw_moov {
+            saw_mdat_before_moov = true;
+        } else if box_type == b"sidx" {
+            let box_end = off.saturating_add(box_size as usize);
+            if box_end <= header.len() {
+                sidx_total = parse_sidx_box_total(&header[off..box_end], off as u64 + box_size);
+            }
+        }
+
+        if saw_moov && sidx_total.is_some() {
+            break;
+        }
+
+        let Some(next) = off.checked_add(box_size as usize) else {
+            break;
+        };
+        if next > header.len() {
+            break;
+        }
+        off = next;
+    }
+
+    (saw_moov || !saw_mdat_before_moov, sidx_total)
+}
+
+fn parse_sidx_box_total(box_bytes: &[u8], sidx_end_offset: u64) -> Option<u64> {
+    // FullBox: 8-byte header + 1-byte version + 3-byte flags + 4-byte reference_ID + 4-byte timescale = 20 bytes
+    if box_bytes.len() < 20 {
+        return None;
+    }
+    let version = box_bytes[8];
+    let mut pos = 20usize;
+    let first_offset: u64 = if version == 0 {
+        if pos + 8 > box_bytes.len() {
+            return None;
+        }
+        let fo = u32::from_be_bytes([
+            box_bytes[pos + 4],
+            box_bytes[pos + 5],
+            box_bytes[pos + 6],
+            box_bytes[pos + 7],
+        ]) as u64;
+        pos += 8;
+        fo
+    } else {
+        if pos + 16 > box_bytes.len() {
+            return None;
+        }
+        let fo = u64::from_be_bytes([
+            box_bytes[pos + 8],
+            box_bytes[pos + 9],
+            box_bytes[pos + 10],
+            box_bytes[pos + 11],
+            box_bytes[pos + 12],
+            box_bytes[pos + 13],
+            box_bytes[pos + 14],
+            box_bytes[pos + 15],
+        ]);
+        pos += 16;
+        fo
+    };
+
+    if pos + 4 > box_bytes.len() {
+        return None;
+    }
+    let ref_count = u16::from_be_bytes([box_bytes[pos + 2], box_bytes[pos + 3]]) as usize;
+    pos += 4;
+    if ref_count == 0 || pos + ref_count * 12 > box_bytes.len() {
+        return None;
+    }
+
+    let mut sum_ref_bytes = 0u64;
+    for _ in 0..ref_count {
+        let word0 = u32::from_be_bytes([
+            box_bytes[pos],
+            box_bytes[pos + 1],
+            box_bytes[pos + 2],
+            box_bytes[pos + 3],
+        ]);
+        sum_ref_bytes = sum_ref_bytes.saturating_add((word0 & 0x7FFF_FFFF) as u64);
+        pos += 12;
+    }
+
+    Some(
+        sidx_end_offset
+            .saturating_add(first_offset)
+            .saturating_add(sum_ref_bytes),
+    )
+}
+
 /// Stream audio from `yt-dlp -f <selector> --no-playlist --no-part --fixup never -o - <url>`
-/// into `temp_path`, killing the child process automatically if cancelled/aborted.
+/// into `temp_path`, invoking `on_ready` progressively once `prebuffer_bytes` have arrived
+/// (using the MP4 `sidx` box when present to expose exact file length immediately so seeking works
+/// without waiting for 100% download).
 pub async fn download_yt_dlp_stream<F>(
     binary: PathBuf,
     video_url: String,
     format_selector: String,
     temp_path: PathBuf,
     state: Arc<StreamBufferState>,
+    prebuffer_bytes: u64,
     on_ready: F,
 ) -> Result<(), String>
 where
@@ -574,6 +738,11 @@ where
         .map_err(|e| format!("unable to create temp stream file: {e}"))?;
 
     let mut buf = vec![0u8; 32 * 1024];
+    let mut header_probe = Vec::with_capacity(16 * 1024);
+    let mut header_inspected = false;
+    let mut can_stream_progressively = true;
+    let mut known_total_bytes: Option<u64> = None;
+    let mut on_ready = Some(on_ready);
     let mut downloaded = 0u64;
 
     loop {
@@ -591,10 +760,35 @@ where
         if n == 0 {
             break;
         }
+
+        if !header_inspected && header_probe.len() < 16 * 1024 {
+            let take = (16 * 1024 - header_probe.len()).min(n);
+            header_probe.extend_from_slice(&buf[..take]);
+            let (leading_moov, sidx_total) = probe_mp4_stream_header(&header_probe);
+            if sidx_total.is_some() {
+                known_total_bytes = sidx_total;
+                state.set_total_bytes(known_total_bytes);
+                can_stream_progressively = true;
+                header_inspected = true;
+            } else if header_probe.len() >= 16 * 1024 {
+                can_stream_progressively = leading_moov;
+                header_inspected = true;
+            }
+        }
+
         writer
             .write_all(&buf[..n])
             .map_err(|e| format!("temp stream write failed: {e}"))?;
         downloaded = state.advance(n as u64);
+
+        if can_stream_progressively && downloaded >= prebuffer_bytes {
+            if let Some(cb) = on_ready.take() {
+                let _ = writer.flush();
+                let reader = ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
+                    .map_err(|e| format!("temp stream open failed: {e}"))?;
+                cb(reader, known_total_bytes);
+            }
+        }
     }
 
     let _ = writer.flush();
@@ -619,17 +813,21 @@ where
             .unwrap_or("no audio data received")
             .trim()
             .to_string();
-        let _ = std::fs::remove_file(&temp_path);
         let msg = format!("yt-dlp stream failed ({status}): {detail}");
         state.mark_error(msg.clone());
+        if on_ready.is_some() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
         return Err(msg);
     }
 
     state.set_total_bytes(Some(downloaded));
     state.mark_finished();
-    let reader = ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
-        .map_err(|e| format!("temp stream open failed: {e}"))?;
-    on_ready(reader, Some(downloaded));
+    if let Some(cb) = on_ready.take() {
+        let reader = ProgressiveStreamReader::open(temp_path.clone(), Arc::clone(&state))
+            .map_err(|e| format!("temp stream open failed: {e}"))?;
+        cb(reader, Some(downloaded));
+    }
     Ok(())
 }
 
@@ -730,5 +928,51 @@ mod tests {
         assert!(!stale1.exists());
         assert!(!stale2.exists());
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn probes_mp4_dash_sidx_exact_total_length_from_initial_header() {
+        let mut buf = Vec::new();
+        // ftyp (16 bytes)
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(b"ftypdashiso6");
+        // moov (16 bytes)
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(b"moov00000000");
+        // sidx v0 (32 + 2 * 12 = 56 bytes), ends at 16 + 16 + 56 = 88
+        buf.extend_from_slice(&56u32.to_be_bytes());
+        buf.extend_from_slice(b"sidx");
+        buf.extend_from_slice(&0u32.to_be_bytes()); // version=0, flags=0
+        buf.extend_from_slice(&1u32.to_be_bytes()); // ref_id
+        buf.extend_from_slice(&44100u32.to_be_bytes()); // timescale
+        buf.extend_from_slice(&0u32.to_be_bytes()); // earliest_presentation_time
+        buf.extend_from_slice(&0u32.to_be_bytes()); // first_offset
+        buf.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        buf.extend_from_slice(&2u16.to_be_bytes()); // ref_count = 2
+        // Ref 1: 100_000 bytes
+        buf.extend_from_slice(&100_000u32.to_be_bytes());
+        buf.extend_from_slice(&44100u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        // Ref 2: 250_000 bytes
+        buf.extend_from_slice(&250_000u32.to_be_bytes());
+        buf.extend_from_slice(&44100u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+
+        let (leading_moov, total) = probe_mp4_stream_header(&buf);
+        assert!(leading_moov);
+        assert_eq!(total, Some(88 + 100_000 + 250_000));
+    }
+
+    #[test]
+    fn detects_non_fast_start_mp4_with_mdat_before_moov() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(b"ftypmp42isom");
+        buf.extend_from_slice(&500_000u32.to_be_bytes());
+        buf.extend_from_slice(b"mdat00000000");
+
+        let (leading_moov, total) = probe_mp4_stream_header(&buf);
+        assert!(!leading_moov);
+        assert_eq!(total, None);
     }
 }

@@ -476,6 +476,7 @@ fn handle_command(
                     format_selector,
                     path_for_task,
                     Arc::clone(&state_for_task),
+                    DEFAULT_PREBUFFER_BYTES,
                     move |reader, byte_len| {
                         ready_flag_cb.store(true, std::sync::atomic::Ordering::Release);
                         let _ = tx_ready.send(WorkerMsg::StreamReady {

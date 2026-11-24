@@ -33,7 +33,11 @@ pub fn view_player_bar<'a>(
     let artist = track
         .map(|t| t.artist_display())
         .unwrap_or_else(|| "Select a track to play".to_string());
-    let badge = info.source_used.map(|s| s.badge_label()).unwrap_or("Idle");
+    let badge = if info.status == PlaybackStatus::Buffering {
+        "Buffering..."
+    } else {
+        info.source_used.map(|s| s.badge_label()).unwrap_or("Idle")
+    };
 
     let track_click_area = mouse_area(
         row![

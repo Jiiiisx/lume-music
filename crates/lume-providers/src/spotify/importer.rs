@@ -2,8 +2,69 @@ use std::time::Duration;
 
 use base64::Engine;
 use lume_core::{CoreError, Track, TrackSource};
+use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
+
+/// Upgrades Spotify oEmbed 300×300 album thumbnails (`ab67616d00001e02`) to crisp 640×640 HD (`ab67616d0000b273`).
+pub fn upgrade_spotify_album_art_url(url: &str) -> String {
+    if url.contains("ab67616d00001e02") {
+        url.replace("ab67616d00001e02", "ab67616d0000b273")
+    } else {
+        url.to_string()
+    }
+}
+
+/// Returns true when a Spotify track is missing its own album cover art (e.g. `None`, or still
+/// carrying a playlist cover like `ab67706c` / `ab67706f` / `mosaic.scdn.co` instead of an
+/// official `ab67616d` album artwork hash).
+pub fn needs_spotify_album_artwork(track: &Track) -> bool {
+    if !matches!(track.source, TrackSource::Spotify { .. }) {
+        return false;
+    }
+    match track.artwork_ref.as_deref() {
+        None => true,
+        Some(url) => {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                return true;
+            }
+            // Official Spotify album covers use the `ab67616d` prefix; playlist covers use
+            // `ab67706c` / `ab67706f` / `mosaic.scdn.co`.
+            !trimmed.contains("ab67616d")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyOEmbedResponse {
+    thumbnail_url: Option<String>,
+}
+
+/// Fetches the genuine original album artwork URL for a Spotify track via Spotify's public
+/// unauthenticated oEmbed endpoint (`https://open.spotify.com/oembed`), upgraded to 640×640 HD.
+pub async fn fetch_spotify_track_oembed_cover(
+    client: &reqwest::Client,
+    spotify_track_id: &str,
+) -> Option<String> {
+    let id = spotify_track_id.trim();
+    if !is_valid_spotify_id(id) {
+        return None;
+    }
+    let endpoint = format!(
+        "https://open.spotify.com/oembed?url=https://open.spotify.com/track/{id}"
+    );
+    let resp = client.get(&endpoint).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let parsed: SpotifyOEmbedResponse = resp.json().await.ok()?;
+    parsed
+        .thumbnail_url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .map(|u| upgrade_spotify_album_art_url(&u))
+}
 
 /// Parsed result of importing a public Spotify playlist URL via its embed payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +72,7 @@ pub struct ImportedSpotifyPlaylist {
     pub spotify_id: String,
     pub source_url: String,
     pub name: String,
+    pub cover_url: Option<String>,
     pub tracks: Vec<Track>,
 }
 
@@ -182,7 +244,10 @@ pub fn parse_spotify_embed_html(
             .and_then(Value::as_u64)
             .unwrap_or(0);
 
-        let artwork_ref = extract_best_image_url(item).or_else(|| playlist_cover.clone());
+        // Keep only track-specific album artwork if present in the embed payload; do NOT stamp the
+        // playlist cover photo onto every song so background oEmbed enrichment loads each track's
+        // genuine original album cover.
+        let artwork_ref = extract_best_image_url(item).map(|u| upgrade_spotify_album_art_url(&u));
         let source = TrackSource::Spotify { id: track_id };
         tracks.push(Track {
             uid: source.canonical_uid(),
@@ -206,6 +271,7 @@ pub fn parse_spotify_embed_html(
         spotify_id: playlist_id.to_string(),
         source_url: canonical_playlist_url(playlist_id),
         name,
+        cover_url: playlist_cover,
         tracks,
     })
 }
@@ -357,10 +423,56 @@ mod tests {
             "spotify:0VjIjW4GlUZAMYd2vXMi3b"
         );
         assert_eq!(
-            imported.tracks[0].artwork_ref.as_deref(),
+            imported.cover_url.as_deref(),
             Some("https://i.scdn.co/large.jpg")
+        );
+        assert_eq!(
+            imported.tracks[0].artwork_ref, None,
+            "playlist cover must not be stamped onto tracks lacking per-track album art"
         );
         assert_eq!(imported.tracks[1].artists, vec!["Kavinsky", "Lovefoxxx"]);
         assert_eq!(imported.tracks[1].duration_ms, 258_413);
+    }
+
+    #[test]
+    fn upgrades_oembed_album_art_to_640_and_detects_playlist_covers_needing_enrichment() {
+        assert_eq!(
+            upgrade_spotify_album_art_url(
+                "https://image-cdn-ak.spotifycdn.com/image/ab67616d00001e028863bc11d2aa12b54f5aeb36"
+            ),
+            "https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36"
+        );
+
+        let base = Track {
+            uid: "spotify:6Uwi2Qk3H7fM4b4W4ExrAp".into(),
+            source: TrackSource::Spotify {
+                id: "6Uwi2Qk3H7fM4b4W4ExrAp".into(),
+            },
+            title: "Scott Street".into(),
+            artists: vec!["Phoebe Bridgers".into()],
+            album: None,
+            duration_ms: 305_000,
+            artwork_ref: None,
+            is_liked: false,
+        };
+        assert!(needs_spotify_album_artwork(&base));
+
+        let with_playlist_cover = Track {
+            artwork_ref: Some(
+                "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000bebb75656fa615ef019d5e5d1b6d"
+                    .into(),
+            ),
+            ..base.clone()
+        };
+        assert!(needs_spotify_album_artwork(&with_playlist_cover));
+
+        let with_real_album_art = Track {
+            artwork_ref: Some(
+                "https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36"
+                    .into(),
+            ),
+            ..base
+        };
+        assert!(!needs_spotify_album_artwork(&with_real_album_art));
     }
 }

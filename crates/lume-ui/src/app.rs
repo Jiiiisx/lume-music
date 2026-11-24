@@ -12,11 +12,12 @@ use lume_core::{
     QueueEngine, ResolvedStream, Track, TrackSource,
 };
 use lume_providers::{
-    detect_yt_dlp_binary, ensure_fresh_token, find_sidecar_lrc, find_sidecar_ttml,
-    import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api, parse_lrc,
-    parse_ttml, read_embedded_lyrics, resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient,
-    SpotifyAccountTier, SpotifyApiError, SpotifyUserProfile, SpotifyWebClient,
-    YouTubeMusicProvider, SPOTIFY_PLAYBACK_CLIENT_ID,
+    detect_yt_dlp_binary, ensure_fresh_token, fetch_spotify_track_oembed_cover, find_sidecar_lrc,
+    find_sidecar_ttml, import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api,
+    needs_spotify_album_artwork, parse_lrc, parse_ttml, read_embedded_lyrics,
+    resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient, SpotifyAccountTier,
+    SpotifyApiError, SpotifyUserProfile, SpotifyWebClient, YouTubeMusicProvider,
+    SPOTIFY_PLAYBACK_CLIENT_ID,
 };
 use lume_storage::{
     AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup, SpotifyTokenBundle,
@@ -292,6 +293,7 @@ pub struct LumeApp {
     art_handle_lru: VecDeque<String>,
     art_blur_rgba: Option<Arc<Vec<u8>>>,
     art_blur_version: u64,
+    enriching_spotify_art: HashSet<String>,
 
     prev_palette: AlbumPalette,
     target_palette: AlbumPalette,
@@ -433,6 +435,7 @@ impl LumeApp {
             art_handle_lru: VecDeque::new(),
             art_blur_rgba: None,
             art_blur_version: 0,
+            enriching_spotify_art: HashSet::new(),
             prev_palette: default_pal,
             target_palette: default_pal,
             display_palette: default_pal,
@@ -462,6 +465,9 @@ impl LumeApp {
         if let Some(current) = app.queue.current().cloned() {
             app.duration_ms = current.duration_ms;
             startup_tasks.push(app.load_palette_task(&current));
+            if needs_spotify_album_artwork(&current) {
+                startup_tasks.push(app.spawn_spotify_artwork_enrichment_task(&[current]));
+            }
         }
         if !app.config.local_folders.is_empty() {
             app.scanning_folders = true;
@@ -679,13 +685,21 @@ impl LumeApp {
                         self.playlist_tracks = db.get_playlist_tracks(&pl_id).unwrap_or_default();
                     }
                     let keys = self.missing_art_keys(&self.playlist_tracks);
-                    return self.preload_thumbnails_task(keys);
+                    let tracks_snapshot = self.playlist_tracks.clone();
+                    return Task::batch([
+                        self.preload_thumbnails_task(keys),
+                        self.spawn_spotify_artwork_enrichment_task(&tracks_snapshot),
+                    ]);
                 } else if matches!(self.nav, ActiveNav::LikedSongs) {
                     if let Ok(db) = self.db.lock() {
                         self.liked_tracks = db.list_unified_liked_tracks().unwrap_or_default();
                     }
                     let keys = self.missing_art_keys(&self.liked_tracks);
-                    return self.preload_thumbnails_task(keys);
+                    let tracks_snapshot = self.liked_tracks.clone();
+                    return Task::batch([
+                        self.preload_thumbnails_task(keys),
+                        self.spawn_spotify_artwork_enrichment_task(&tracks_snapshot),
+                    ]);
                 } else if matches!(self.nav, ActiveNav::Search) {
                     self.refresh_search_results();
                 } else if matches!(self.nav, ActiveNav::Settings) {
@@ -841,11 +855,15 @@ impl LumeApp {
                         }
                         self.nav = ActiveNav::Playlist(playlist.id.clone());
                         self.status_toast = Some(format!(
-                            "Imported \"{}\" ({} tracks)",
+                            "Imported \"{}\" ({} tracks) — loading original album covers...",
                             playlist.name, playlist.track_count
                         ));
                         let keys = self.missing_art_keys(&self.playlist_tracks);
-                        return self.preload_thumbnails_task(keys);
+                        let tracks_snapshot = self.playlist_tracks.clone();
+                        return Task::batch([
+                            self.preload_thumbnails_task(keys),
+                            self.spawn_spotify_artwork_enrichment_task(&tracks_snapshot),
+                        ]);
                     }
                     Err(err) => {
                         self.modal_error = Some(err);
@@ -1405,6 +1423,71 @@ impl LumeApp {
                 for (key, bytes) in items {
                     self.insert_art_handle(key, image::Handle::from_bytes(bytes));
                 }
+            }
+            Message::SpotifyArtworkEnriched(pairs) => {
+                if pairs.is_empty() {
+                    return Task::none();
+                }
+                let updated_map: HashMap<String, String> = pairs.into_iter().collect();
+                let mut new_keys = Vec::with_capacity(updated_map.len());
+
+                for (idx, t) in self.playlist_tracks.iter_mut().enumerate() {
+                    if let Some(url) = updated_map.get(&t.uid) {
+                        t.artwork_ref = Some(url.clone());
+                        if idx < MAX_IN_MEM_ART_HANDLES {
+                            new_keys.push(url.clone());
+                        }
+                    }
+                }
+                for (idx, t) in self.liked_tracks.iter_mut().enumerate() {
+                    if let Some(url) = updated_map.get(&t.uid) {
+                        t.artwork_ref = Some(url.clone());
+                        if idx < MAX_IN_MEM_ART_HANDLES {
+                            new_keys.push(url.clone());
+                        }
+                    }
+                }
+                for t in &mut self.spotify_search_results {
+                    if let Some(url) = updated_map.get(&t.uid) {
+                        t.artwork_ref = Some(url.clone());
+                    }
+                }
+                self.refresh_search_results();
+
+                let mut snap = self.queue.to_snapshot();
+                let mut active_updated = false;
+                let active_uid = self.queue.current().map(|t| t.uid.clone());
+                for t in &mut snap.natural_order {
+                    if let Some(url) = updated_map.get(&t.uid) {
+                        t.artwork_ref = Some(url.clone());
+                        if active_uid.as_deref() == Some(t.uid.as_str()) {
+                            active_updated = true;
+                        }
+                    }
+                }
+                self.queue = QueueEngine::from_snapshot(snap);
+
+                let mut tasks = Vec::new();
+                new_keys.sort();
+                new_keys.dedup();
+                if !new_keys.is_empty() {
+                    tasks.push(self.preload_thumbnails_task(new_keys));
+                }
+                if active_updated {
+                    if let Some(current) = self.queue.current().cloned() {
+                        tasks.push(self.load_palette_task(&current));
+                    }
+                }
+                // Continue enriching any remaining visible tracks in the current view.
+                let remaining_snapshot = match self.nav {
+                    ActiveNav::Playlist(_) => self.playlist_tracks.clone(),
+                    ActiveNav::LikedSongs => self.liked_tracks.clone(),
+                    _ => Vec::new(),
+                };
+                if !remaining_snapshot.is_empty() {
+                    tasks.push(self.spawn_spotify_artwork_enrichment_task(&remaining_snapshot));
+                }
+                return Task::batch(tasks);
             }
             Message::SetGlassmorphismMode(mode) => {
                 self.config.glassmorphism_mode = mode;
@@ -2218,6 +2301,9 @@ impl LumeApp {
         self.smtc.set_metadata(Some(&track), cover_path.as_deref());
 
         let mut tasks = vec![self.load_palette_task(&track)];
+        if needs_spotify_album_artwork(&track) {
+            tasks.push(self.spawn_spotify_artwork_enrichment_task(std::slice::from_ref(&track)));
+        }
         if self.view_mode == ViewMode::NowPlayingLyrics {
             tasks.push(self.fetch_lyrics_task(track.clone(), false));
         } else {
@@ -2387,6 +2473,72 @@ impl LumeApp {
                 out
             },
             Message::ThumbnailsLoaded,
+        )
+    }
+
+    fn spawn_spotify_artwork_enrichment_task(&mut self, tracks: &[Track]) -> Task<Message> {
+        const BATCH_SIZE: usize = 24;
+        let mut batch: Vec<(String, String)> = Vec::new();
+        for t in tracks {
+            if !needs_spotify_album_artwork(t) {
+                continue;
+            }
+            if let TrackSource::Spotify { id } = &t.source {
+                if self.enriching_spotify_art.insert(t.uid.clone()) {
+                    batch.push((t.uid.clone(), id.clone()));
+                    if batch.len() >= BATCH_SIZE {
+                        break;
+                    }
+                }
+            }
+        }
+        if batch.is_empty() {
+            return Task::none();
+        }
+
+        let db_path = self.db_path.clone();
+        Task::perform(
+            async move {
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(8))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+
+                let mut resolved = Vec::with_capacity(batch.len());
+                for chunk in batch.chunks(8) {
+                    let mut set = tokio::task::JoinSet::new();
+                    for (uid, sp_id) in chunk {
+                        let http = client.clone();
+                        let uid = uid.clone();
+                        let sp_id = sp_id.clone();
+                        set.spawn(async move {
+                            fetch_spotify_track_oembed_cover(&http, &sp_id)
+                                .await
+                                .map(|url| (uid, url))
+                        });
+                    }
+                    while let Some(joined) = set.join_next().await {
+                        if let Ok(Some(pair)) = joined {
+                            resolved.push(pair);
+                        }
+                    }
+                }
+
+                if !resolved.is_empty() {
+                    let to_save = resolved.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(db) = Database::open(&db_path) {
+                            for (uid, url) in &to_save {
+                                let _ = db.update_track_artwork(uid, url);
+                            }
+                        }
+                    })
+                    .await;
+                }
+
+                resolved
+            },
+            Message::SpotifyArtworkEnriched,
         )
     }
 

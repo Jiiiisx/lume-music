@@ -200,6 +200,18 @@ impl Database {
         Ok(track)
     }
 
+    pub fn update_track_artwork(
+        &self,
+        track_uid: &str,
+        artwork_ref: &str,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE tracks SET artwork_ref = ?1, updated_at = ?2 WHERE uid = ?3",
+            params![artwork_ref, now_epoch_s(), track_uid],
+        )?;
+        Ok(())
+    }
+
     pub fn list_local_tracks(&self) -> Result<Vec<Track>, StorageError> {
         let mut stmt = self.conn.prepare(
             r#"
