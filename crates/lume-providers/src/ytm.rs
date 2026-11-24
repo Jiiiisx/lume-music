@@ -229,28 +229,21 @@ impl YouTubeMusicProvider {
         })
     }
 
-    /// Lightweight HTTP range probe catching PO-token / HTTP 403 stream rejections before handing
-    /// the URL to the audio engine.
+    /// Lightweight plain-`GET` header probe (no `Range` header, body dropped immediately).
     ///
-    /// YouTube's GVS CDN allows the first 1 MiB (`0..=1_048_575`) of unauthenticated streams
-    /// without a PO token and rejects byte `1_048_576+` with `403 Forbidden`. When a stream is
-    /// larger than 1 MiB, probing past 1 MiB catches the block immediately so we fall back to
-    /// `yt-dlp` instead of stalling mid-song.
-    async fn probe_stream_url(&self, url: &str, known_size: u64) -> Result<(), CoreError> {
-        let range = if known_size > 1_048_576 {
-            "bytes=1048576-1048577"
-        } else {
-            "bytes=0-1"
-        };
+    /// YouTube's PO-token-restricted `c=IOS` URLs return `206` for tiny byte-range probes
+    /// but immediately return `403 Forbidden` on a plain full-stream `GET` (and after 1 MiB
+    /// of chunked transfer). Checking plain `GET` status catches the PO-token block in ~45 ms
+    /// so playback immediately falls back to `yt-dlp`.
+    async fn probe_stream_url(&self, url: &str) -> Result<(), CoreError> {
         let resp = self
             .http
             .get(url)
-            .header(reqwest::header::RANGE, range)
             .send()
             .await
             .map_err(|e| CoreError::Network(format!("stream probe failed: {e}")))?;
         let status = resp.status();
-        if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
+        if status.is_success() {
             Ok(())
         } else {
             Err(CoreError::ProviderUnavailable(format!(
@@ -260,17 +253,22 @@ impl YouTubeMusicProvider {
         }
     }
 
-    async fn resolve_via_rustypipe(&self, video_id: &str) -> Result<String, CoreError> {
-        // Prefer Ios first (no JS signature deobfuscation needed, ~180ms), then fall back.
-        let clients = [
-            ClientType::Ios,
-            ClientType::Tv,
-            ClientType::Android,
-            ClientType::Desktop,
-        ];
+    async fn resolve_via_rustypipe(&self, video_id: &str, has_yt_dlp: bool) -> Result<String, CoreError> {
+        // Prefer Ios first (no JS signature deobfuscation needed, ~180ms).
+        // When yt-dlp is installed, avoid burning ~15s on Tv/Android/Desktop deobf failures if Ios is PO-blocked.
+        let clients: &[ClientType] = if has_yt_dlp {
+            &[ClientType::Ios]
+        } else {
+            &[
+                ClientType::Ios,
+                ClientType::Tv,
+                ClientType::Android,
+                ClientType::Desktop,
+            ]
+        };
         let mut last_err = CoreError::ProviderUnavailable("no rustypipe client succeeded".into());
 
-        for client_type in clients {
+        for &client_type in clients {
             let player = match self
                 .client
                 .query()
@@ -299,7 +297,7 @@ impl YouTubeMusicProvider {
                 }
             };
 
-            match self.probe_stream_url(&best.url, best.size).await {
+            match self.probe_stream_url(&best.url).await {
                 Ok(()) => return Ok(best.url.clone()),
                 Err(e) => {
                     last_err = e;
@@ -370,13 +368,14 @@ impl YouTubeMusicProvider {
             return Err(CoreError::InvalidInput("empty YouTube video_id".into()));
         }
 
-        match self.resolve_via_rustypipe(trimmed).await {
+        let yt_dlp_bin = detect_yt_dlp_binary(self.yt_dlp_path.as_deref());
+        match self.resolve_via_rustypipe(trimmed, yt_dlp_bin.is_some()).await {
             Ok(url) => Ok(ResolvedStream::HttpUrl {
                 url,
                 source: PlaybackSourceUsed::YouTubeDirect,
             }),
             Err(primary_err) => {
-                if let Some(binary) = detect_yt_dlp_binary(self.yt_dlp_path.as_deref()) {
+                if let Some(binary) = yt_dlp_bin {
                     Ok(ResolvedStream::YtDlpProcess {
                         binary,
                         watch_url: format!("https://music.youtube.com/watch?v={trimmed}"),
@@ -595,11 +594,11 @@ mod tests {
         let provider = YouTubeMusicProvider::new(dir.path().to_path_buf(), None).unwrap();
 
         assert!(provider
-            .probe_stream_url(&format!("http://{addr}/ok"), 500_000)
+            .probe_stream_url(&format!("http://{addr}/ok"))
             .await
             .is_ok());
         let err = provider
-            .probe_stream_url(&format!("http://{addr}/forbidden"), 2_000_000)
+            .probe_stream_url(&format!("http://{addr}/forbidden"))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("403"));

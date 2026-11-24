@@ -84,7 +84,7 @@ impl AudioBackend for RodioAudioBackend {
         }
         let decoder = builder
             .build()
-            .map_err(|e| format!("unable to decode HTTP stream: {e}"))?;
+            .map_err(|e| format!("unable to decode HTTP stream: {e:?}"))?;
         let probed_ms = decoder.total_duration().map(|d| d.as_millis() as u64);
 
         if let Some(prev) = self.player.take() {
