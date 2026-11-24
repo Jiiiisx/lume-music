@@ -1,11 +1,13 @@
 pub mod backend;
 pub mod commands;
 pub mod engine;
+pub mod spotify;
 pub mod stream;
 
 pub use backend::{AudioBackend, RodioAudioBackend};
 pub use commands::{AudioCommand, AudioEvent};
 pub use engine::AudioEngineHandle;
+pub use spotify::{LibrespotBackend, SpotifyBackend, SpotifyEventSink, SpotifyPlaybackEvent};
 pub use stream::{
     cleanup_stale_stream_files, default_stream_cache_dir, ProgressiveStreamReader,
     StreamBufferState,

@@ -8,11 +8,19 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::backend::{AudioBackend, RodioAudioBackend};
 use crate::commands::{AudioCommand, AudioEvent};
+use crate::spotify::{LibrespotBackend, SpotifyBackend, SpotifyEventSink, SpotifyPlaybackEvent};
 use crate::stream::{
     allocate_stream_temp_path, build_stream_http_client, cleanup_stale_stream_files,
     default_stream_cache_dir, download_http_stream, download_yt_dlp_stream, ActiveHttpStream,
     ProgressiveStreamReader, StreamBufferState, DEFAULT_PREBUFFER_BYTES,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ActiveBackendKind {
+    #[default]
+    Rodio,
+    Spotify,
+}
 
 enum WorkerMsg {
     Command(AudioCommand),
@@ -28,6 +36,7 @@ enum WorkerMsg {
         gen: u64,
         error: String,
     },
+    Spotify(SpotifyPlaybackEvent),
 }
 
 /// Non-blocking handle to the background audio engine thread.
@@ -55,13 +64,25 @@ impl AudioEngineHandle {
         backend: Box<dyn AudioBackend + Send>,
         cache_dir: PathBuf,
     ) -> (Self, Receiver<AudioEvent>) {
+        Self::spawn_with_backends_and_cache_dir(
+            backend,
+            Box::new(LibrespotBackend::new()),
+            cache_dir,
+        )
+    }
+
+    pub fn spawn_with_backends_and_cache_dir(
+        backend: Box<dyn AudioBackend + Send>,
+        spotify: Box<dyn SpotifyBackend + Send>,
+        cache_dir: PathBuf,
+    ) -> (Self, Receiver<AudioEvent>) {
         let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel::<WorkerMsg>(128);
         let (evt_tx, evt_rx) = channel::<AudioEvent>(256);
         let worker_tx = msg_tx.clone();
 
         std::thread::Builder::new()
             .name("lume-audio-worker".to_string())
-            .spawn(move || run_worker(backend, cache_dir, worker_tx, msg_rx, evt_tx))
+            .spawn(move || run_worker(backend, spotify, cache_dir, worker_tx, msg_rx, evt_tx))
             .expect("failed to spawn lume-audio-worker thread");
 
         (Self { tx: msg_tx }, evt_rx)
@@ -75,6 +96,7 @@ impl AudioEngineHandle {
 }
 
 struct WorkerState {
+    active_backend: ActiveBackendKind,
     status: PlaybackStatus,
     current_uid: Option<String>,
     duration_ms: u64,
@@ -89,6 +111,7 @@ struct WorkerState {
 impl Default for WorkerState {
     fn default() -> Self {
         Self {
+            active_backend: ActiveBackendKind::Rodio,
             status: PlaybackStatus::Stopped,
             current_uid: None,
             duration_ms: 0,
@@ -124,13 +147,16 @@ struct StreamRuntime {
 
 fn handle_worker_msg(
     backend: &mut dyn AudioBackend,
+    spotify: &mut dyn SpotifyBackend,
     state: &mut WorkerState,
     stream_rt: &StreamRuntime,
     evt_tx: &Sender<AudioEvent>,
     msg: WorkerMsg,
 ) -> bool {
     match msg {
-        WorkerMsg::Command(cmd) => handle_command(backend, state, stream_rt, evt_tx, cmd),
+        WorkerMsg::Command(cmd) => {
+            handle_command(backend, spotify, state, stream_rt, evt_tx, cmd)
+        }
         WorkerMsg::StreamReady {
             gen,
             track_uid,
@@ -144,6 +170,8 @@ fn handle_worker_msg(
                 drop(reader);
                 return true;
             }
+            spotify.stop();
+            state.active_backend = ActiveBackendKind::Rodio;
             match backend.load_stream(reader, byte_len, hint.as_deref()) {
                 Ok(probed_ms) => {
                     let effective_vol = if state.muted { 0.0 } else { state.volume };
@@ -182,11 +210,112 @@ fn handle_worker_msg(
             emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Stopped));
             true
         }
+        WorkerMsg::Spotify(sp_ev) => {
+            handle_spotify_event(state, evt_tx, sp_ev);
+            true
+        }
+    }
+}
+
+fn handle_spotify_event(
+    state: &mut WorkerState,
+    evt_tx: &Sender<AudioEvent>,
+    ev: SpotifyPlaybackEvent,
+) {
+    match ev {
+        SpotifyPlaybackEvent::Playing {
+            gen,
+            position_ms,
+            duration_ms,
+        } => {
+            if gen != state.load_gen || state.active_backend != ActiveBackendKind::Spotify {
+                return;
+            }
+            if let Some(dur) = duration_ms.filter(|&d| d > 0) {
+                state.duration_ms = dur;
+            }
+            state.ended_emitted = false;
+            state.status = PlaybackStatus::Playing;
+            state.last_tick = Instant::now();
+            emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Playing));
+            emit(
+                evt_tx,
+                AudioEvent::PositionTick {
+                    position_ms,
+                    duration_ms: state.duration_ms,
+                },
+            );
+        }
+        SpotifyPlaybackEvent::Paused { gen, position_ms } => {
+            if gen != state.load_gen || state.active_backend != ActiveBackendKind::Spotify {
+                return;
+            }
+            state.status = PlaybackStatus::Paused;
+            emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Paused));
+            emit(
+                evt_tx,
+                AudioEvent::PositionTick {
+                    position_ms,
+                    duration_ms: state.duration_ms,
+                },
+            );
+        }
+        SpotifyPlaybackEvent::Position { gen, position_ms } => {
+            if gen != state.load_gen || state.active_backend != ActiveBackendKind::Spotify {
+                return;
+            }
+            emit(
+                evt_tx,
+                AudioEvent::PositionTick {
+                    position_ms,
+                    duration_ms: state.duration_ms,
+                },
+            );
+        }
+        SpotifyPlaybackEvent::EndOfTrack { gen } => {
+            if gen != state.load_gen || state.active_backend != ActiveBackendKind::Spotify {
+                return;
+            }
+            if !state.ended_emitted {
+                state.ended_emitted = true;
+                state.status = PlaybackStatus::Stopped;
+                if let Some(uid) = state.current_uid.take() {
+                    emit(evt_tx, AudioEvent::TrackEnded { track_uid: uid });
+                }
+                emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Stopped));
+            }
+        }
+        SpotifyPlaybackEvent::FallbackNeeded {
+            gen,
+            track_uid,
+            reason,
+        } => {
+            if gen != state.load_gen || state.active_backend != ActiveBackendKind::Spotify {
+                return;
+            }
+            let uid = if track_uid.is_empty() {
+                state.current_uid.clone().unwrap_or_default()
+            } else {
+                track_uid
+            };
+            state.status = PlaybackStatus::Stopped;
+            state.current_uid = None;
+            state.ended_emitted = false;
+            emit(
+                evt_tx,
+                AudioEvent::SpotifyFallbackNeeded {
+                    track_uid: uid,
+                    reason,
+                },
+            );
+            emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Stopped));
+        }
     }
 }
 
 fn handle_command(
     backend: &mut dyn AudioBackend,
+    spotify: &mut dyn SpotifyBackend,
     state: &mut WorkerState,
     stream_rt: &StreamRuntime,
     evt_tx: &Sender<AudioEvent>,
@@ -200,6 +329,8 @@ fn handle_command(
         } => {
             state.load_gen = state.load_gen.wrapping_add(1);
             state.cancel_active_stream();
+            spotify.stop();
+            state.active_backend = ActiveBackendKind::Rodio;
 
             match backend.load_local(&path) {
                 Ok(probed_ms) => {
@@ -232,7 +363,9 @@ fn handle_command(
             state.load_gen = state.load_gen.wrapping_add(1);
             let gen = state.load_gen;
             state.cancel_active_stream();
+            spotify.stop();
             backend.stop();
+            state.active_backend = ActiveBackendKind::Rodio;
 
             let temp_path = match allocate_stream_temp_path(&stream_rt.cache_dir) {
                 Ok(p) => p,
@@ -305,7 +438,9 @@ fn handle_command(
             state.load_gen = state.load_gen.wrapping_add(1);
             let gen = state.load_gen;
             state.cancel_active_stream();
+            spotify.stop();
             backend.stop();
+            state.active_backend = ActiveBackendKind::Rodio;
 
             let temp_path = match allocate_stream_temp_path(&stream_rt.cache_dir) {
                 Ok(p) => p,
@@ -366,9 +501,61 @@ fn handle_command(
             state.active_stream = Some(ActiveHttpStream::new(buf_state, task, temp_path));
             true
         }
+        AudioCommand::LoadSpotify {
+            spotify_id,
+            track_uid,
+            duration_ms,
+            access_token,
+        } => {
+            state.load_gen = state.load_gen.wrapping_add(1);
+            let gen = state.load_gen;
+            state.cancel_active_stream();
+            backend.stop();
+            state.active_backend = ActiveBackendKind::Spotify;
+
+            let effective_vol = if state.muted { 0.0 } else { state.volume };
+            spotify.set_volume(effective_vol);
+
+            state.current_uid = Some(track_uid.clone());
+            state.duration_ms = duration_ms;
+            state.ended_emitted = false;
+            state.status = PlaybackStatus::Buffering;
+            emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Buffering));
+
+            let worker_tx = stream_rt.worker_tx.clone();
+            let on_event: SpotifyEventSink = Arc::new(move |ev| {
+                let _ = worker_tx.send(WorkerMsg::Spotify(ev));
+            });
+            spotify.load(
+                gen,
+                spotify_id,
+                track_uid,
+                duration_ms,
+                access_token,
+                stream_rt.rt.handle(),
+                on_event,
+            );
+            true
+        }
+        AudioCommand::DisconnectSpotify => {
+            spotify.disconnect();
+            if state.active_backend == ActiveBackendKind::Spotify {
+                state.load_gen = state.load_gen.wrapping_add(1);
+                state.current_uid = None;
+                state.duration_ms = 0;
+                state.ended_emitted = false;
+                state.status = PlaybackStatus::Stopped;
+                state.active_backend = ActiveBackendKind::Rodio;
+                emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Stopped));
+            }
+            true
+        }
         AudioCommand::Pause => {
             if state.status == PlaybackStatus::Playing {
-                backend.pause();
+                match state.active_backend {
+                    ActiveBackendKind::Rodio => backend.pause(),
+                    ActiveBackendKind::Spotify => spotify.pause(),
+                }
                 state.status = PlaybackStatus::Paused;
                 emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Paused));
             }
@@ -376,7 +563,10 @@ fn handle_command(
         }
         AudioCommand::Resume => {
             if state.status == PlaybackStatus::Paused {
-                backend.play();
+                match state.active_backend {
+                    ActiveBackendKind::Rodio => backend.play(),
+                    ActiveBackendKind::Spotify => spotify.play(),
+                }
                 state.status = PlaybackStatus::Playing;
                 state.last_tick = Instant::now();
                 emit(evt_tx, AudioEvent::StateChanged(PlaybackStatus::Playing));
@@ -389,16 +579,32 @@ fn handle_command(
             } else {
                 pos_ms
             };
-            if let Err(err) = backend.seek(clamped) {
-                emit(evt_tx, AudioEvent::Error(err));
-            } else if state.current_uid.is_some() {
-                emit(
-                    evt_tx,
-                    AudioEvent::PositionTick {
-                        position_ms: clamped,
-                        duration_ms: state.duration_ms,
-                    },
-                );
+            match state.active_backend {
+                ActiveBackendKind::Rodio => {
+                    if let Err(err) = backend.seek(clamped) {
+                        emit(evt_tx, AudioEvent::Error(err));
+                    } else if state.current_uid.is_some() {
+                        emit(
+                            evt_tx,
+                            AudioEvent::PositionTick {
+                                position_ms: clamped,
+                                duration_ms: state.duration_ms,
+                            },
+                        );
+                    }
+                }
+                ActiveBackendKind::Spotify => {
+                    spotify.seek(clamped);
+                    if state.current_uid.is_some() {
+                        emit(
+                            evt_tx,
+                            AudioEvent::PositionTick {
+                                position_ms: clamped,
+                                duration_ms: state.duration_ms,
+                            },
+                        );
+                    }
+                }
             }
             true
         }
@@ -406,6 +612,7 @@ fn handle_command(
             state.volume = vol.clamp(0.0, 1.0);
             if !state.muted {
                 backend.set_volume(state.volume);
+                spotify.set_volume(state.volume);
             }
             true
         }
@@ -413,12 +620,14 @@ fn handle_command(
             state.muted = muted;
             let effective = if muted { 0.0 } else { state.volume };
             backend.set_volume(effective);
+            spotify.set_volume(effective);
             true
         }
         AudioCommand::Stop => {
             state.load_gen = state.load_gen.wrapping_add(1);
             state.cancel_active_stream();
             backend.stop();
+            spotify.stop();
             state.current_uid = None;
             state.duration_ms = 0;
             state.ended_emitted = false;
@@ -430,6 +639,7 @@ fn handle_command(
             state.load_gen = state.load_gen.wrapping_add(1);
             state.cancel_active_stream();
             backend.stop();
+            spotify.disconnect();
             false
         }
     }
@@ -437,6 +647,7 @@ fn handle_command(
 
 fn run_worker(
     mut backend: Box<dyn AudioBackend + Send>,
+    mut spotify: Box<dyn SpotifyBackend + Send>,
     cache_dir: PathBuf,
     worker_tx: std::sync::mpsc::SyncSender<WorkerMsg>,
     msg_rx: std::sync::mpsc::Receiver<WorkerMsg>,
@@ -462,15 +673,25 @@ fn run_worker(
     let tick_interval = Duration::from_millis(100);
 
     loop {
-        if state.status == PlaybackStatus::Playing {
+        if state.status == PlaybackStatus::Playing
+            && state.active_backend == ActiveBackendKind::Rodio
+        {
             match msg_rx.recv_timeout(tick_interval) {
                 Ok(msg) => {
-                    if !handle_worker_msg(backend.as_mut(), &mut state, &stream_rt, &evt_tx, msg) {
+                    if !handle_worker_msg(
+                        backend.as_mut(),
+                        spotify.as_mut(),
+                        &mut state,
+                        &stream_rt,
+                        &evt_tx,
+                        msg,
+                    ) {
                         break;
                     }
                     while let Ok(next_msg) = msg_rx.try_recv() {
                         if !handle_worker_msg(
                             backend.as_mut(),
+                            spotify.as_mut(),
                             &mut state,
                             &stream_rt,
                             &evt_tx,
@@ -478,6 +699,7 @@ fn run_worker(
                         ) {
                             state.cancel_active_stream();
                             backend.stop();
+                            spotify.disconnect();
                             cleanup_stale_stream_files(&cache_dir);
                             return;
                         }
@@ -487,7 +709,9 @@ fn run_worker(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
-            if state.status == PlaybackStatus::Playing {
+            if state.status == PlaybackStatus::Playing
+                && state.active_backend == ActiveBackendKind::Rodio
+            {
                 if backend.is_finished() {
                     if !state.ended_emitted {
                         state.ended_emitted = true;
@@ -512,7 +736,14 @@ fn run_worker(
         } else {
             match msg_rx.recv() {
                 Ok(msg) => {
-                    if !handle_worker_msg(backend.as_mut(), &mut state, &stream_rt, &evt_tx, msg) {
+                    if !handle_worker_msg(
+                        backend.as_mut(),
+                        spotify.as_mut(),
+                        &mut state,
+                        &stream_rt,
+                        &evt_tx,
+                        msg,
+                    ) {
                         break;
                     }
                 }
@@ -523,6 +754,7 @@ fn run_worker(
 
     state.cancel_active_stream();
     backend.stop();
+    spotify.disconnect();
     drop(stream_rt);
     cleanup_stale_stream_files(&cache_dir);
 }
@@ -1060,5 +1292,209 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
         let remaining: Vec<_> = std::fs::read_dir(&cache_dir).unwrap().flatten().collect();
         assert!(remaining.is_empty(), "temp file must be deleted after Stop/Shutdown");
+    }
+
+    #[derive(Debug, Default)]
+    struct MockSpotifyState {
+        loaded_ids: Vec<String>,
+        stopped_count: usize,
+        paused_count: usize,
+        play_count: usize,
+        seek_history: Vec<u64>,
+        volume_history: Vec<f32>,
+        disconnected: bool,
+        fail_with_fallback: Option<String>,
+    }
+
+    struct MockSpotifyBackend {
+        state: Arc<Mutex<MockSpotifyState>>,
+    }
+
+    impl MockSpotifyBackend {
+        fn new() -> (Self, Arc<Mutex<MockSpotifyState>>) {
+            let state = Arc::new(Mutex::new(MockSpotifyState::default()));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    impl SpotifyBackend for MockSpotifyBackend {
+        fn load(
+            &mut self,
+            gen: u64,
+            spotify_id: String,
+            track_uid: String,
+            duration_ms: u64,
+            _access_token: String,
+            _rt: &tokio::runtime::Handle,
+            on_event: SpotifyEventSink,
+        ) {
+            let mut st = self.state.lock().unwrap();
+            st.loaded_ids.push(spotify_id);
+            if let Some(reason) = st.fail_with_fallback.take() {
+                drop(st);
+                on_event(SpotifyPlaybackEvent::FallbackNeeded {
+                    gen,
+                    track_uid,
+                    reason,
+                });
+                return;
+            }
+            drop(st);
+            on_event(SpotifyPlaybackEvent::Playing {
+                gen,
+                position_ms: 0,
+                duration_ms: Some(duration_ms),
+            });
+        }
+
+        fn play(&mut self) {
+            self.state.lock().unwrap().play_count += 1;
+        }
+
+        fn pause(&mut self) {
+            self.state.lock().unwrap().paused_count += 1;
+        }
+
+        fn stop(&mut self) {
+            self.state.lock().unwrap().stopped_count += 1;
+        }
+
+        fn seek(&mut self, pos_ms: u64) {
+            self.state.lock().unwrap().seek_history.push(pos_ms);
+        }
+
+        fn set_volume(&mut self, volume: f32) {
+            self.state.lock().unwrap().volume_history.push(volume);
+        }
+
+        fn disconnect(&mut self) {
+            self.state.lock().unwrap().disconnected = true;
+        }
+    }
+
+    #[tokio::test]
+    async fn mutually_exclusive_handoff_between_rodio_and_spotify_syncs_volume_and_stops_other() {
+        let dir = TempDir::new().unwrap();
+        let wav = dir.path().join("local.wav");
+        write_wav_file(&wav);
+
+        let (rodio_be, rodio_st) = MockAudioBackend::new();
+        let (sp_be, sp_st) = MockSpotifyBackend::new();
+        let (handle, mut rx) = AudioEngineHandle::spawn_with_backends_and_cache_dir(
+            Box::new(rodio_be),
+            Box::new(sp_be),
+            dir.path().join("cache"),
+        );
+
+        handle.send(AudioCommand::SetVolume(0.6)).unwrap();
+        handle
+            .send(AudioCommand::LoadLocal {
+                path: wav.clone(),
+                track_uid: "local:1".into(),
+                duration_ms: 1_000,
+            })
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            AudioEvent::StateChanged(PlaybackStatus::Playing)
+        );
+        assert!(rodio_st.lock().unwrap().playing);
+
+        // Switch to Spotify: Rodio must stop and Spotify receives synchronized volume.
+        handle
+            .send(AudioCommand::LoadSpotify {
+                spotify_id: "0VjIjW4GlUZAMYd2vXMi3b".into(),
+                track_uid: "spotify:0VjIjW4GlUZAMYd2vXMi3b".into(),
+                duration_ms: 200_000,
+                access_token: "tok".into(),
+            })
+            .unwrap();
+        loop {
+            match rx.recv().await.unwrap() {
+                AudioEvent::StateChanged(PlaybackStatus::Playing) => break,
+                AudioEvent::StateChanged(PlaybackStatus::Buffering)
+                | AudioEvent::PositionTick { .. } => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(rodio_st.lock().unwrap().stopped);
+        assert_eq!(sp_st.lock().unwrap().loaded_ids.len(), 1);
+        assert!(sp_st.lock().unwrap().volume_history.contains(&0.6));
+
+        // Seek & pause route to Spotify backend.
+        handle.send(AudioCommand::Seek(30_000)).unwrap();
+        handle.send(AudioCommand::Pause).unwrap();
+        loop {
+            match rx.recv().await.unwrap() {
+                AudioEvent::StateChanged(PlaybackStatus::Paused) => break,
+                AudioEvent::PositionTick { .. } => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(sp_st.lock().unwrap().seek_history, vec![30_000]);
+        assert_eq!(sp_st.lock().unwrap().paused_count, 1);
+
+        // Switch back to Local: Spotify must stop cleanly.
+        let prev_stops = sp_st.lock().unwrap().stopped_count;
+        handle
+            .send(AudioCommand::LoadLocal {
+                path: wav,
+                track_uid: "local:2".into(),
+                duration_ms: 1_000,
+            })
+            .unwrap();
+        loop {
+            match rx.recv().await.unwrap() {
+                AudioEvent::StateChanged(PlaybackStatus::Playing) => break,
+                AudioEvent::PositionTick { .. } => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(sp_st.lock().unwrap().stopped_count > prev_stops);
+
+        handle.send(AudioCommand::Shutdown).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(sp_st.lock().unwrap().disconnected);
+    }
+
+    #[tokio::test]
+    async fn spotify_unavailable_emits_fallback_needed_without_killing_worker() {
+        let dir = TempDir::new().unwrap();
+        let (rodio_be, _rodio_st) = MockAudioBackend::new();
+        let (sp_be, sp_st) = MockSpotifyBackend::new();
+        sp_st.lock().unwrap().fail_with_fallback = Some("Premium required".into());
+
+        let (handle, mut rx) = AudioEngineHandle::spawn_with_backends_and_cache_dir(
+            Box::new(rodio_be),
+            Box::new(sp_be),
+            dir.path().join("cache"),
+        );
+
+        handle
+            .send(AudioCommand::LoadSpotify {
+                spotify_id: "track123".into(),
+                track_uid: "spotify:track123".into(),
+                duration_ms: 180_000,
+                access_token: "tok".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            AudioEvent::StateChanged(PlaybackStatus::Buffering)
+        );
+        match rx.recv().await.unwrap() {
+            AudioEvent::SpotifyFallbackNeeded { track_uid, reason } => {
+                assert_eq!(track_uid, "spotify:track123");
+                assert!(reason.contains("Premium"));
+            }
+            other => panic!("expected SpotifyFallbackNeeded, got {other:?}"),
+        }
+        handle.send(AudioCommand::Shutdown).unwrap();
     }
 }

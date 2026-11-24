@@ -24,6 +24,13 @@ pub enum AudioCommand {
         duration_ms: u64,
         mime_hint: Option<String>,
     },
+    LoadSpotify {
+        spotify_id: String,
+        track_uid: String,
+        duration_ms: u64,
+        access_token: String,
+    },
+    DisconnectSpotify,
     Pause,
     Resume,
     Seek(u64),
@@ -43,6 +50,10 @@ pub enum AudioEvent {
     },
     TrackEnded {
         track_uid: String,
+    },
+    SpotifyFallbackNeeded {
+        track_uid: String,
+        reason: String,
     },
     Error(String),
 }

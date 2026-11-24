@@ -22,7 +22,7 @@ dirs = "7.0"
 iced = { version = "0.14", features = ["wgpu", "tokio", "image", "svg", "advanced"] }
 image = "0.25"
 librespot-core = "0.8"
-librespot-playback = "0.8"
+librespot-playback = { version = "0.8", default-features = false, features = ["native-tls"] }
 lofty = "0.25"
 rand = "0.10"
 raw-window-handle = "0.6"
