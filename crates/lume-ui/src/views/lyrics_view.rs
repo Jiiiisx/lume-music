@@ -229,7 +229,6 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
     });
 
     let raw_title = track.map(|t| t.title.as_str()).unwrap_or("Nothing Playing");
-    let display_title = marquee_slice(raw_title, 28, props.time_s);
     let artist = track
         .map(|t| t.artist_display())
         .unwrap_or_else(|| "Select a track from your library".to_string());
@@ -276,24 +275,25 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         ..Default::default()
     });
 
-    let mut meta_text = column![
-        text(display_title)
-            .size(21)
-            .font(FONT_BOLD)
-            .color(TEXT_PRIMARY),
-        text(artist)
-            .size(14)
-            .font(FONT_MEDIUM)
-            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.72)),
-    ]
-    .spacing(3)
+    let title_block = text(raw_title)
+        .size(21)
+        .font(FONT_BOLD)
+        .line_height(1.22)
+        .color(TEXT_PRIMARY)
+        .width(Length::Fixed(ART_SIZE));
+
+    let mut artist_album_col = column![text(artist)
+        .size(14)
+        .font(FONT_MEDIUM)
+        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.74))]
+    .spacing(2)
     .width(Length::Fill);
 
     if let Some(album) = album_label {
-        meta_text = meta_text.push(
+        artist_album_col = artist_album_col.push(
             text(album)
                 .size(11)
-                .color(Color::from_rgba(1.0, 1.0, 1.0, 0.48)),
+                .color(Color::from_rgba(1.0, 1.0, 1.0, 0.50)),
         );
     }
 
@@ -342,10 +342,15 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
     .spacing(4)
     .align_y(Alignment::Center);
 
-    let meta_row = row![meta_text, meta_actions]
-        .spacing(10)
-        .width(Length::Fixed(ART_SIZE))
-        .align_y(Alignment::Center);
+    let meta_row = column![
+        title_block,
+        row![artist_album_col, meta_actions]
+            .spacing(10)
+            .width(Length::Fixed(ART_SIZE))
+            .align_y(Alignment::Center),
+    ]
+    .spacing(6)
+    .width(Length::Fixed(ART_SIZE));
 
     let seek_block = column![
         slider(0.0..=max_dur, cur_pos, |v| {
