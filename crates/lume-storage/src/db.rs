@@ -156,9 +156,12 @@ impl Database {
                 source_id = excluded.source_id,
                 title = excluded.title,
                 artists_json = excluded.artists_json,
-                album = excluded.album,
-                duration_ms = excluded.duration_ms,
-                artwork_ref = excluded.artwork_ref,
+                album = COALESCE(excluded.album, tracks.album),
+                duration_ms = CASE
+                    WHEN excluded.duration_ms > 0 THEN excluded.duration_ms
+                    ELSE tracks.duration_ms
+                END,
+                artwork_ref = COALESCE(excluded.artwork_ref, tracks.artwork_ref),
                 is_liked = CASE
                     WHEN excluded.source_type = 'spotify' THEN excluded.is_liked
                     ELSE tracks.is_liked
@@ -209,6 +212,27 @@ impl Database {
             "UPDATE tracks SET artwork_ref = ?1, updated_at = ?2 WHERE uid = ?3",
             params![artwork_ref, now_epoch_s(), track_uid],
         )?;
+        Ok(())
+    }
+
+    pub fn update_tracks_artwork_batch(
+        &self,
+        updates: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let now = now_epoch_s();
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE tracks SET artwork_ref = ?1, updated_at = ?2 WHERE uid = ?3",
+            )?;
+            for (uid, artwork_ref) in updates {
+                stmt.execute(params![artwork_ref, now, uid])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1279,5 +1303,22 @@ mod tests {
         assert!(liked_uids.contains(&sp_new.uid));
         assert!(liked_uids.contains(&ytm.uid));
         assert!(!liked_uids.contains(&sp_old.uid));
+    }
+
+    #[test]
+    fn upsert_track_preserves_existing_artwork_when_incoming_is_none() {
+        let db = Database::open_in_memory().unwrap();
+        let mut t = track_sp("sp_art", "Scott Street", false);
+        t.artwork_ref = Some("https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b273abc".into());
+        db.upsert_track(&t, None).unwrap();
+
+        let mut csv_reimport = track_sp("sp_art", "Scott Street", false);
+        csv_reimport.artwork_ref = None;
+        csv_reimport.album = Some("Stranger in the Alps".into());
+        db.upsert_track(&csv_reimport, None).unwrap();
+
+        let reloaded = db.get_track(&t.uid).unwrap().unwrap();
+        assert_eq!(reloaded.artwork_ref, t.artwork_ref);
+        assert_eq!(reloaded.album.as_deref(), Some("Stranger in the Alps"));
     }
 }

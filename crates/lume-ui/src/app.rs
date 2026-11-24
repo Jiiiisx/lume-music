@@ -145,6 +145,18 @@ pub fn merge_search_results(cached: Vec<Track>, remote: Vec<Track>) -> Vec<Track
     merged
 }
 
+static ART_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn shared_art_http_client() -> &'static reqwest::Client {
+    ART_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .pool_max_idle_per_host(16)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Option<Vec<u8>> {
     let cache_read = Arc::clone(&art_cache);
     let key_read = key.clone();
@@ -166,11 +178,7 @@ async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Opt
         return None;
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let resp = client.get(&key).send().await.ok()?;
+    let resp = shared_art_http_client().get(&key).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -961,6 +969,7 @@ impl LumeApp {
                         self.show_import_url_modal = false;
                         self.import_url_input.clear();
                         self.modal_error = None;
+                        self.enriching_spotify_art.clear();
                         if let Ok(db) = self.db.lock() {
                             self.playlists = db.list_playlists().unwrap_or_default();
                             self.playlist_tracks =
@@ -2604,15 +2613,17 @@ impl LumeApp {
         if keys.is_empty() {
             return Task::none();
         }
-        let art_cache = Arc::clone(&self.art_cache);
-        Task::perform(
-            async move {
-                let mut out = Vec::new();
-                for chunk in keys.chunks(8) {
+        // Emit chunks of 16 progressively so visible covers appear in ~150 ms instead of waiting
+        // for all 200+ images in a large playlist to finish downloading and decoding.
+        let mut tasks = Vec::new();
+        for group in keys.chunks(16) {
+            let group_keys: Vec<String> = group.to_vec();
+            let art_cache = Arc::clone(&self.art_cache);
+            tasks.push(Task::perform(
+                async move {
                     let mut set = tokio::task::JoinSet::new();
-                    for key in chunk {
+                    for key in group_keys {
                         let cache = Arc::clone(&art_cache);
-                        let key = key.clone();
                         set.spawn(async move {
                             let bytes = fetch_or_cache_art(cache, key.clone()).await?;
                             let (w, h, rgba) = tokio::task::spawn_blocking(move || {
@@ -2623,20 +2634,29 @@ impl LumeApp {
                             Some((key, w, h, rgba))
                         });
                     }
+                    let mut out = Vec::new();
                     while let Some(joined) = set.join_next().await {
                         if let Ok(Some(item)) = joined {
                             out.push(item);
                         }
                     }
-                }
-                out
-            },
-            Message::ThumbnailsLoaded,
-        )
+                    out
+                },
+                Message::ThumbnailsLoaded,
+            ));
+        }
+        Task::batch(tasks)
     }
 
     fn spawn_spotify_artwork_enrichment_task(&mut self, tracks: &[Track]) -> Task<Message> {
-        const BATCH_SIZE: usize = 24;
+        // First visible rows use a fast 12-item batch so covers pop in immediately (~0.4s);
+        // subsequent background batches stream 32 at a time over the shared HTTP/2 pool.
+        let first_visible_missing = tracks
+            .iter()
+            .take(12)
+            .any(|t| needs_spotify_album_artwork(t) && !self.enriching_spotify_art.contains(&t.uid));
+        let batch_size = if first_visible_missing { 12 } else { 32 };
+
         let mut batch: Vec<(String, String)> = Vec::new();
         for t in tracks {
             if !needs_spotify_album_artwork(t) {
@@ -2645,7 +2665,7 @@ impl LumeApp {
             if let TrackSource::Spotify { id } = &t.source {
                 if self.enriching_spotify_art.insert(t.uid.clone()) {
                     batch.push((t.uid.clone(), id.clone()));
-                    if batch.len() >= BATCH_SIZE {
+                    if batch.len() >= batch_size {
                         break;
                     }
                 }
@@ -2658,13 +2678,10 @@ impl LumeApp {
         let db_path = self.db_path.clone();
         Task::perform(
             async move {
-                let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(8))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
+                let client = shared_art_http_client().clone();
 
                 let mut resolved = Vec::with_capacity(batch.len());
-                for chunk in batch.chunks(8) {
+                for chunk in batch.chunks(16) {
                     let mut set = tokio::task::JoinSet::new();
                     for (uid, sp_id) in chunk {
                         let http = client.clone();
@@ -2687,9 +2704,7 @@ impl LumeApp {
                     let to_save = resolved.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         if let Ok(db) = Database::open(&db_path) {
-                            for (uid, url) in &to_save {
-                                let _ = db.update_track_artwork(uid, url);
-                            }
+                            let _ = db.update_tracks_artwork_batch(&to_save);
                         }
                     })
                     .await;
