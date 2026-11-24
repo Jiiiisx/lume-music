@@ -19,24 +19,20 @@ use lume_storage::{AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCache
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 
 use crate::lyrics_anim::{
-    active_display_index, build_display_timeline, LyricsSpringState,
+    active_display_index, build_display_timeline, target_scroll_y_for_item, LyricsSpringState,
 };
 use crate::platform::smtc::{extract_hwnd, SmtcController};
-use crate::platform::{apply_window_glass_mode, TrayController};
+use crate::platform::apply_window_glass_mode;
 use crate::theme::{
     decode_art_blur_rgba, extract_palette, AccentTheme, AlbumPalette, DynamicBackdropProgram,
 };
 use crate::views::browse::{validate_playlist_name, view_browse, view_sidebar, BrowseViewProps};
-use crate::views::lyrics_view::{
-    lyrics_scroll_id, view_now_playing_lyrics, LyricsViewProps, LYRIC_LINE_STRIDE_PX,
-};
+use crate::views::lyrics_view::{lyrics_scroll_id, view_now_playing_lyrics, LyricsViewProps};
 use crate::views::player_bar::view_player_bar;
 use crate::views::queue_drawer::view_queue_drawer;
 use crate::views::settings::view_settings;
 use crate::views::titlebar::view_titlebar;
-use crate::views::{
-    ActiveNav, Message, NowPlayingInfo, SmtcAction, SourceFilter, TrayAction, ViewMode,
-};
+use crate::views::{ActiveNav, Message, NowPlayingInfo, SmtcAction, SourceFilter, ViewMode};
 
 const MAX_IN_MEM_ART_HANDLES: usize = 30;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
@@ -108,7 +104,6 @@ async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Opt
 }
 
 static AUDIO_RX_SLOT: OnceLock<Mutex<Option<Receiver<AudioEvent>>>> = OnceLock::new();
-static TRAY_RX_SLOT: OnceLock<Mutex<Option<UnboundedReceiver<TrayAction>>>> = OnceLock::new();
 static SMTC_RX_SLOT: OnceLock<Mutex<Option<UnboundedReceiver<SmtcAction>>>> = OnceLock::new();
 
 pub fn should_tick_frames(
@@ -136,23 +131,6 @@ fn audio_subscription() -> impl iced::futures::Stream<Item = Message> {
         };
         while let Some(ev) = receiver.recv().await {
             if output.send(Message::Audio(ev)).await.is_err() {
-                break;
-            }
-        }
-    })
-}
-
-fn tray_subscription() -> impl iced::futures::Stream<Item = Message> {
-    iced::stream::channel(32, async move |mut output| {
-        let mut rx = TRAY_RX_SLOT
-            .get()
-            .and_then(|m| m.lock().ok().and_then(|mut g| g.take()));
-        let Some(ref mut receiver) = rx else {
-            std::future::pending::<()>().await;
-            return;
-        };
-        while let Some(action) = receiver.recv().await {
-            if output.send(Message::Tray(action)).await.is_err() {
                 break;
             }
         }
@@ -189,6 +167,8 @@ pub struct LumeApp {
     window_focused: bool,
     minimized: bool,
     maximized: bool,
+    window_width: f32,
+    window_height: f32,
 
     view_mode: ViewMode,
     nav: ActiveNav,
@@ -250,7 +230,6 @@ pub struct LumeApp {
 
     smtc: SmtcController,
     smtc_tx: UnboundedSender<SmtcAction>,
-    _tray: Option<TrayController>,
 }
 
 impl LumeApp {
@@ -293,13 +272,6 @@ impl LumeApp {
             Err(_) => None,
         };
 
-        let (tray_tx, tray_rx) = unbounded_channel();
-        *TRAY_RX_SLOT
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(tray_rx);
-        let tray = TrayController::new(tray_tx);
-
         let (smtc_tx, smtc_rx) = unbounded_channel();
         *SMTC_RX_SLOT
             .get_or_init(|| Mutex::new(None))
@@ -323,6 +295,8 @@ impl LumeApp {
             window_focused: true,
             minimized: false,
             maximized: false,
+            window_width: 1180.0,
+            window_height: 760.0,
             view_mode: ViewMode::Browse,
             nav: ActiveNav::LocalFiles,
             queue_open: false,
@@ -376,7 +350,6 @@ impl LumeApp {
             scan_summary: None,
             smtc: SmtcController::new(),
             smtc_tx,
-            _tray: tray,
         };
 
         let mut startup_tasks = vec![window::oldest().map(|id| {
@@ -428,7 +401,6 @@ impl LumeApp {
             window::events().map(|(id, ev)| Message::WindowEvent(id, ev)),
             window::close_requests().map(|_| Message::CloseRequested),
             Subscription::run(audio_subscription),
-            Subscription::run(tray_subscription),
             Subscription::run(smtc_subscription),
         ];
 
@@ -473,11 +445,15 @@ impl LumeApp {
             }
             Message::SmtcHwndReady(None) => {}
             Message::WindowEvent(id, event) => match event {
-                window::Event::Opened { .. } => {
+                window::Event::Opened { size, .. } => {
                     self.main_window = Some(id);
                     self.window_visible = true;
                     self.window_focused = true;
                     self.minimized = false;
+                    if size.width > 0.0 && size.height > 0.0 {
+                        self.window_width = size.width;
+                        self.window_height = size.height;
+                    }
                     return Task::batch([
                         apply_window_glass_mode(id, self.config.glassmorphism_mode, true),
                         self.init_smtc_task(id),
@@ -486,6 +462,9 @@ impl LumeApp {
                 window::Event::Resized(size) => {
                     if size.width > 0.0 && size.height > 0.0 {
                         self.minimized = false;
+                        self.window_width = size.width;
+                        self.window_height = size.height;
+                        self.last_scrolled_line = None;
                     }
                 }
                 window::Event::Focused => {
@@ -518,14 +497,7 @@ impl LumeApp {
                 }
             }
             Message::CloseRequested => {
-                if self.config.close_to_tray {
-                    self.window_visible = false;
-                    if let Some(id) = self.main_window {
-                        return window::set_mode(id, window::Mode::Hidden);
-                    }
-                } else {
-                    return self.shutdown_and_exit();
-                }
+                return self.shutdown_and_exit();
             }
             Message::FrameTick(now) => {
                 let dt = (now - self.last_frame_at).as_secs_f32().clamp(0.0, 0.05);
@@ -561,7 +533,14 @@ impl LumeApp {
                         let idx = active_display_index(&timeline, self.position_ms);
                         self.lyrics_spring.notify_active_item(idx);
                         if let Some(idx) = idx {
-                            let target_y = (idx as f32) * LYRIC_LINE_STRIDE_PX;
+                            let target_y = target_scroll_y_for_item(
+                                &timeline,
+                                &lyrics.synced,
+                                idx,
+                                self.config.lyrics_visual_mode,
+                                self.window_width,
+                                self.window_height,
+                            );
                             self.lyrics_spring.update(dt, target_y);
                             if !self.lyrics_spring.is_settled()
                                 || self.last_scrolled_line != Some(idx)
@@ -1120,10 +1099,6 @@ impl LumeApp {
                 }
                 let _ = self.config.save(&self.config_path);
             }
-            Message::SetCloseToTray(enabled) => {
-                self.config.close_to_tray = enabled;
-                let _ = self.config.save(&self.config_path);
-            }
             Message::SetPreferYoutubeFallback(enabled) => {
                 self.config.prefer_youtube_fallback = enabled;
                 let _ = self.config.save(&self.config_path);
@@ -1250,28 +1225,6 @@ impl LumeApp {
                     self.status_toast = Some(err);
                 }
             },
-            Message::Tray(action) => match action {
-                TrayAction::ToggleWindow => {
-                    if let Some(id) = self.main_window {
-                        if self.window_visible && !self.minimized {
-                            self.window_visible = false;
-                            return window::set_mode(id, window::Mode::Hidden);
-                        } else {
-                            self.window_visible = true;
-                            self.minimized = false;
-                            return Task::batch([
-                                window::set_mode(id, window::Mode::Windowed),
-                                window::minimize(id, false),
-                                window::gain_focus(id),
-                            ]);
-                        }
-                    }
-                }
-                TrayAction::PlayPause => return self.handle_play_pause_toggle(),
-                TrayAction::Next => return self.update(Message::NextTrack),
-                TrayAction::Previous => return self.update(Message::PreviousTrack),
-                TrayAction::Quit => return self.shutdown_and_exit(),
-            },
             Message::Smtc(action) => match action {
                 SmtcAction::Play => {
                     if self.status == PlaybackStatus::Paused {
@@ -1335,6 +1288,8 @@ impl LumeApp {
                     lyrics_loading: self.lyrics_loading,
                     lyrics_mode: self.config.lyrics_visual_mode,
                     active_scale: self.lyrics_spring.active_scale(),
+                    window_width: self.window_width,
+                    window_height: self.window_height,
                     art_handles: &self.art_handles,
                     time_s: self.time_s,
                     queue_open: self.queue_open,
@@ -1682,7 +1637,6 @@ impl LumeApp {
         if let Some(audio) = &self.audio {
             let _ = audio.send(AudioCommand::Shutdown);
         }
-        self._tray.take();
         iced::exit()
     }
 

@@ -11,7 +11,9 @@ use lume_storage::LyricsVisualMode;
 
 use crate::lyrics_anim::{
     active_display_index, bloom_sweep_runs, build_display_timeline, interlude_dot_states,
-    line_visual_style, resolve_line_words, LyricsDisplayItem,
+    line_visual_style, lyrics_bottom_spacer_px, lyrics_top_spacer_px, lyrics_viewport_metrics,
+    resolve_line_words, LyricsDisplayItem, LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX,
+    LYRICS_LINE_HEIGHT_MULT,
 };
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::{Message, NowPlayingInfo, ViewMode};
@@ -60,6 +62,8 @@ pub struct LyricsViewProps<'a> {
     pub lyrics_loading: bool,
     pub lyrics_mode: LyricsVisualMode,
     pub active_scale: f32,
+    pub window_width: f32,
+    pub window_height: f32,
     pub art_handles: &'a HashMap<String, image::Handle>,
     pub time_s: f32,
     pub queue_open: bool,
@@ -552,10 +556,27 @@ fn render_interlude_dots<'a>(
     }
 
     container(dots)
-        .height(Length::Fixed(34.0))
+        .height(Length::Fixed(LYRICS_INTERLUDE_HEIGHT_PX))
         .align_y(iced::alignment::Vertical::Center)
         .padding([4, 6])
         .into()
+}
+
+fn subtle_lyrics_scrollable_style(
+    theme: &iced::Theme,
+    status: scrollable::Status,
+) -> scrollable::Style {
+    let mut style = thin_scrollable_style(theme, status);
+    let thumb_alpha = match status {
+        scrollable::Status::Active { .. } => 0.08,
+        scrollable::Status::Hovered { .. } => 0.22,
+        scrollable::Status::Dragged { .. } => 0.36,
+    };
+    style.vertical_rail.background = None;
+    style.vertical_rail.scroller.background =
+        Background::Color(Color::from_rgba(1.0, 1.0, 1.0, thumb_alpha));
+    style.vertical_rail.scroller.border = iced::border::rounded(3.0);
+    style
 }
 
 fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> {
@@ -677,9 +698,12 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
     if !lyrics.synced.is_empty() {
         let timeline = build_display_timeline(&lyrics.synced);
         let active_idx = active_display_index(&timeline, props.info.position_ms);
+        let (_, viewport_h) = lyrics_viewport_metrics(props.window_width, props.window_height);
+        let top_spacer = lyrics_top_spacer_px(viewport_h);
+        let bottom_spacer = lyrics_bottom_spacer_px(viewport_h);
 
-        let mut lines_col = column![space().height(110.0)]
-            .spacing(20)
+        let mut lines_col = column![space().height(top_spacer)]
+            .spacing(LYRICS_ITEM_SPACING_PX)
             .width(Length::Fill)
             .align_x(Alignment::Start);
 
@@ -753,14 +777,14 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                                 })
                                 .collect();
                             rich_text(spans)
-                                .line_height(1.22)
+                                .line_height(LYRICS_LINE_HEIGHT_MULT)
                                 .align_x(Horizontal::Left)
                                 .into()
                         } else {
                             text(line.text.as_str())
                                 .size(font_size)
                                 .font(FONT_BOLD)
-                                .line_height(1.22)
+                                .line_height(LYRICS_LINE_HEIGHT_MULT)
                                 .color(Color::WHITE)
                                 .align_x(Horizontal::Left)
                                 .into()
@@ -775,7 +799,7 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                         text(line.text.as_str())
                             .size(font_size)
                             .font(FONT_BOLD)
-                            .line_height(1.22)
+                            .line_height(LYRICS_LINE_HEIGHT_MULT)
                             .color(Color::from_rgba(1.0, 1.0, 1.0, alpha))
                             .align_x(Horizontal::Left)
                             .into()
@@ -795,14 +819,14 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
             lines_col = lines_col.push(row_el);
         }
 
-        lines_col = lines_col.push(space().height(300.0));
+        lines_col = lines_col.push(space().height(bottom_spacer));
 
         return container(
             scrollable(lines_col)
                 .id(lyrics_scroll_id())
                 .height(Length::Fill)
                 .width(Length::Fill)
-                .style(thin_scrollable_style),
+                .style(subtle_lyrics_scrollable_style),
         )
         .width(Length::Fill)
         .height(Length::Fill)

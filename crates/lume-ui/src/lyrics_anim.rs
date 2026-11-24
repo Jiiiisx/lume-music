@@ -10,6 +10,135 @@ pub const GAP_INTERLUDE_MIN_MS: u64 = 5_000;
 /// Width (in character units) of Spicy Lyrics' Bloom Renderer feathered sweep edge (`--SLR_FadeWidth: 0.882em`).
 pub const BLOOM_FADE_HALF_CHARS: f32 = 1.35;
 
+/// Shared layout geometry constants kept identical between `lyrics_view` and scroll centering.
+pub const LYRICS_ITEM_SPACING_PX: f32 = 20.0;
+pub const LYRICS_INTERLUDE_HEIGHT_PX: f32 = 34.0;
+pub const LYRICS_LINE_HEIGHT_MULT: f32 = 1.22;
+pub const LYRICS_LINE_VPAD_PX: f32 = 4.0;
+
+pub fn lyrics_viewport_metrics(window_w: f32, window_h: f32) -> (f32, f32) {
+    let viewport_h = (window_h - 66.0).max(240.0);
+    // Left stage (400) + row gap (20) + body padding (28) + lyrics horiz padding (64) + inner line padding (12)
+    let text_max_w = (window_w - 524.0).max(220.0);
+    (text_max_w, viewport_h)
+}
+
+pub fn lyrics_top_spacer_px(viewport_h: f32) -> f32 {
+    (viewport_h * 0.36).clamp(110.0, 260.0)
+}
+
+pub fn lyrics_bottom_spacer_px(viewport_h: f32) -> f32 {
+    (viewport_h * 0.54).clamp(240.0, 440.0)
+}
+
+fn char_width_ratio(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.27,
+        'i' | 'l' | 'I' | 'j' | '!' | '.' | ',' | ':' | ';' | '\'' | '|' => 0.31,
+        'f' | 'r' | 't' | '(' | ')' | '-' => 0.39,
+        'm' | 'w' | 'M' | 'W' => 0.86,
+        c if c.is_ascii_uppercase() => 0.68,
+        c if !c.is_ascii() => 0.85,
+        _ => 0.56,
+    }
+}
+
+/// Estimate wrapped visual line count for `Plus Jakarta Sans Bold` inside `max_width_px`.
+pub fn estimate_wrapped_lines(text: &str, font_size: f32, max_width_px: f32) -> usize {
+    let max_w = max_width_px.max(font_size * 4.0);
+    let space_w = 0.27 * font_size;
+    let mut lines = 1usize;
+    let mut current_w = 0.0_f32;
+
+    for word in text.split_whitespace() {
+        let word_w: f32 = word.chars().map(|c| char_width_ratio(c) * font_size).sum();
+        if current_w == 0.0 {
+            if word_w > max_w {
+                lines += (word_w / max_w).floor() as usize;
+                current_w = word_w % max_w;
+            } else {
+                current_w = word_w;
+            }
+        } else if current_w + space_w + word_w <= max_w {
+            current_w += space_w + word_w;
+        } else {
+            lines += 1;
+            if word_w > max_w {
+                lines += (word_w / max_w).floor() as usize;
+                current_w = word_w % max_w;
+            } else {
+                current_w = word_w;
+            }
+        }
+    }
+    lines
+}
+
+/// Compute the exact scrollable Y offset that centers `active_idx` at ~42% of the lyrics viewport,
+/// accounting for variable line heights, wrapped multi-line verses, and 34px `• • •` interludes.
+pub fn target_scroll_y_for_item(
+    timeline: &[LyricsDisplayItem],
+    lines: &[LyricsLine],
+    active_idx: usize,
+    mode: LyricsVisualMode,
+    window_w: f32,
+    window_h: f32,
+) -> f32 {
+    if timeline.is_empty() || active_idx >= timeline.len() {
+        return 0.0;
+    }
+
+    let (text_max_w, viewport_h) = lyrics_viewport_metrics(window_w, window_h);
+    let top_spacer = lyrics_top_spacer_px(viewport_h);
+
+    // Account for top spacer + spacing between top spacer and first item.
+    let mut cursor_y = top_spacer + LYRICS_ITEM_SPACING_PX;
+    let mut active_height = LYRICS_INTERLUDE_HEIGHT_PX;
+
+    for (idx, item) in timeline.iter().enumerate() {
+        let distance = idx as isize - active_idx as isize;
+        let style = line_visual_style(distance, mode);
+        let is_active = distance == 0;
+
+        let item_h = match *item {
+            LyricsDisplayItem::Interlude { .. } => LYRICS_INTERLUDE_HEIGHT_PX,
+            LyricsDisplayItem::Line {
+                line_idx,
+                is_bg_vocal,
+                ..
+            } => {
+                let font_size = if is_active {
+                    let base = if is_bg_vocal { 26.0 } else { 36.0 };
+                    if mode == LyricsVisualMode::SpicySmooth {
+                        base * 1.045
+                    } else {
+                        base
+                    }
+                } else {
+                    let base = if is_bg_vocal { 23.0 } else { 31.0 };
+                    base * style.scale
+                };
+                let text = lines
+                    .get(line_idx)
+                    .map(|l| l.text.as_str())
+                    .unwrap_or("");
+                let wrapped = estimate_wrapped_lines(text, font_size, text_max_w) as f32;
+                wrapped * (font_size * LYRICS_LINE_HEIGHT_MULT) + LYRICS_LINE_VPAD_PX
+            }
+        };
+
+        if idx < active_idx {
+            cursor_y += item_h + LYRICS_ITEM_SPACING_PX;
+        } else if idx == active_idx {
+            active_height = item_h;
+            break;
+        }
+    }
+
+    let item_center_y = cursor_y + active_height * 0.5;
+    (item_center_y - viewport_h * 0.42).max(0.0)
+}
+
 /// Visual depth styling computed for each lyric line relative to the active line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineStyle {
@@ -685,5 +814,38 @@ mod tests {
         assert!(early[0].0 > early[1].0 && early[1].0 <= 0.30);
         let late = interlude_dot_states(0, 9_000, 8_500);
         assert!(late[0].0 > 0.99 && late[1].0 > 0.99 && late[2].0 > 0.85);
+    }
+
+    #[test]
+    fn target_scroll_y_tracks_variable_line_heights_and_keeps_active_centered() {
+        let lines = vec![
+            LyricsLine {
+                time_ms: 0,
+                text: "Short".into(),
+                words: None,
+            },
+            LyricsLine {
+                time_ms: 4_000,
+                text: "A much longer lyric line that will definitely wrap across multiple visual lines on a narrow window".into(),
+                words: None,
+            },
+            LyricsLine {
+                time_ms: 15_000, // creates an interlude before line 2
+                text: "You found me".into(),
+                words: None,
+            },
+        ];
+        let timeline = build_display_timeline(&lines);
+        assert_eq!(timeline.len(), 4);
+
+        let y0 = target_scroll_y_for_item(&timeline, &lines, 0, LyricsVisualMode::SpicySmooth, 1180.0, 760.0);
+        let y1 = target_scroll_y_for_item(&timeline, &lines, 1, LyricsVisualMode::SpicySmooth, 1180.0, 760.0);
+        let y2 = target_scroll_y_for_item(&timeline, &lines, 2, LyricsVisualMode::SpicySmooth, 1180.0, 760.0);
+        let y3 = target_scroll_y_for_item(&timeline, &lines, 3, LyricsVisualMode::SpicySmooth, 1180.0, 760.0);
+
+        assert!(y0 <= 40.0, "first line starts cleanly near center without overshooting: {y0}");
+        assert!(y1 > y0 && y2 > y1 && y3 > y2, "offsets strictly increase: {y0}, {y1}, {y2}, {y3}");
+        // Wrapped line 1 contributes noticeably more vertical advance than the 34px interlude.
+        assert!((y2 - y1) > (y3 - y2), "wrapped lyric advances more than interlude");
     }
 }
