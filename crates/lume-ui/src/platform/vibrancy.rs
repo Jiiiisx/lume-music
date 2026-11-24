@@ -77,7 +77,7 @@ mod win_backdrop {
         static MANAGER: RefCell<ThreadBackdropManager> = RefCell::new(ThreadBackdropManager::default());
     }
 
-    fn focused_tint(mode: GlassmorphismMode) -> Color {
+    fn backdrop_tint(mode: GlassmorphismMode) -> Color {
         match mode {
             GlassmorphismMode::PureClear => Color {
                 A: 4,
@@ -97,15 +97,6 @@ mod win_backdrop {
                 G: 14,
                 B: 16,
             },
-        }
-    }
-
-    fn unfocused_tint() -> Color {
-        Color {
-            A: 64,
-            R: 16,
-            G: 16,
-            B: 18,
         }
     }
 
@@ -168,7 +159,7 @@ mod win_backdrop {
         })
     }
 
-    pub fn apply(hwnd: HWND, mode: GlassmorphismMode, focused: bool) {
+    pub fn apply(hwnd: HWND, mode: GlassmorphismMode, _focused: bool) {
         MANAGER.with(|cell| {
             let mut mgr = cell.borrow_mut();
 
@@ -193,26 +184,19 @@ mod win_backdrop {
                 return;
             };
 
+            let tint = backdrop_tint(mode);
             let hwnd_key = hwnd.0 as usize;
             if !mgr.windows.contains_key(&hwnd_key) {
-                let init_color = if focused {
-                    focused_tint(mode)
-                } else {
-                    unfocused_tint()
-                };
-                if let Ok(entry) = create_entry(&compositor, hwnd, init_color) {
+                if let Ok(entry) = create_entry(&compositor, hwnd, tint) {
                     mgr.windows.insert(hwnd_key, entry);
                 }
             }
 
             if let Some(entry) = mgr.windows.get(&hwnd_key) {
-                if focused {
-                    let _ = entry.blur_visual.SetIsVisible(true);
-                    let _ = entry.tint_brush.SetColor(focused_tint(mode));
-                } else {
-                    let _ = entry.blur_visual.SetIsVisible(false);
-                    let _ = entry.tint_brush.SetColor(unfocused_tint());
-                }
+                // Keep HostBackdropBrush blur visible even when unfocused so glassmorphism
+                // stays frosted on dual-monitor setups and inactive windows.
+                let _ = entry.blur_visual.SetIsVisible(true);
+                let _ = entry.tint_brush.SetColor(tint);
             }
         });
     }
