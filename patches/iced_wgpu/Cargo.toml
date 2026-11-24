@@ -115,6 +115,17 @@ features = [
 ]
 default-features = false
 
+[target.'cfg(target_os = "windows")'.dependencies.raw-window-handle]
+version = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dwm",
+]
+
 [lints.clippy]
 default_trait_access = "deny"
 filter_map_next = "deny"

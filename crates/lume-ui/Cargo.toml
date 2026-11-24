@@ -28,4 +28,15 @@ tray-icon.workspace = true
 window-vibrancy.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Foundation_Numerics",
+    "System",
+    "UI",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Controls"] }

@@ -7,6 +7,90 @@ use crate::graphics::{self, Shell, Viewport};
 use crate::settings::{self, Settings};
 use crate::{Engine, Renderer};
 
+/// A rendering surface bound to a window.
+pub struct Surface {
+    raw: wgpu::Surface<'static>,
+    #[cfg(target_os = "windows")]
+    dcomp: Option<WinDCompSurface>,
+}
+
+#[cfg(target_os = "windows")]
+struct WinDCompSurface {
+    device: windows::Win32::Graphics::DirectComposition::IDCompositionDevice,
+    _target: windows::Win32::Graphics::DirectComposition::IDCompositionTarget,
+    _visual: windows::Win32::Graphics::DirectComposition::IDCompositionVisual,
+}
+
+#[cfg(target_os = "windows")]
+impl WinDCompSurface {
+    #[allow(unsafe_code)]
+    fn from_window<W: compositor::Window>(
+        window: &W,
+        instance: &wgpu::Instance,
+    ) -> Option<(wgpu::Surface<'static>, Self)> {
+        use raw_window_handle::RawWindowHandle;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::DirectComposition::{
+            DCompositionCreateDevice2, IDCompositionDevice,
+        };
+        use windows::Win32::Graphics::Dwm::{
+            DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_HOSTBACKDROPBRUSH,
+            DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+        };
+        use windows::core::Interface;
+
+        let handle = window.window_handle().ok()?;
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return None;
+        };
+        let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+
+        unsafe {
+            let enable: u32 = 1;
+            let backdrop_none: i32 = DWMSBT_NONE.0;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&raw const enable).cast(),
+                core::mem::size_of::<u32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_HOSTBACKDROPBRUSH,
+                (&raw const enable).cast(),
+                core::mem::size_of::<u32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                (&raw const backdrop_none).cast(),
+                core::mem::size_of::<i32>() as u32,
+            );
+
+            let device: IDCompositionDevice = DCompositionCreateDevice2(None).ok()?;
+            let target = device.CreateTargetForHwnd(hwnd, true).ok()?;
+            let visual = device.CreateVisual().ok()?;
+            target.SetRoot(&visual).ok()?;
+            device.Commit().ok()?;
+
+            let surface = instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(
+                    visual.as_raw(),
+                ))
+                .ok()?;
+
+            Some((
+                surface,
+                Self {
+                    device,
+                    _target: target,
+                    _visual: visual,
+                },
+            ))
+        }
+    }
+}
+
 /// A window graphics backend for iced powered by `wgpu`.
 pub struct Compositor {
     instance: wgpu::Instance,
@@ -77,9 +161,18 @@ impl Compositor {
             log::info!("Available adapters: {available_adapters:#?}");
         }
 
+        #[cfg(target_os = "windows")]
+        let mut _temp_dcomp: Option<WinDCompSurface> = None;
+
         #[allow(unsafe_code)]
-        let compatible_surface = compatible_window
-            .and_then(|window| instance.create_surface(window).ok());
+        let compatible_surface = compatible_window.and_then(|window| {
+            #[cfg(target_os = "windows")]
+            if let Some((surface, dcomp)) = WinDCompSurface::from_window(&window, &instance) {
+                _temp_dcomp = Some(dcomp);
+                return Some(surface);
+            }
+            instance.create_surface(window).ok()
+        });
 
         let adapter_options = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::from_env()
@@ -144,6 +237,8 @@ impl Compositor {
                 format.zip(Some(preferred_alpha))
             })
             .ok_or(Error::IncompatibleSurface)?;
+
+        drop(compatible_surface);
 
         log::info!(
             "Selected format: {format:?} with alpha mode: {alpha_mode:?}"
@@ -222,12 +317,12 @@ pub async fn new<W: compositor::Window>(
 /// Presents the given primitives with the given [`Compositor`].
 pub fn present(
     renderer: &mut Renderer,
-    surface: &mut wgpu::Surface<'static>,
+    surface: &mut Surface,
     viewport: &Viewport,
     background_color: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
-    match surface.get_current_texture() {
+    match surface.raw.get_current_texture() {
         Ok(frame) => {
             let view = &frame
                 .texture
@@ -264,7 +359,7 @@ pub fn present(
 
 impl graphics::Compositor for Compositor {
     type Renderer = Renderer;
-    type Surface = wgpu::Surface<'static>;
+    type Surface = Surface;
 
     async fn with_backend(
         settings: graphics::Settings,
@@ -310,10 +405,36 @@ impl graphics::Compositor for Compositor {
         width: u32,
         height: u32,
     ) -> Self::Surface {
-        let mut surface = self
-            .instance
-            .create_surface(window)
-            .expect("Create surface");
+        let mut surface = {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some((raw, dcomp)) =
+                    WinDCompSurface::from_window(&window, &self.instance)
+                {
+                    Surface {
+                        raw,
+                        dcomp: Some(dcomp),
+                    }
+                } else {
+                    Surface {
+                        raw: self
+                            .instance
+                            .create_surface(window)
+                            .expect("Create surface"),
+                        dcomp: None,
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Surface {
+                    raw: self
+                        .instance
+                        .create_surface(window)
+                        .expect("Create surface"),
+                }
+            }
+        };
 
         if width > 0 && height > 0 {
             self.configure_surface(&mut surface, width, height);
@@ -328,7 +449,7 @@ impl graphics::Compositor for Compositor {
         width: u32,
         height: u32,
     ) {
-        surface.configure(
+        surface.raw.configure(
             &self.engine.device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -341,6 +462,14 @@ impl graphics::Compositor for Compositor {
                 desired_maximum_frame_latency: 1,
             },
         );
+
+        #[cfg(target_os = "windows")]
+        if let Some(dcomp) = &surface.dcomp {
+            #[allow(unsafe_code)]
+            unsafe {
+                let _ = dcomp.device.Commit();
+            }
+        }
     }
 
     fn information(&self) -> compositor::Information {

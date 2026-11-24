@@ -2,6 +2,10 @@
 
 use iced::{window, Size};
 use lume_ui::app::LumeApp;
+use lume_ui::theme::{
+    FONT_REGULAR, PLUS_JAKARTA_BOLD, PLUS_JAKARTA_MEDIUM, PLUS_JAKARTA_REGULAR,
+    PLUS_JAKARTA_SEMIBOLD,
+};
 
 pub fn main() -> iced::Result {
     // Force DX12 + DirectComposition (`DxgiFromVisual`) on Windows 11 so per-pixel
@@ -36,6 +40,11 @@ pub fn main() -> iced::Result {
         .subscription(LumeApp::subscription)
         .theme(LumeApp::theme)
         .style(LumeApp::style)
+        .font(PLUS_JAKARTA_REGULAR)
+        .font(PLUS_JAKARTA_MEDIUM)
+        .font(PLUS_JAKARTA_SEMIBOLD)
+        .font(PLUS_JAKARTA_BOLD)
+        .default_font(FONT_REGULAR)
         .window(win_settings)
         .centered()
         .run()

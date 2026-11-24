@@ -2,6 +2,7 @@ use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Background, Color, Element, Length};
 use lume_core::Track;
 
+use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::Message;
 use crate::widgets::{
     ghost_button_style, glass_button_style, glass_elevated_style, icon_chevron_down,
@@ -12,13 +13,14 @@ use crate::widgets::{
 pub fn view_queue_drawer<'a>(
     queue_tracks: &[&'a Track],
     current_pos: Option<usize>,
+    accent: AccentTheme,
 ) -> Element<'a, Message> {
     let header = row![
-        text("Play Queue").size(17).color(TEXT_PRIMARY),
+        text("Play Queue").size(17).font(FONT_BOLD).color(TEXT_PRIMARY),
         space().width(Length::Fill),
-        button(text("Clear").size(11))
+        button(text("Clear").size(11).font(FONT_MEDIUM).color(TEXT_PRIMARY))
             .padding([5, 12])
-            .style(glass_button_style(false))
+            .style(glass_button_style(false, accent))
             .on_press(Message::ClearQueue),
         button(icon_close(14.0, ICON_LIGHT))
             .padding([6, 8])
@@ -40,11 +42,14 @@ pub fn view_queue_drawer<'a>(
             let mut row_controls = row![
                 button(
                     column![
-                        text(track.title.as_str()).size(13).color(if is_current {
-                            Color::from_rgb8(255, 224, 184)
-                        } else {
-                            TEXT_PRIMARY
-                        }),
+                        text(track.title.as_str())
+                            .size(13)
+                            .font(if is_current { FONT_SEMIBOLD } else { FONT_MEDIUM })
+                            .color(if is_current {
+                                accent.light
+                            } else {
+                                TEXT_PRIMARY
+                            }),
                         text(track.artist_display()).size(11).color(TEXT_SECONDARY),
                     ]
                     .spacing(2),
@@ -91,12 +96,16 @@ pub fn view_queue_drawer<'a>(
                     .padding([6, 8])
                     .style(move |_| container::Style {
                         background: Some(Background::Color(if is_current {
-                            Color::from_rgba(1.0, 1.0, 1.0, 0.16)
+                            accent.soft_bg
                         } else {
-                            Color::from_rgba(1.0, 1.0, 1.0, 0.06)
+                            Color::from_rgba(1.0, 1.0, 1.0, 0.045)
                         })),
                         border: iced::border::Border {
-                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+                            color: if is_current {
+                                accent.border
+                            } else {
+                                Color::from_rgba(1.0, 1.0, 1.0, 0.11)
+                            },
                             width: 1.0,
                             radius: 14.0.into(),
                         },

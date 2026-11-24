@@ -3,7 +3,7 @@ struct Uniforms {
     c1: vec4<f32>,
     c2: vec4<f32>,
     c3: vec4<f32>,
-    // x = time_s, y = scrim_alpha, z = acrylic_alpha, w = has_art (>0.5 when cover texture bound)
+    // x = art_tint_strength (0..1), y = scrim_alpha, z = acrylic_alpha, w = has_art (>0.5 when cover texture bound)
     params: vec4<f32>,
 };
 
@@ -42,83 +42,70 @@ fn boost_saturation(rgb: vec3<f32>, sat: f32) -> vec3<f32> {
     return clamp(mix(vec3<f32>(luma), rgb, sat), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn sample_blurred_art(uv: vec2<f32>, t: f32) -> vec3<f32> {
-    // Gentle centered zoom + organic drift so edge clamping never stretches pixels.
-    let drift = vec2<f32>(0.024 * sin(t * 0.55), 0.024 * cos(t * 0.45));
-    let center = (uv - vec2<f32>(0.5, 0.5)) * 0.76 + vec2<f32>(0.5, 0.5) + drift;
+fn sample_blurred_art(uv: vec2<f32>) -> vec3<f32> {
+    let center = (uv - vec2<f32>(0.5, 0.5)) * 0.78 + vec2<f32>(0.5, 0.5);
 
     var acc = textureSampleLevel(art_tex, art_sampler, center, 0.0).rgb * 0.16;
     let r1 = 0.055;
     let r2 = 0.115;
 
     for (var i = 0u; i < 6u; i = i + 1u) {
-        let ang = f32(i) * 1.0471975 + t * 0.15;
+        let ang = f32(i) * 1.0471975;
         let dir = vec2<f32>(cos(ang), sin(ang));
         acc += textureSampleLevel(art_tex, art_sampler, clamp(center + dir * r1, vec2<f32>(0.02), vec2<f32>(0.98)), 0.0).rgb * 0.085;
         let dir2 = vec2<f32>(cos(ang + 0.5236), sin(ang + 0.5236));
         acc += textureSampleLevel(art_tex, art_sampler, clamp(center + dir2 * r2, vec2<f32>(0.02), vec2<f32>(0.98)), 0.0).rgb * 0.055;
     }
 
-    return boost_saturation(acc, 1.24);
+    return boost_saturation(acc, 1.12);
 }
 
-fn render_luminous_mesh(uv: vec2<f32>, t: f32) -> vec3<f32> {
-    // Deep studio base gradient so frosted glass has contrast and warmth even at rest.
-    let base = mix(u.c2.rgb * 0.72, u.c1.rgb * 0.82, clamp(uv.x * 0.55 + (1.0 - uv.y) * 0.45, 0.0, 1.0));
+fn render_crystal_surface(uv: vec2<f32>) -> vec4<f32> {
+    // Static pure neutral clear crystal sheen (zero blue hue, zero motion).
+    let diag = clamp((1.0 - uv.x) * 0.45 + (1.0 - uv.y) * 0.55, 0.0, 1.0);
+    let top_rim = exp(-7.5 * uv.y);
 
-    let p0 = vec2<f32>(0.18 + 0.10 * sin(t * 0.7), 0.24 + 0.09 * cos(t * 0.6));
-    let p1 = vec2<f32>(0.76 + 0.11 * cos(t * 0.5), 0.30 + 0.10 * sin(t * 0.8));
-    let p2 = vec2<f32>(0.34 + 0.10 * cos(t * 0.65), 0.78 + 0.09 * sin(t * 0.55));
-    let p3 = vec2<f32>(0.82 + 0.09 * sin(t * 0.45), 0.76 + 0.10 * cos(t * 0.7));
+    let g0 = exp(-5.2 * dot(uv - vec2<f32>(0.22, 0.18), uv - vec2<f32>(0.22, 0.18)));
+    let g1 = exp(-6.4 * dot(uv - vec2<f32>(0.80, 0.26), uv - vec2<f32>(0.80, 0.26)));
 
-    let d0 = dot(uv - p0, uv - p0);
-    let d1 = dot(uv - p1, uv - p1);
-    let d2 = dot(uv - p2, uv - p2);
-    let d3 = dot(uv - p3, uv - p3);
+    let pure_white = vec3<f32>(0.97, 0.97, 0.99);
+    let mist = vec3<f32>(0.78, 0.79, 0.82);
 
-    let g0 = exp(-3.4 * d0);
-    let g1 = exp(-3.0 * d1);
-    let g2 = exp(-3.6 * d2);
-    let g3 = exp(-3.2 * d3);
+    var col = mix(vec3<f32>(0.08, 0.08, 0.09), mist * 0.40, diag * 0.45);
+    col += pure_white * (top_rim * 0.14 + g0 * 0.14 + g1 * 0.10);
 
-    // Soft studio specular bloom orb near top-center/right like warm glass photography.
-    let bloom_p = vec2<f32>(0.54 + 0.08 * sin(t * 0.4), 0.22 + 0.06 * cos(t * 0.35));
-    let bloom = exp(-5.2 * dot(uv - bloom_p, uv - bloom_p));
-
-    var col = base;
-    col = mix(col, u.c0.rgb, g0 * 0.78);
-    col = mix(col, u.c3.rgb, g1 * 0.72);
-    col = mix(col, u.c2.rgb * 1.15, g2 * 0.58);
-    col = mix(col, u.c1.rgb * 1.20, g3 * 0.65);
-    col += u.c0.rgb * bloom * 0.28;
-
-    return boost_saturation(col, 1.12);
+    let local_glow = clamp(top_rim * 0.35 + g0 * 0.30 + g1 * 0.24, 0.0, 1.0);
+    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), local_glow);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let t = u.params.x * 0.18;
     let uv = in.uv;
 
-    var color: vec3<f32>;
-    if u.params.w > 0.5 {
-        let art = sample_blurred_art(uv, t);
-        let mesh = render_luminous_mesh(uv, t);
-        color = mix(mesh, art, 0.82);
-    } else {
-        color = render_luminous_mesh(uv, t);
+    let crystal = render_crystal_surface(uv);
+    var color = crystal.rgb;
+
+    // Subtle album art ambient reflection only when playing a track with artwork.
+    let art_strength = clamp(u.params.x, 0.0, 0.85);
+    if u.params.w > 0.5 && art_strength > 0.001 {
+        let art = sample_blurred_art(uv);
+        color = mix(color, art, art_strength);
     }
 
-    // Subtle soft radial vignette & adaptive contrast floor so white glass text always pops.
+    // Gentle radial vignette & micro-dither to prevent gradient banding.
     let centered = uv - vec2<f32>(0.5, 0.5);
-    let vignette = 1.0 - 0.16 * dot(centered, centered);
+    let vignette = 1.0 - 0.12 * dot(centered, centered);
     let scrim = clamp(u.params.y, 0.38, 0.55);
-    let darkened = color * vignette * (1.0 - scrim * 0.48);
+    let darkened = color * vignette * (1.0 - scrim * 0.34);
 
-    // Subtle micro-dither prevents smooth gradient banding.
     let dither = (hash12(in.position.xy) - 0.5) / 255.0;
     let final_rgb = clamp(darkened + vec3<f32>(dither), vec3<f32>(0.0), vec3<f32>(1.0));
 
-    let alpha = clamp(u.params.z, 0.0, 1.0);
-    return vec4<f32>(final_rgb, alpha);
+    let base_alpha = clamp(u.params.z, 0.0, 1.0);
+    var alpha = base_alpha;
+    if base_alpha < 0.40 {
+        let art_lift = select(0.0, art_strength * 0.55, u.params.w > 0.5);
+        alpha = base_alpha * (0.28 + 0.72 * clamp(crystal.w + art_lift, 0.0, 1.0));
+    }
+    return vec4<f32>(final_rgb * alpha, alpha);
 }

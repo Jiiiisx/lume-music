@@ -18,7 +18,9 @@ use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, Unbounde
 use crate::lyrics_anim::{active_line_index, LyricsSpringState};
 use crate::platform::smtc::{extract_hwnd, SmtcController};
 use crate::platform::{apply_window_glass_mode, TrayController};
-use crate::theme::{decode_art_blur_rgba, extract_palette, AlbumPalette, DynamicBackdropProgram};
+use crate::theme::{
+    decode_art_blur_rgba, extract_palette, AccentTheme, AlbumPalette, DynamicBackdropProgram,
+};
 use crate::views::browse::{validate_playlist_name, view_browse, view_sidebar, BrowseViewProps};
 use crate::views::lyrics_view::{
     lyrics_scroll_id, view_now_playing_lyrics, LyricsViewProps, LYRIC_LINE_STRIDE_PX,
@@ -114,6 +116,7 @@ pub struct LumeApp {
 
     main_window: Option<window::Id>,
     window_visible: bool,
+    window_focused: bool,
     minimized: bool,
     maximized: bool,
 
@@ -238,6 +241,7 @@ impl LumeApp {
             audio,
             main_window: None,
             window_visible: true,
+            window_focused: true,
             minimized: false,
             maximized: false,
             view_mode: ViewMode::Browse,
@@ -326,14 +330,8 @@ impl LumeApp {
     }
 
     pub fn style(&self, _theme: &Theme) -> iced::theme::Style {
-        let acrylic_browse = self.config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
-            && self.view_mode == ViewMode::Browse;
         iced::theme::Style {
-            background_color: if acrylic_browse {
-                Color::TRANSPARENT
-            } else {
-                Color::from_rgb8(14, 14, 20)
-            },
+            background_color: Color::TRANSPARENT,
             text_color: Color::WHITE,
         }
     }
@@ -371,7 +369,7 @@ impl LumeApp {
             Message::WindowOpened(id) => {
                 self.main_window = Some(id);
                 return Task::batch([
-                    apply_window_glass_mode(id, self.config.glassmorphism_mode, self.view_mode),
+                    apply_window_glass_mode(id, self.config.glassmorphism_mode, self.window_focused),
                     self.init_smtc_task(id),
                 ]);
             }
@@ -391,9 +389,10 @@ impl LumeApp {
                 window::Event::Opened { .. } => {
                     self.main_window = Some(id);
                     self.window_visible = true;
+                    self.window_focused = true;
                     self.minimized = false;
                     return Task::batch([
-                        apply_window_glass_mode(id, self.config.glassmorphism_mode, self.view_mode),
+                        apply_window_glass_mode(id, self.config.glassmorphism_mode, true),
                         self.init_smtc_task(id),
                     ]);
                 }
@@ -404,7 +403,13 @@ impl LumeApp {
                 }
                 window::Event::Focused => {
                     self.window_visible = true;
+                    self.window_focused = true;
                     self.minimized = false;
+                    return apply_window_glass_mode(id, self.config.glassmorphism_mode, true);
+                }
+                window::Event::Unfocused => {
+                    self.window_focused = false;
+                    return apply_window_glass_mode(id, self.config.glassmorphism_mode, false);
                 }
                 _ => {}
             },
@@ -494,7 +499,7 @@ impl LumeApp {
                     tasks.push(apply_window_glass_mode(
                         id,
                         self.config.glassmorphism_mode,
-                        self.view_mode,
+                        self.window_focused,
                     ));
                 }
                 if mode == ViewMode::NowPlayingLyrics {
@@ -855,7 +860,7 @@ impl LumeApp {
                 self.config.glassmorphism_mode = mode;
                 let _ = self.config.save(&self.config_path);
                 if let Some(id) = self.main_window {
-                    return apply_window_glass_mode(id, mode, self.view_mode);
+                    return apply_window_glass_mode(id, mode, self.window_focused);
                 }
             }
             Message::SetLyricsVisualMode(mode) => {
@@ -1023,8 +1028,16 @@ impl LumeApp {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let acrylic_browse = self.config.glassmorphism_mode == GlassmorphismMode::WindowsAcrylic
-            && self.view_mode == ViewMode::Browse;
+        let has_active_playback = self.queue.current().is_some()
+            && matches!(
+                self.status,
+                PlaybackStatus::Playing | PlaybackStatus::Buffering | PlaybackStatus::Paused
+            );
+        let accent = if has_active_playback {
+            self.display_palette.accent_theme()
+        } else {
+            AccentTheme::default_cool()
+        };
 
         let info = NowPlayingInfo {
             track: self.queue.current(),
@@ -1047,18 +1060,23 @@ impl LumeApp {
                     lyrics_mode: self.config.lyrics_visual_mode,
                     art_handles: &self.art_handles,
                     time_s: self.time_s,
-                    maximized: self.maximized,
+                    queue_open: self.queue_open,
+                    accent,
                 });
 
                 if self.queue_open {
                     let active_list = self.queue.active_list();
                     stack![
                         lyrics_view,
-                        container(view_queue_drawer(&active_list, self.queue.current_pos()))
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .padding([42, 14])
+                        container(view_queue_drawer(
+                            &active_list,
+                            self.queue.current_pos(),
+                            accent,
+                        ))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .padding([48, 16])
                     ]
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -1069,28 +1087,35 @@ impl LumeApp {
             }
             ViewMode::Browse => {
                 let titlebar = view_titlebar(
-                    "Lume Music",
-                    self.maximized,
                     self.source_used.map(|s| s.badge_label()),
+                    &self.search_query,
+                    self.source_filter,
+                    self.queue_open,
+                    accent,
                 );
 
                 let center_content: Element<'_, Message> = if matches!(self.nav, ActiveNav::Settings)
                 {
                     row![
-                        view_sidebar(&self.nav, &self.playlists),
+                        view_sidebar(&self.nav, &self.playlists, accent),
                         view_settings(
                             &self.config,
                             self.scanning_folders,
-                            self.scan_summary.as_deref()
+                            self.scan_summary.as_deref(),
+                            accent,
                         ),
                     ]
-                    .spacing(16)
+                    .spacing(14)
                     .padding([2, 16])
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
                 } else {
                     let visible_tracks = self.visible_tracks();
+                    let is_playing = matches!(
+                        self.status,
+                        PlaybackStatus::Playing | PlaybackStatus::Buffering
+                    );
                     view_browse(BrowseViewProps {
                         nav: &self.nav,
                         search_query: &self.search_query,
@@ -1098,6 +1123,8 @@ impl LumeApp {
                         playlists: &self.playlists,
                         visible_tracks,
                         active_track_uid: self.queue.current().map(|t| t.uid.as_str()),
+                        active_track: self.queue.current(),
+                        is_playing,
                         open_track_menu_uid: self.open_track_menu_uid.as_deref(),
                         renaming_playlist: self.renaming_playlist.as_ref(),
                         art_handles: &self.art_handles,
@@ -1107,10 +1134,11 @@ impl LumeApp {
                         import_url_input: &self.import_url_input,
                         modal_error: self.modal_error.as_deref(),
                         status_banner: self.status_toast.as_deref(),
+                        accent,
                     })
                 };
 
-                let player_bar = view_player_bar(info, &self.art_handles, self.queue_open);
+                let player_bar = view_player_bar(info, &self.art_handles, self.queue_open, accent);
 
                 let main_col = iced::widget::column![
                     titlebar,
@@ -1126,11 +1154,15 @@ impl LumeApp {
                     let active_list = self.queue.active_list();
                     stack![
                         main_col,
-                        container(view_queue_drawer(&active_list, self.queue.current_pos()))
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .padding([42, 14])
+                        container(view_queue_drawer(
+                            &active_list,
+                            self.queue.current_pos(),
+                            accent,
+                        ))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .padding([48, 16])
                     ]
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -1141,53 +1173,83 @@ impl LumeApp {
             }
         };
 
-        let root_bg = if acrylic_browse {
-            Color::TRANSPARENT
-        } else {
-            Color::from_rgb8(10, 10, 14)
+        let outer_pad = if self.maximized { 0 } else { 4 };
+        let has_playing_art = has_active_playback && self.art_blur_rgba.is_some();
+
+        // Ultra-clear crystal glass: <=15% whispered album reflection in Browse only while playing.
+        let backdrop_cfg: Option<(f32, f32)> = match self.config.glassmorphism_mode {
+            GlassmorphismMode::PureClear => match self.view_mode {
+                ViewMode::Browse => {
+                    if has_playing_art {
+                        Some((0.07, 0.12))
+                    } else {
+                        None
+                    }
+                }
+                ViewMode::NowPlayingLyrics => {
+                    Some((0.18, if has_playing_art { 0.20 } else { 0.0 }))
+                }
+            },
+            GlassmorphismMode::WindowsAcrylic => match self.view_mode {
+                ViewMode::Browse => Some((
+                    if has_playing_art { 0.11 } else { 0.045 },
+                    if has_playing_art { 0.15 } else { 0.0 },
+                )),
+                ViewMode::NowPlayingLyrics => {
+                    Some((0.26, if has_playing_art { 0.26 } else { 0.0 }))
+                }
+            },
+            GlassmorphismMode::DynamicAlbumBlur => match self.view_mode {
+                ViewMode::Browse => Some((
+                    if has_playing_art { 0.34 } else { 0.08 },
+                    if has_playing_art { 0.48 } else { 0.0 },
+                )),
+                ViewMode::NowPlayingLyrics => {
+                    Some((0.52, if has_playing_art { 0.65 } else { 0.0 }))
+                }
+            },
         };
 
-        let root_content: Element<'_, Message> = if acrylic_browse {
-            foreground
-        } else {
+        let root_content: Element<'_, Message> = if let Some((backdrop_alpha, art_tint_strength)) =
+            backdrop_cfg
+        {
             let backdrop = shader(DynamicBackdropProgram::new(
                 self.display_palette,
-                if self.config.reduced_motion {
-                    0.0
+                Some(backdrop_alpha),
+                if has_playing_art {
+                    self.art_blur_rgba.clone()
                 } else {
-                    self.time_s
+                    None
                 },
-                None,
-                self.art_blur_rgba.clone(),
                 self.art_blur_version,
+                art_tint_strength,
             ))
             .width(Length::Fill)
             .height(Length::Fill);
 
-            stack![backdrop, foreground]
+            let padded_fg = container(foreground)
                 .width(Length::Fill)
                 .height(Length::Fill)
+                .padding(outer_pad);
+
+            stack![backdrop, padded_fg]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            container(foreground)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(outer_pad)
                 .into()
         };
 
         container(root_content)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(move |_| {
-                let border = if acrylic_browse {
-                    iced::border::Border {
-                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.16),
-                        width: 1.0,
-                        radius: 12.0.into(),
-                    }
-                } else {
-                    iced::border::Border::default()
-                };
-                container::Style {
-                    background: Some(Background::Color(root_bg)),
-                    border,
-                    ..Default::default()
-                }
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::TRANSPARENT)),
+                ..Default::default()
             })
             .into()
     }

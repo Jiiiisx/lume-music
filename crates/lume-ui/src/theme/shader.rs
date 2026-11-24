@@ -18,26 +18,26 @@ pub struct BackdropUniforms {
 #[derive(Debug, Clone)]
 pub struct DynamicBackdropProgram {
     pub palette: AlbumPalette,
-    pub time_s: f32,
     pub transparent_acrylic_tint: Option<f32>,
     pub art_rgba: Option<Arc<Vec<u8>>>,
     pub art_version: u64,
+    pub art_tint_strength: f32,
 }
 
 impl DynamicBackdropProgram {
     pub fn new(
         palette: AlbumPalette,
-        time_s: f32,
         transparent_acrylic_tint: Option<f32>,
         art_rgba: Option<Arc<Vec<u8>>>,
         art_version: u64,
+        art_tint_strength: f32,
     ) -> Self {
         Self {
             palette,
-            time_s,
             transparent_acrylic_tint,
             art_rgba,
             art_version,
+            art_tint_strength,
         }
     }
 }
@@ -190,7 +190,7 @@ impl shader::Pipeline for BackdropPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -288,7 +288,7 @@ impl<Message> shader::Program<Message> for DynamicBackdropProgram {
             uniforms: BackdropUniforms {
                 colors: self.palette.colors,
                 params: [
-                    self.time_s,
+                    self.art_tint_strength,
                     self.palette.scrim_alpha,
                     acrylic_alpha,
                     if has_art { 1.0 } else { 0.0 },

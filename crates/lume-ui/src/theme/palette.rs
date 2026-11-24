@@ -1,3 +1,32 @@
+use iced::Color;
+
+/// Dynamic UI accent colors derived from the active album palette (or cool crystal fallback).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccentTheme {
+    pub primary: Color,
+    pub light: Color,
+    pub pressed: Color,
+    pub glow: Color,
+    pub soft_bg: Color,
+    pub border: Color,
+    pub on_primary: Color,
+}
+
+impl AccentTheme {
+    /// Default ultra-clear neutral crystal glass accent (pure frosted white/silver, zero blue tint).
+    pub fn default_cool() -> Self {
+        Self {
+            primary: Color::from_rgba(0.97, 0.97, 0.98, 0.92),
+            light: Color::from_rgba(1.0, 1.0, 1.0, 0.98),
+            pressed: Color::from_rgba(0.84, 0.85, 0.87, 0.88),
+            glow: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+            soft_bg: Color::from_rgba(1.0, 1.0, 1.0, 0.11),
+            border: Color::from_rgba(1.0, 1.0, 1.0, 0.34),
+            on_primary: Color::from_rgb8(14, 15, 18),
+        }
+    }
+}
+
 /// Extracted 4-color palette from album art paired with a contrast-safe dark scrim alpha.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AlbumPalette {
@@ -6,16 +35,16 @@ pub struct AlbumPalette {
 }
 
 impl AlbumPalette {
-    /// Neutral smoky midnight-glass palette used when Dynamic Album Blur is idle.
+    /// Neutral Ultra-Clear Crystal Glass palette used when idle or no track artwork is active.
     pub fn default_dark() -> Self {
         Self {
             colors: [
-                [0.18, 0.21, 0.30, 1.0],
-                [0.24, 0.19, 0.32, 1.0],
-                [0.10, 0.12, 0.18, 1.0],
-                [0.16, 0.24, 0.30, 1.0],
+                [0.94, 0.94, 0.96, 1.0], // pure crystal highlight
+                [0.72, 0.73, 0.76, 1.0], // frosted mist silver
+                [0.08, 0.08, 0.09, 1.0], // neutral obsidian depth
+                [0.84, 0.85, 0.88, 1.0], // soft glass specular
             ],
-            scrim_alpha: 0.42,
+            scrim_alpha: 0.38,
         }
     }
 
@@ -32,6 +61,82 @@ impl AlbumPalette {
         Self {
             colors,
             scrim_alpha,
+        }
+    }
+
+    /// Derives a crystal-clear [`AccentTheme`] with at most a subtle <=15% whispered tint
+    /// from the dominant album color so the UI always remains unmistakably clear glass.
+    pub fn accent_theme(&self) -> AccentTheme {
+        if *self == Self::default_dark() {
+            return AccentTheme::default_cool();
+        }
+
+        let mut best_idx = 0;
+        let mut best_sat = -1.0_f32;
+        for (i, c) in self.colors.iter().enumerate() {
+            let max_c = c[0].max(c[1]).max(c[2]);
+            let min_c = c[0].min(c[1]).min(c[2]);
+            let sat = if max_c > 0.001 {
+                (max_c - min_c) / max_c
+            } else {
+                0.0
+            };
+            if sat > best_sat {
+                best_sat = sat;
+                best_idx = i;
+            }
+        }
+
+        if best_sat < 0.14 {
+            return AccentTheme::default_cool();
+        }
+
+        let raw = self.colors[best_idx];
+        let mut ar = raw[0].clamp(0.0, 1.0);
+        let mut ag = raw[1].clamp(0.0, 1.0);
+        let mut ab = raw[2].clamp(0.0, 1.0);
+
+        // Normalize album hue luminance before blending softly into neutral crystal white.
+        let luma = (0.2126 * ar + 0.7152 * ag + 0.0722 * ab).max(0.001);
+        let target_luma = luma.clamp(0.50, 0.78);
+        let scale = target_luma / luma;
+        ar = (ar * scale).clamp(0.0, 1.0);
+        ag = (ag * scale).clamp(0.0, 1.0);
+        ab = (ab * scale).clamp(0.0, 1.0);
+
+        // Whispered <=15% album art tint blended into pure crystal white.
+        const TINT_WEIGHT: f32 = 0.15;
+        let r = (0.96 * (1.0 - TINT_WEIGHT) + ar * TINT_WEIGHT).clamp(0.0, 1.0);
+        let g = (0.96 * (1.0 - TINT_WEIGHT) + ag * TINT_WEIGHT).clamp(0.0, 1.0);
+        let b = (0.97 * (1.0 - TINT_WEIGHT) + ab * TINT_WEIGHT).clamp(0.0, 1.0);
+
+        let light_r = (0.99 * (1.0 - TINT_WEIGHT * 0.8) + ar * (TINT_WEIGHT * 0.8)).clamp(0.0, 1.0);
+        let light_g = (0.99 * (1.0 - TINT_WEIGHT * 0.8) + ag * (TINT_WEIGHT * 0.8)).clamp(0.0, 1.0);
+        let light_b = (1.00 * (1.0 - TINT_WEIGHT * 0.8) + ab * (TINT_WEIGHT * 0.8)).clamp(0.0, 1.0);
+
+        AccentTheme {
+            primary: Color::from_rgba(r, g, b, 0.92),
+            light: Color::from_rgba(light_r, light_g, light_b, 0.98),
+            pressed: Color::from_rgba(
+                (r * 0.84).clamp(0.0, 1.0),
+                (g * 0.84).clamp(0.0, 1.0),
+                (b * 0.84).clamp(0.0, 1.0),
+                0.88,
+            ),
+            glow: Color::from_rgba(
+                (0.85 + ar * 0.15).clamp(0.0, 1.0),
+                (0.85 + ag * 0.15).clamp(0.0, 1.0),
+                (0.85 + ab * 0.15).clamp(0.0, 1.0),
+                0.24,
+            ),
+            soft_bg: Color::from_rgba(
+                (0.85 + ar * 0.15).clamp(0.0, 1.0),
+                (0.85 + ag * 0.15).clamp(0.0, 1.0),
+                (0.85 + ab * 0.15).clamp(0.0, 1.0),
+                0.12,
+            ),
+            border: Color::from_rgba(light_r, light_g, light_b, 0.36),
+            on_primary: Color::from_rgb8(14, 15, 18),
         }
     }
 }
@@ -162,5 +267,20 @@ mod tests {
         let rgba = decode_art_blur_rgba(&bytes).unwrap();
         assert_eq!(rgba.len(), 64 * 64 * 4);
         assert!(decode_art_blur_rgba(b"not an image").is_none());
+    }
+
+    #[test]
+    fn accent_theme_falls_back_to_cool_and_adapts_to_colorful_art() {
+        let default_accent = AlbumPalette::default_dark().accent_theme();
+        assert_eq!(default_accent, AccentTheme::default_cool());
+
+        let gray = extract_palette(&encode_solid_png(120, 120, 120, 16));
+        assert_eq!(gray.accent_theme(), AccentTheme::default_cool());
+
+        let magenta = extract_palette(&encode_solid_png(220, 40, 160, 16));
+        let accent = magenta.accent_theme();
+        assert_ne!(accent, AccentTheme::default_cool());
+        assert!(accent.primary.r > accent.primary.g);
+        assert!(accent.primary.b > accent.primary.g);
     }
 }

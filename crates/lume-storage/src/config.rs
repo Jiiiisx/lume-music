@@ -9,6 +9,7 @@ use crate::error::StorageError;
 #[serde(rename_all = "snake_case")]
 pub enum GlassmorphismMode {
     DynamicAlbumBlur,
+    PureClear,
     #[default]
     WindowsAcrylic,
 }

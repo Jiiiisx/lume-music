@@ -46,3 +46,4 @@ lume-audio = { path = "crates/lume-audio" }
 
 [patch.crates-io]
 iced_wgpu = { path = "patches/iced_wgpu" }
+iced_winit = { path = "patches/iced_winit" }

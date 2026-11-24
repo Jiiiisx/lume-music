@@ -3,8 +3,10 @@ use iced::gradient;
 use iced::widget::{button, container, image, scrollable, slider, text_input, Container};
 use iced::{Background, Color, ContentFit, Element, Length, Radians, Shadow, Vector};
 
+use crate::theme::AccentTheme;
 use crate::widgets::icons::icon_music;
 
+/// Pure neutral white specular borders for Ultra-Clear Crystal Glass.
 pub const GLASS_BORDER: Color = Color {
     r: 1.0,
     g: 1.0,
@@ -16,49 +18,49 @@ pub const GLASS_SUBTLE_BORDER: Color = Color {
     r: 1.0,
     g: 1.0,
     b: 1.0,
-    a: 0.13,
+    a: 0.10,
 };
 
 pub const TEXT_PRIMARY: Color = Color {
-    r: 252.0 / 255.0,
-    g: 252.0 / 255.0,
-    b: 255.0 / 255.0,
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
     a: 0.96,
 };
 
 pub const TEXT_SECONDARY: Color = Color {
-    r: 235.0 / 255.0,
-    g: 236.0 / 255.0,
-    b: 244.0 / 255.0,
-    a: 0.76,
+    r: 0.91,
+    g: 0.92,
+    b: 0.94,
+    a: 0.74,
 };
 
 pub const TEXT_MUTED: Color = Color {
-    r: 222.0 / 255.0,
-    g: 224.0 / 255.0,
-    b: 234.0 / 255.0,
-    a: 0.54,
+    r: 0.76,
+    g: 0.77,
+    b: 0.80,
+    a: 0.56,
 };
 
-pub const TEXT_ON_PILL: Color = Color {
-    r: 24.0 / 255.0,
-    g: 20.0 / 255.0,
-    b: 28.0 / 255.0,
-    a: 1.0,
+pub const TEXT_ON_ACCENT: Color = Color {
+    r: 14.0 / 255.0,
+    g: 15.0 / 255.0,
+    b: 18.0 / 255.0,
+    a: 0.98,
 };
 
 pub const ICON_LIGHT: Color = Color {
-    r: 244.0 / 255.0,
-    g: 245.0 / 255.0,
-    b: 250.0 / 255.0,
-    a: 1.0,
+    r: 0.97,
+    g: 0.97,
+    b: 0.99,
+    a: 0.96,
 };
 
 pub const ICON_MUTED: Color = Color {
-    r: 210.0 / 255.0,
-    g: 212.0 / 255.0,
-    b: 224.0 / 255.0,
-    a: 1.0,
+    r: 0.78,
+    g: 0.79,
+    b: 0.82,
+    a: 0.74,
 };
 
 pub const ICON_HEART_ACTIVE: Color = Color {
@@ -68,27 +70,56 @@ pub const ICON_HEART_ACTIVE: Color = Color {
     a: 1.0,
 };
 
-fn frosted_surface_gradient(top_alpha: f32, mid_alpha: f32, bot_dark_alpha: f32) -> Background {
+/// Ultra-clear neutral crystal glass surface with subtle white top-left refraction sheen
+/// and whisper-thin neutral depth so the blurred desktop shines cleanly through.
+pub fn crystal_surface_gradient(top_alpha: f32, mid_alpha: f32, bot_alpha: f32) -> Background {
+    Background::Gradient(gradient::Gradient::Linear(
+        gradient::Linear::new(Radians(2.42))
+            .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, top_alpha))
+            .add_stop(0.42, Color::from_rgba(1.0, 1.0, 1.0, mid_alpha))
+            .add_stop(1.0, Color::from_rgba(0.05, 0.05, 0.06, bot_alpha)),
+    ))
+}
+
+pub fn inner_widget_glass_gradient() -> Background {
     Background::Gradient(gradient::Gradient::Linear(
         gradient::Linear::new(Radians(2.45))
-            .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, top_alpha))
-            .add_stop(0.52, Color::from_rgba(1.0, 1.0, 1.0, mid_alpha))
-            .add_stop(1.0, Color::from_rgba(14.0 / 255.0, 16.0 / 255.0, 24.0 / 255.0, bot_dark_alpha)),
+            .add_stop(0.0, Color::from_rgba(1.0, 1.0, 1.0, 0.075))
+            .add_stop(0.50, Color::from_rgba(1.0, 1.0, 1.0, 0.025))
+            .add_stop(1.0, Color::from_rgba(0.05, 0.05, 0.06, 0.12)),
     ))
+}
+
+pub fn glass_sidebar_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        text_color: Some(TEXT_PRIMARY),
+        background: Some(crystal_surface_gradient(0.075, 0.025, 0.16)),
+        border: border::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+            width: 1.0,
+            radius: 20.0.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+            offset: Vector::new(0.0, 10.0),
+            blur_radius: 26.0,
+        },
+        snap: false,
+    }
 }
 
 pub fn glass_panel_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.11, 0.05, 0.30)),
+        background: Some(crystal_surface_gradient(0.065, 0.020, 0.13)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.19),
             width: 1.0,
-            radius: 24.0.into(),
+            radius: 22.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
-            offset: Vector::new(0.0, 12.0),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.16),
+            offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
         snap: false,
@@ -98,16 +129,21 @@ pub fn glass_panel_style(_theme: &iced::Theme) -> container::Style {
 pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.16, 0.08, 0.36)),
+        background: Some(Background::Gradient(gradient::Gradient::Linear(
+            gradient::Linear::new(Radians(2.40))
+                .add_stop(0.0, Color::from_rgba(0.16, 0.16, 0.18, 0.68))
+                .add_stop(0.45, Color::from_rgba(0.10, 0.10, 0.12, 0.62))
+                .add_stop(1.0, Color::from_rgba(0.06, 0.06, 0.08, 0.72)),
+        ))),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.26),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
             width: 1.0,
-            radius: 22.0.into(),
+            radius: 20.0.into(),
         },
         shadow: Shadow {
             color: Color::from_rgba(0.0, 0.0, 0.0, 0.36),
-            offset: Vector::new(0.0, 14.0),
-            blur_radius: 34.0,
+            offset: Vector::new(0.0, 16.0),
+            blur_radius: 36.0,
         },
         snap: false,
     }
@@ -116,16 +152,16 @@ pub fn glass_elevated_style(_theme: &iced::Theme) -> container::Style {
 pub fn floating_dock_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.14, 0.06, 0.32)),
+        background: Some(crystal_surface_gradient(0.10, 0.04, 0.22)),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.26),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.24),
             width: 1.0,
-            radius: 26.0.into(),
+            radius: 22.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
-            offset: Vector::new(0.0, 14.0),
-            blur_radius: 34.0,
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+            offset: Vector::new(0.0, 10.0),
+            blur_radius: 28.0,
         },
         snap: false,
     }
@@ -134,18 +170,54 @@ pub fn floating_dock_style(_theme: &iced::Theme) -> container::Style {
 pub fn glass_card_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         text_color: Some(TEXT_PRIMARY),
-        background: Some(frosted_surface_gradient(0.12, 0.05, 0.28)),
+        background: Some(inner_widget_glass_gradient()),
         border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
             width: 1.0,
             radius: 18.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.20),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.14),
             offset: Vector::new(0.0, 8.0),
-            blur_radius: 22.0,
+            blur_radius: 18.0,
         },
         snap: false,
+    }
+}
+
+pub fn hero_banner_style(accent: AccentTheme) -> impl Fn(&iced::Theme) -> container::Style {
+    move |_theme| {
+        let top_tint = Color {
+            a: 0.095,
+            ..accent.light
+        };
+        let bot_tint = Color::from_rgba(0.05, 0.05, 0.06, 0.14);
+        container::Style {
+            text_color: Some(TEXT_PRIMARY),
+            background: Some(Background::Gradient(gradient::Gradient::Linear(
+                gradient::Linear::new(Radians(2.28))
+                    .add_stop(0.0, top_tint)
+                    .add_stop(0.52, Color::from_rgba(1.0, 1.0, 1.0, 0.03))
+                    .add_stop(1.0, bot_tint),
+            ))),
+            border: border::Border {
+                color: Color {
+                    a: 0.20,
+                    ..accent.light
+                },
+                width: 1.0,
+                radius: 20.0.into(),
+            },
+            shadow: Shadow {
+                color: Color {
+                    a: 0.12,
+                    ..accent.glow
+                },
+                offset: Vector::new(0.0, 8.0),
+                blur_radius: 22.0,
+            },
+            snap: false,
+        }
     }
 }
 
@@ -157,16 +229,21 @@ pub fn glass_panel<'a, Message: 'a>(
 
 pub fn ghost_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.14))),
-        button::Status::Pressed => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22))),
+        button::Status::Hovered => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.11))),
+        button::Status::Pressed => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.19))),
         _ => None,
+    };
+    let border_col = match status {
+        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+        button::Status::Pressed => Color::from_rgba(1.0, 1.0, 1.0, 0.26),
+        _ => Color::TRANSPARENT,
     };
     button::Style {
         background: bg,
         text_color: TEXT_PRIMARY,
         border: border::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
+            color: border_col,
+            width: 1.0,
             radius: 12.0.into(),
         },
         shadow: Shadow::default(),
@@ -174,61 +251,97 @@ pub fn ghost_button_style(_theme: &iced::Theme, status: button::Status) -> butto
     }
 }
 
-pub fn close_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
-    let bg = match status {
-        button::Status::Hovered => Some(Background::Color(Color::from_rgba8(225, 62, 74, 0.85))),
-        button::Status::Pressed => Some(Background::Color(Color::from_rgba8(195, 45, 58, 0.95))),
-        _ => None,
-    };
-    button::Style {
-        background: bg,
-        text_color: TEXT_PRIMARY,
-        border: border::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: 12.0.into(),
-        },
-        shadow: Shadow::default(),
-        snap: false,
+pub fn traffic_light_button_style(
+    base_rgb: (u8, u8, u8),
+    hover_rgb: (u8, u8, u8),
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let color = match status {
+            button::Status::Hovered => Color::from_rgb8(hover_rgb.0, hover_rgb.1, hover_rgb.2),
+            button::Status::Pressed => Color::from_rgba8(base_rgb.0, base_rgb.1, base_rgb.2, 0.8),
+            _ => Color::from_rgb8(base_rgb.0, base_rgb.1, base_rgb.2),
+        };
+        let shadow = if matches!(status, button::Status::Hovered) {
+            Shadow {
+                color: Color::from_rgba8(base_rgb.0, base_rgb.1, base_rgb.2, 0.55),
+                offset: Vector::new(0.0, 0.0),
+                blur_radius: 8.0,
+            }
+        } else {
+            Shadow::default()
+        };
+        button::Style {
+            background: Some(Background::Color(color)),
+            text_color: Color::TRANSPARENT,
+            border: border::Border {
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.30),
+                width: 0.75,
+                radius: 7.0.into(),
+            },
+            shadow,
+            snap: false,
+        }
     }
 }
 
-/// Borderless sidebar navigation item with a luminous white active pill (zero wireframe boxes).
-pub fn sidebar_nav_style(active: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+pub fn sidebar_nav_style(
+    active: bool,
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_theme, status| {
         if active {
-            let white = match status {
-                button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 1.0),
-                _ => Color::from_rgba(1.0, 1.0, 1.0, 0.93),
+            let base_alpha = accent.soft_bg.a;
+            let bg = match status {
+                button::Status::Hovered => Color {
+                    a: (base_alpha + 0.06).min(0.28),
+                    ..accent.light
+                },
+                button::Status::Pressed => Color {
+                    a: (base_alpha + 0.11).min(0.34),
+                    ..accent.light
+                },
+                _ => Color {
+                    a: base_alpha,
+                    ..accent.light
+                },
             };
             button::Style {
-                background: Some(Background::Color(white)),
-                text_color: TEXT_ON_PILL,
+                background: Some(Background::Color(bg)),
+                text_color: TEXT_PRIMARY,
                 border: border::Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 16.0.into(),
+                    color: accent.border,
+                    width: 1.0,
+                    radius: 13.0.into(),
                 },
                 shadow: Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.16),
+                    color: Color {
+                        a: 0.14,
+                        ..accent.glow
+                    },
                     offset: Vector::new(0.0, 4.0),
-                    blur_radius: 12.0,
+                    blur_radius: 14.0,
                 },
                 snap: false,
             }
         } else {
-            let bg = match status {
-                button::Status::Hovered => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.11))),
-                button::Status::Pressed => Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.17))),
-                _ => None,
+            let (bg, border_col) = match status {
+                button::Status::Hovered => (
+                    Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.075))),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.14),
+                ),
+                button::Status::Pressed => (
+                    Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.13))),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+                ),
+                _ => (None, Color::TRANSPARENT),
             };
             button::Style {
                 background: bg,
                 text_color: TEXT_SECONDARY,
                 border: border::Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 16.0.into(),
+                    color: border_col,
+                    width: 1.0,
+                    radius: 13.0.into(),
                 },
                 shadow: Shadow::default(),
                 snap: false,
@@ -237,36 +350,38 @@ pub fn sidebar_nav_style(active: bool) -> impl Fn(&iced::Theme, button::Status) 
     }
 }
 
-/// Frosted glass capsule pill; active state flips to crisp solid white with dark text.
-pub fn glass_button_style(active: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+pub fn glass_button_style(
+    active: bool,
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_theme, status| {
         if active {
-            let white = match status {
-                button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 1.0),
-                button::Status::Pressed => Color::from_rgba(0.92, 0.92, 0.95, 0.96),
-                _ => Color::from_rgba(1.0, 1.0, 1.0, 0.93),
+            let bg = match status {
+                button::Status::Hovered => accent.light,
+                button::Status::Pressed => accent.pressed,
+                _ => accent.primary,
             };
             button::Style {
-                background: Some(Background::Color(white)),
-                text_color: TEXT_ON_PILL,
+                background: Some(Background::Color(bg)),
+                text_color: accent.on_primary,
                 border: border::Border {
-                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.95),
+                    color: accent.border,
                     width: 1.0,
-                    radius: 20.0.into(),
+                    radius: 16.0.into(),
                 },
                 shadow: Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+                    color: accent.glow,
                     offset: Vector::new(0.0, 4.0),
                     blur_radius: 14.0,
                 },
                 snap: false,
             }
         } else {
-            let alpha = match status {
-                button::Status::Hovered => 0.20,
-                button::Status::Pressed => 0.26,
-                button::Status::Disabled => 0.04,
-                button::Status::Active => 0.11,
+            let (alpha, border_alpha) = match status {
+                button::Status::Hovered => (0.12, 0.26),
+                button::Status::Pressed => (0.18, 0.34),
+                button::Status::Disabled => (0.025, 0.08),
+                button::Status::Active => (0.055, 0.16),
             };
             button::Style {
                 background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, alpha))),
@@ -276,9 +391,9 @@ pub fn glass_button_style(active: bool) -> impl Fn(&iced::Theme, button::Status)
                     TEXT_PRIMARY
                 },
                 border: border::Border {
-                    color: GLASS_SUBTLE_BORDER,
+                    color: Color::from_rgba(1.0, 1.0, 1.0, border_alpha),
                     width: 1.0,
-                    radius: 20.0.into(),
+                    radius: 16.0.into(),
                 },
                 shadow: Shadow::default(),
                 snap: false,
@@ -287,73 +402,156 @@ pub fn glass_button_style(active: bool) -> impl Fn(&iced::Theme, button::Status)
     }
 }
 
-pub fn primary_pill_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
-    let bg_color = match status {
-        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 1.0),
-        button::Status::Pressed => Color::from_rgba(0.90, 0.90, 0.94, 1.0),
-        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.94),
-    };
-    button::Style {
-        background: Some(Background::Color(bg_color)),
-        text_color: TEXT_ON_PILL,
-        border: border::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: 20.0.into(),
-        },
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
-            offset: Vector::new(0.0, 6.0),
-            blur_radius: 16.0,
-        },
-        snap: false,
+pub fn primary_pill_button_style(
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let bg_color = match status {
+            button::Status::Hovered => accent.light,
+            button::Status::Pressed => accent.pressed,
+            _ => accent.primary,
+        };
+        let shadow_blur = if matches!(status, button::Status::Hovered) {
+            22.0
+        } else {
+            16.0
+        };
+        button::Style {
+            background: Some(Background::Color(bg_color)),
+            text_color: accent.on_primary,
+            border: border::Border {
+                color: accent.border,
+                width: 1.0,
+                radius: 18.0.into(),
+            },
+            shadow: Shadow {
+                color: accent.glow,
+                offset: Vector::new(0.0, 5.0),
+                blur_radius: shadow_blur,
+            },
+            snap: false,
+        }
     }
 }
 
-pub fn play_circle_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
-    let bg_color = match status {
-        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 1.0),
-        button::Status::Pressed => Color::from_rgba(0.88, 0.88, 0.92, 0.98),
-        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.94),
-    };
-    button::Style {
-        background: Some(Background::Color(bg_color)),
-        text_color: TEXT_ON_PILL,
-        border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.95),
-            width: 1.0,
-            radius: 24.0.into(),
-        },
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.25),
-            offset: Vector::new(0.0, 4.0),
-            blur_radius: 14.0,
-        },
-        snap: false,
+pub fn play_circle_button_style(
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let bg_color = match status {
+            button::Status::Hovered => accent.light,
+            button::Status::Pressed => accent.pressed,
+            _ => accent.primary,
+        };
+        let blur = if matches!(status, button::Status::Hovered) {
+            22.0
+        } else {
+            16.0
+        };
+        button::Style {
+            background: Some(Background::Color(bg_color)),
+            text_color: accent.on_primary,
+            border: border::Border {
+                color: accent.border,
+                width: 1.0,
+                radius: 24.0.into(),
+            },
+            shadow: Shadow {
+                color: accent.glow,
+                offset: Vector::new(0.0, 5.0),
+                blur_radius: blur,
+            },
+            snap: false,
+        }
     }
 }
 
-pub fn glass_input_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
-    let (bg_alpha, border_alpha) = match status {
-        text_input::Status::Focused { .. } => (0.16, 0.36),
-        text_input::Status::Hovered => (0.14, 0.24),
-        _ => (0.10, 0.16),
-    };
-    text_input::Style {
-        background: Background::Color(Color::from_rgba(1.0, 1.0, 1.0, bg_alpha)),
-        border: border::Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, border_alpha),
-            width: 1.0,
-            radius: 20.0.into(),
-        },
-        icon: TEXT_SECONDARY,
-        placeholder: TEXT_MUTED,
-        value: TEXT_PRIMARY,
-        selection: Color::from_rgba(1.0, 1.0, 1.0, 0.28),
+pub fn track_row_button_style(
+    active: bool,
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        if active {
+            let bg = match status {
+                button::Status::Hovered => Color {
+                    a: (accent.soft_bg.a + 0.06).min(0.24),
+                    ..accent.light
+                },
+                button::Status::Pressed => Color {
+                    a: (accent.soft_bg.a + 0.11).min(0.30),
+                    ..accent.light
+                },
+                _ => accent.soft_bg,
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: TEXT_PRIMARY,
+                border: border::Border {
+                    color: accent.border,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        } else {
+            let (bg, border_col) = match status {
+                button::Status::Hovered => (
+                    Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.07))),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.12),
+                ),
+                button::Status::Pressed => (
+                    Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.12))),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+                ),
+                _ => (None, Color::TRANSPARENT),
+            };
+            button::Style {
+                background: bg,
+                text_color: TEXT_PRIMARY,
+                border: border::Border {
+                    color: border_col,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        }
     }
 }
 
-pub fn thin_scrollable_style(_theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
+pub fn glass_input_style(
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, text_input::Status) -> text_input::Style {
+    move |_theme, status| {
+        let (bg_alpha, border_col) = match status {
+            text_input::Status::Focused { .. } => (0.11, accent.border),
+            text_input::Status::Hovered => (0.08, Color::from_rgba(1.0, 1.0, 1.0, 0.26)),
+            _ => (0.055, Color::from_rgba(1.0, 1.0, 1.0, 0.15)),
+        };
+        text_input::Style {
+            background: Background::Color(Color::from_rgba(1.0, 1.0, 1.0, bg_alpha)),
+            border: border::Border {
+                color: border_col,
+                width: 1.0,
+                radius: 16.0.into(),
+            },
+            icon: TEXT_SECONDARY,
+            placeholder: TEXT_MUTED,
+            value: TEXT_PRIMARY,
+            selection: Color {
+                a: 0.30,
+                ..accent.light
+            },
+        }
+    }
+}
+
+pub fn thin_scrollable_style(
+    _theme: &iced::Theme,
+    status: scrollable::Status,
+) -> scrollable::Style {
     let scroller_alpha = match status {
         scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. } => 0.38,
         _ => 0.16,
@@ -372,7 +570,7 @@ pub fn thin_scrollable_style(_theme: &iced::Theme, status: scrollable::Status) -
         horizontal_rail: rail,
         gap: None,
         auto_scroll: scrollable::AutoScroll {
-            background: Background::Color(Color::from_rgba8(28, 28, 38, 0.85)),
+            background: Background::Color(Color::from_rgba8(18, 18, 22, 0.84)),
             border: border::color(GLASS_BORDER).width(1.0).rounded(12.0),
             shadow: Shadow::default(),
             icon: TEXT_PRIMARY,
@@ -380,28 +578,32 @@ pub fn thin_scrollable_style(_theme: &iced::Theme, status: scrollable::Status) -
     }
 }
 
-pub fn seek_slider_style(_theme: &iced::Theme, status: slider::Status) -> slider::Style {
-    let handle_radius = match status {
-        slider::Status::Hovered | slider::Status::Dragged => 5.5,
-        slider::Status::Active => 3.0,
-    };
-    slider::Style {
-        rail: slider::Rail {
-            backgrounds: (
-                Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.94)),
-                Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22)),
-            ),
-            width: 4.0,
-            border: border::rounded(2.0),
-        },
-        handle: slider::Handle {
-            shape: slider::HandleShape::Circle {
-                radius: handle_radius,
+pub fn seek_slider_style(
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, slider::Status) -> slider::Style {
+    move |_theme, status| {
+        let handle_radius = match status {
+            slider::Status::Hovered | slider::Status::Dragged => 5.5,
+            slider::Status::Active => 3.5,
+        };
+        slider::Style {
+            rail: slider::Rail {
+                backgrounds: (
+                    Background::Color(accent.primary),
+                    Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.18)),
+                ),
+                width: 3.5,
+                border: border::rounded(2.0),
             },
-            background: Background::Color(Color::WHITE),
-            border_width: 0.0,
-            border_color: Color::TRANSPARENT,
-        },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Circle {
+                    radius: handle_radius,
+                },
+                background: Background::Color(Color::WHITE),
+                border_width: 1.0,
+                border_color: accent.border,
+            },
+        }
     }
 }
 
@@ -423,7 +625,7 @@ pub fn cover_art_widget<'a, Message: 'a>(
             .center_x(Length::Fixed(size))
             .center_y(Length::Fixed(size))
             .style(move |_| container::Style {
-                background: Some(frosted_surface_gradient(0.18, 0.08, 0.24)),
+                background: Some(inner_widget_glass_gradient()),
                 border: border::Border {
                     color: GLASS_SUBTLE_BORDER,
                     width: 1.0,
@@ -439,14 +641,14 @@ pub fn cover_art_widget<'a, Message: 'a>(
         .height(Length::Fixed(size))
         .style(move |_| container::Style {
             border: border::Border {
-                color: Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
                 width: 1.0,
                 radius: radius.into(),
             },
             shadow: Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
-                offset: Vector::new(0.0, 12.0),
-                blur_radius: 28.0,
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.26),
+                offset: Vector::new(0.0, 8.0),
+                blur_radius: 20.0,
             },
             ..Default::default()
         })
