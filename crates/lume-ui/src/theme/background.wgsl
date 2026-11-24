@@ -92,11 +92,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color = mix(color, art, art_strength);
     }
 
-    // Gentle radial vignette & micro-dither to prevent gradient banding.
+    // Gentle radial vignette, full adaptive scrim, and WCAG luminance floor so white text
+    // stays readable (>= 4.5:1) even over pure-white or neon-yellow album covers.
     let centered = uv - vec2<f32>(0.5, 0.5);
     let vignette = 1.0 - 0.12 * dot(centered, centered);
     let scrim = clamp(u.params.y, 0.38, 0.55);
-    let darkened = color * vignette * (1.0 - scrim * 0.34);
+    var darkened = color * vignette * (1.0 - scrim);
+    let bg_luma = dot(darkened, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let max_luma = 0.15;
+    if bg_luma > max_luma {
+        darkened = darkened * (max_luma / bg_luma);
+    }
 
     let dither = (hash12(in.position.xy) - 0.5) / 255.0;
     let final_rgb = clamp(darkened + vec3<f32>(dither), vec3<f32>(0.0), vec3<f32>(1.0));

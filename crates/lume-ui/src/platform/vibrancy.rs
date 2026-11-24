@@ -186,9 +186,9 @@ mod win_backdrop {
 
             let tint = backdrop_tint(mode);
             let hwnd_key = hwnd.0 as usize;
-            if !mgr.windows.contains_key(&hwnd_key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = mgr.windows.entry(hwnd_key) {
                 if let Ok(entry) = create_entry(&compositor, hwnd, tint) {
-                    mgr.windows.insert(hwnd_key, entry);
+                    e.insert(entry);
                 }
             }
 

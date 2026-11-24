@@ -890,7 +890,8 @@ impl Database {
         cache_key: &str,
         now_epoch_s: i64,
     ) -> Result<LyricsCacheLookup, StorageError> {
-        let row: Option<(Option<String>, Option<String>, String, i64, i64)> = self
+        type LyricsCacheRow = (Option<String>, Option<String>, String, i64, i64);
+        let row: Option<LyricsCacheRow> = self
             .conn
             .query_row(
                 r#"
@@ -1189,7 +1190,7 @@ mod tests {
         let sp = track_sp("sp1", "SP Song", false);
         let yt = track_ytm("yt1", "YTM Song");
         db.upsert_track(&yt, None).unwrap();
-        db.upsert_synced_spotify_playlist("sp_pl_1", "Daily Mix", &[sp.clone()])
+        db.upsert_synced_spotify_playlist("sp_pl_1", "Daily Mix", std::slice::from_ref(&sp))
             .unwrap();
 
         assert!(matches!(
@@ -1317,7 +1318,7 @@ mod tests {
         let url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
 
         let pl1 = db
-            .upsert_imported_spotify_playlist("Today's Top Hits", url, &[sp1.clone()])
+            .upsert_imported_spotify_playlist("Today's Top Hits", url, std::slice::from_ref(&sp1))
             .unwrap();
         assert!(pl1.origin.is_editable());
         assert_eq!(pl1.track_count, 1);
@@ -1346,7 +1347,8 @@ mod tests {
         db.upsert_track(&ytm, None).unwrap();
         db.set_local_favorite(&ytm.uid, true).unwrap();
 
-        db.sync_spotify_liked_tracks(&[sp_new.clone()]).unwrap();
+        db.sync_spotify_liked_tracks(std::slice::from_ref(&sp_new))
+            .unwrap();
         let liked_uids: HashSet<String> = db
             .list_unified_liked_tracks()
             .unwrap()

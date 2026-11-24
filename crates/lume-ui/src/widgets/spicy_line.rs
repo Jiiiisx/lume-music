@@ -404,6 +404,7 @@ fn fill_glyph<Renderer>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_feathered_glyph<Renderer>(
     renderer: &mut Renderer,
     source: &GlyphSource<'_, Renderer::Paragraph>,

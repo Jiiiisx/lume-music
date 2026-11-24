@@ -224,6 +224,7 @@ impl QueueEngine {
         self.repeat
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> QueueActionResult {
         if self.order.is_empty() {
             self.current_pos = None;

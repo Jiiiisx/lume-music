@@ -22,10 +22,10 @@ use crate::widgets::{
     TEXT_SECONDARY,
 };
 
-pub fn group_tracks_by_source<'a>(
-    tracks: &'a [Track],
+pub fn group_tracks_by_source(
+    tracks: &[Track],
     filter: SourceFilter,
-) -> Vec<(&'static str, Vec<&'a Track>)> {
+) -> Vec<(&'static str, Vec<&Track>)> {
     let mut spotify = Vec::new();
     let mut youtube = Vec::new();
     let mut local = Vec::new();

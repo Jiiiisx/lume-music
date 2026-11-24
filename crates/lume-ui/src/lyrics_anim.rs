@@ -214,7 +214,7 @@ pub fn compute_refreshed_flame(
         .map(|(i, &s)| ((s - 1.0) * letter_widths_em[i]) * 0.5)
         .collect();
     let mut xs = vec![0.0_f32; n];
-    let middle = if n % 2 == 0 {
+    let middle = if n.is_multiple_of(2) {
         (n as f32) * 0.5 - 0.5
     } else {
         (n / 2) as f32
@@ -412,7 +412,7 @@ pub fn bloom_interlude_state(start_ms: u64, end_ms: u64, pos_ms: u64) -> BloomIn
     let emp_ease = |x: f32| cubic_bezier(0.25, 0.1, 0.25, 1.0, x);
 
     let mut dot_opacities = [0.0_f32; 3];
-    for i in 0..3 {
+    for (i, slot) in dot_opacities.iter_mut().enumerate() {
         let fill = if i < 2 {
             dot_fill_ease(((elapsed - (i as f32) * share) / share).clamp(0.0, 1.0))
         } else {
@@ -427,7 +427,7 @@ pub fn bloom_interlude_state(start_ms: u64, end_ms: u64, pos_ms: u64) -> BloomIn
         };
         let enter_t = ((elapsed - (i as f32) * ENTER_STAGGER_MS) / ENTER_MS).clamp(0.0, 1.0);
         let enter = enter_t * enter_t;
-        dot_opacities[i] = (DIM + (LIT - DIM) * fill) * enter;
+        *slot = (DIM + (LIT - DIM) * fill) * enter;
     }
 
     let breath_scale = |at: f32| -> f32 {
@@ -1199,7 +1199,7 @@ pub fn resolve_line_words(
             let alpha_len = tok.chars().filter(|c| c.is_alphabetic()).count().max(1) as f32;
             let syl_count = split_tokens[i].len() as f32;
             let mut w = syl_count * 1.5 + alpha_len * 0.45 + 0.7;
-            if tok.ends_with(|c: char| matches!(c, ',' | ';' | '—' | '?' | '!')) {
+            if tok.ends_with([',', ';', '—', '?', '!']) {
                 w += 0.55;
             }
             if i + 1 == total_tokens && total_tokens >= 2 && vocal_span >= 2_400 {

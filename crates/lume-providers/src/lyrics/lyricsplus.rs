@@ -485,10 +485,8 @@ impl LyricsPlusClient {
                     .await
                 {
                     Ok(Some(data)) if data.has_native_syllables() => return Ok(Some(data)),
-                    Ok(Some(line_only)) => {
-                        if best_line_only.is_none() {
-                            best_line_only = Some(line_only);
-                        }
+                    Ok(Some(line_only)) if best_line_only.is_none() => {
+                        best_line_only = Some(line_only);
                     }
                     _ => {}
                 }
@@ -511,10 +509,8 @@ impl LyricsPlusClient {
                     .await
                 {
                     Ok(Some(data)) if data.has_native_syllables() => return Ok(Some(data)),
-                    Ok(Some(line_only)) => {
-                        if best_line_only.is_none() {
-                            best_line_only = Some(line_only);
-                        }
+                    Ok(Some(line_only)) if best_line_only.is_none() => {
+                        best_line_only = Some(line_only);
                     }
                     _ => {}
                 }

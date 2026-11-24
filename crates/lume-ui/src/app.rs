@@ -27,7 +27,8 @@ use lume_storage::{
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 
 use crate::lyrics_anim::{
-    active_display_index, build_display_timeline, target_scroll_y_for_item, LyricsSpringState,
+    active_display_index, build_display_timeline, target_scroll_y_for_item, LyricsDisplayItem,
+    LyricsSpringState,
 };
 use crate::platform::smtc::{extract_hwnd, SmtcController};
 use crate::platform::apply_window_glass_mode;
@@ -45,8 +46,11 @@ use crate::views::{
     SpotifySearchError, SpotifySettingsProps, SpotifySyncReport, ViewMode,
 };
 
-const MAX_IN_MEM_ART_HANDLES: usize = 250;
+/// Bounded in-memory Browse thumbnail cache (`120 × 96×96×4 ≈ 4.3 MiB` max RAM).
+const MAX_IN_MEM_ART_HANDLES: usize = 120;
 const THUMBNAIL_SIZE_PX: u32 = 96;
+/// Maximum decoded dimension for the single active cinema cover (`512×512×4 = 1 MiB` max RAM).
+const MAX_ACTIVE_COVER_PX: u32 = 512;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
 const PALETTE_TRANSITION_SECS: f32 = 0.6;
 const LRCLIB_BASE_URL: &str = "https://lrclib.net";
@@ -72,6 +76,74 @@ fn decode_thumbnail_rgba_96(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         .to_rgba8();
     let (w, h) = thumb.dimensions();
     Some((w, h, thumb.into_raw()))
+}
+
+/// Decodes and caps the active cinema album cover to `max_dim × max_dim` RGBA so huge local FLAC
+/// covers (e.g., 2000×2000) never bloat RAM or GPU texture memory.
+pub fn decode_bounded_cover_rgba(bytes: &[u8], max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {
+    if bytes.is_empty() || max_dim == 0 {
+        return None;
+    }
+    let img = ::image::load_from_memory(bytes).ok()?;
+    let rgba = if img.width() > max_dim || img.height() > max_dim {
+        img.thumbnail(max_dim, max_dim).to_rgba8()
+    } else {
+        img.to_rgba8()
+    };
+    let (w, h) = rgba.dimensions();
+    Some((w, h, rgba.into_raw()))
+}
+
+/// Classifies `librespot` / Spotify playback fallback reasons that indicate a lapsed/free Premium
+/// subscription or revoked auth so subsequent tracks skip `librespot` and route straight to YTM.
+pub fn is_spotify_lapsed_reason(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("premium")
+        || lower.contains("lapsed")
+        || lower.contains("403")
+        || lower.contains("forbidden")
+        || lower.contains("unauthorized")
+        || lower.contains("account")
+        || lower.contains("not signed in")
+}
+
+/// Detects transient offline / DNS / connection-refused network errors so cached SQLite views
+/// stay calm and avoid spamming raw stack/reqwest strings.
+pub fn is_likely_offline_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("dns error")
+        || lower.contains("failed to lookup address")
+        || lower.contains("no such host")
+        || lower.contains("network is unreachable")
+        || lower.contains("error sending request")
+        || lower.contains("timed out")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("offline")
+}
+
+/// Formats an actionable, non-blocking toast when YouTube Music playback fails (e.g. HTTP 403
+/// PO-token rejection or missing `yt-dlp` binary).
+pub fn format_ytm_stream_error_toast(err: &str, yt_dlp_available: bool) -> String {
+    if is_likely_offline_error(err) {
+        return "Offline — cannot stream remote track right now. Local files remain playable."
+            .to_string();
+    }
+    let lower = err.to_ascii_lowercase();
+    let is_403_or_bot = lower.contains("403")
+        || lower.contains("po token")
+        || lower.contains("po-token")
+        || lower.contains("forbidden")
+        || lower.contains("yt-dlp");
+    if is_403_or_bot && !yt_dlp_available {
+        return "YouTube blocked direct audio (HTTP 403). Install yt-dlp (winget install yt-dlp.yt-dlp) or set its path in Settings.".to_string();
+    }
+    if is_403_or_bot {
+        return format!(
+            "YouTube stream blocked (403). Try updating yt-dlp (`yt-dlp -U`) or re-matching the track. ({err})"
+        );
+    }
+    err.to_string()
 }
 
 pub fn is_remote_art_url(key: &str) -> bool {
@@ -210,18 +282,28 @@ async fn fetch_or_cache_art(art_cache: Arc<Mutex<ArtCache>>, key: String) -> Opt
 static AUDIO_RX_SLOT: OnceLock<Mutex<Option<Receiver<AudioEvent>>>> = OnceLock::new();
 static SMTC_RX_SLOT: OnceLock<Mutex<Option<UnboundedReceiver<SmtcAction>>>> = OnceLock::new();
 
+#[allow(clippy::too_many_arguments)]
 pub fn should_tick_frames(
     window_visible: bool,
     minimized: bool,
     reduced_motion: bool,
+    view_mode: ViewMode,
     is_playing: bool,
+    lyrics_loading: bool,
     transition_active: bool,
     spring_settled: bool,
 ) -> bool {
     if !window_visible || minimized || reduced_motion {
         return false;
     }
-    is_playing || transition_active || !spring_settled
+    if transition_active {
+        return true;
+    }
+    match view_mode {
+        ViewMode::NowPlayingLyrics => is_playing || lyrics_loading || !spring_settled,
+        // Browse backdrop shader is static; seekbar updates via 100 ms AudioEvent::PositionTick.
+        ViewMode::Browse => false,
+    }
 }
 
 fn audio_subscription() -> impl iced::futures::Stream<Item = Message> {
@@ -329,10 +411,12 @@ pub struct LumeApp {
 
     current_lyrics_uid: Option<String>,
     current_lyrics: Option<LyricsData>,
+    cached_lyrics_timeline: Vec<LyricsDisplayItem>,
     lyrics_loading: bool,
     lyrics_spring: LyricsSpringState,
     last_scrolled_line: Option<usize>,
 
+    active_cover_handle: Option<(String, image::Handle)>,
     art_handles: HashMap<String, image::Handle>,
     art_handle_lru: VecDeque<String>,
     art_blur_rgba: Option<Arc<Vec<u8>>>,
@@ -497,9 +581,11 @@ impl LumeApp {
             muted,
             current_lyrics_uid: None,
             current_lyrics: None,
+            cached_lyrics_timeline: Vec::new(),
             lyrics_loading: false,
             lyrics_spring: LyricsSpringState::new(),
             last_scrolled_line: None,
+            active_cover_handle: None,
             art_handles: HashMap::new(),
             art_handle_lru: VecDeque::new(),
             art_blur_rgba: None,
@@ -620,7 +706,9 @@ impl LumeApp {
             self.window_visible,
             self.minimized,
             self.config.reduced_motion,
+            self.view_mode,
             is_playing,
+            self.lyrics_loading,
             transition_active,
             spring_settled,
         ) {
@@ -686,7 +774,10 @@ impl LumeApp {
                     ]);
                 }
                 window::Event::Resized(size) => {
-                    if size.width > 0.0 && size.height > 0.0 {
+                    if size.width <= 0.0 || size.height <= 0.0 {
+                        // Windows taskbar / Win+Down minimize reports a zero-area surface.
+                        self.minimized = true;
+                    } else {
                         self.minimized = false;
                         self.window_width = size.width;
                         self.window_height = size.height;
@@ -755,12 +846,12 @@ impl LumeApp {
 
                 if self.view_mode == ViewMode::NowPlayingLyrics {
                     if let Some(lyrics) = &self.current_lyrics {
-                        let timeline = build_display_timeline(&lyrics.synced);
-                        let idx = active_display_index(&timeline, self.position_ms);
+                        let timeline = &self.cached_lyrics_timeline;
+                        let idx = active_display_index(timeline, self.position_ms);
                         self.lyrics_spring.notify_active_item(idx);
                         if let Some(idx) = idx {
                             let target_y = target_scroll_y_for_item(
-                                &timeline,
+                                timeline,
                                 &lyrics.synced,
                                 idx,
                                 self.config.lyrics_visual_mode,
@@ -868,7 +959,11 @@ impl LumeApp {
                     }
                     Err(err) => {
                         if region == self.home_region {
-                            self.status_toast = Some(format!("Spotify charts unavailable: {err}"));
+                            self.status_toast = Some(if is_likely_offline_error(&err) {
+                                "Offline — showing cached local library.".to_string()
+                            } else {
+                                format!("Spotify charts unavailable: {err}")
+                            });
                         }
                     }
                 }
@@ -895,8 +990,11 @@ impl LumeApp {
                     }
                     Err(err) => {
                         if region == self.home_region {
-                            self.status_toast =
-                                Some(format!("YouTube Music charts unavailable: {err}"));
+                            self.status_toast = Some(if is_likely_offline_error(&err) {
+                                "Offline — showing cached local library.".to_string()
+                            } else {
+                                format!("YouTube Music charts unavailable: {err}")
+                            });
                         }
                     }
                 }
@@ -1700,13 +1798,22 @@ impl LumeApp {
                     self.lyrics_loading = false;
                     match result {
                         Ok(data) => {
+                            self.cached_lyrics_timeline = data
+                                .as_ref()
+                                .map(|d| build_display_timeline(&d.synced))
+                                .unwrap_or_default();
                             self.current_lyrics = data;
                             self.current_lyrics_uid = Some(track_uid);
                             self.last_scrolled_line = None;
                         }
                         Err(err) => {
                             self.current_lyrics = None;
-                            self.status_toast = Some(format!("Lyrics error: {err}"));
+                            self.cached_lyrics_timeline.clear();
+                            self.status_toast = Some(if is_likely_offline_error(&err) {
+                                "Offline — lyrics unavailable (not cached yet).".to_string()
+                            } else {
+                                format!("Lyrics unavailable: {err}")
+                            });
                         }
                     }
                 }
@@ -1774,7 +1881,10 @@ impl LumeApp {
                         self.active_http_fallback = None;
                         self.status = PlaybackStatus::Stopped;
                         self.smtc.set_playback(PlaybackStatus::Stopped, 0);
-                        self.status_toast = Some(err);
+                        self.status_toast = Some(format_ytm_stream_error_toast(
+                            &err,
+                            self.yt_dlp_detected.is_some(),
+                        ));
                     }
                 }
             }
@@ -1782,14 +1892,17 @@ impl LumeApp {
                 track_uid,
                 art_key,
                 palette,
-                art_bytes,
+                cover_rgba,
+                thumb_rgba,
                 art_blur_rgba,
             } => {
                 let handle_key = art_key.clone().unwrap_or_else(|| track_uid.clone());
-                if let Some(bytes) = art_bytes {
-                    self.insert_art_handle(handle_key.clone(), image::Handle::from_bytes(bytes));
+                if let Some((w, h, rgba)) = thumb_rgba {
+                    self.insert_art_handle(handle_key.clone(), image::Handle::from_rgba(w, h, rgba));
                 }
                 if self.queue.current().map(|t| t.uid.as_str()) == Some(track_uid.as_str()) {
+                    self.active_cover_handle = cover_rgba
+                        .map(|(w, h, rgba)| (handle_key.clone(), image::Handle::from_rgba(w, h, rgba)));
                     if let Some(track) = self.queue.current() {
                         let cover_path = self
                             .art_cache
@@ -1813,22 +1926,19 @@ impl LumeApp {
                 }
             }
             Message::ThumbnailsLoaded(items) => {
-                let active_art_key = self
-                    .queue
-                    .current()
-                    .and_then(|t| t.artwork_ref.as_deref())
-                    .map(ToString::to_string);
                 for (key, w, h, rgba) in items {
-                    if active_art_key.as_deref() == Some(key.as_str())
-                        && self.art_handles.contains_key(&key)
-                    {
-                        continue;
-                    }
                     self.insert_art_handle(key, image::Handle::from_rgba(w, h, rgba));
                 }
             }
-            Message::SpotifyArtworkEnriched(pairs) => {
+            Message::SpotifyArtworkEnriched {
+                attempted_uids,
+                resolved: pairs,
+            } => {
                 if pairs.is_empty() {
+                    // Release failed UIDs (e.g. while offline) so artwork enriches once online again.
+                    for uid in attempted_uids {
+                        self.enriching_spotify_art.remove(&uid);
+                    }
                     return Task::none();
                 }
                 let updated_map: HashMap<String, String> = pairs.into_iter().collect();
@@ -2291,6 +2401,9 @@ impl LumeApp {
                     QueueActionResult::Stopped => self.stop_playback(),
                 },
                 AudioEvent::SpotifyFallbackNeeded { track_uid, reason } => {
+                    if is_spotify_lapsed_reason(&reason) {
+                        self.spotify_lapsed = true;
+                    }
                     if let Some(current) = self.queue.current().cloned() {
                         if current.uid == track_uid
                             && matches!(current.source, TrackSource::Spotify { .. })
@@ -2336,7 +2449,11 @@ impl LumeApp {
                         }
                     }
                     self.status = PlaybackStatus::Stopped;
-                    self.status_toast = Some(err);
+                    self.smtc.set_playback(PlaybackStatus::Stopped, 0);
+                    self.status_toast = Some(format_ytm_stream_error_toast(
+                        &err,
+                        self.yt_dlp_detected.is_some(),
+                    ));
                 }
             },
             Message::Smtc(action) => match action {
@@ -2403,14 +2520,23 @@ impl LumeApp {
 
         let foreground: Element<'_, Message> = match self.view_mode {
             ViewMode::NowPlayingLyrics => {
+                let active_cover = self.active_cover_handle.as_ref().and_then(|(k, h)| {
+                    let cur_key = self
+                        .queue
+                        .current()
+                        .and_then(|t| t.artwork_ref.as_deref().or(Some(t.uid.as_str())));
+                    (cur_key == Some(k.as_str())).then_some(h)
+                });
                 let base_lyrics: Element<'_, Message> = view_now_playing_lyrics(LyricsViewProps {
                     info,
                     lyrics: self.current_lyrics.as_ref(),
+                    lyrics_timeline: &self.cached_lyrics_timeline,
                     lyrics_loading: self.lyrics_loading,
                     lyrics_mode: self.config.lyrics_visual_mode,
                     active_scale: self.lyrics_spring.active_scale(),
                     window_width: self.window_width,
                     window_height: self.window_height,
+                    active_cover,
                     art_handles: &self.art_handles,
                     time_s: self.time_s,
                     queue_open: self.queue_open,
@@ -2878,6 +3004,7 @@ impl LumeApp {
             tasks.push(self.fetch_lyrics_task(track.clone(), false));
         } else {
             self.current_lyrics = None;
+            self.cached_lyrics_timeline.clear();
             self.current_lyrics_uid = None;
         }
 
@@ -3002,8 +3129,12 @@ impl LumeApp {
                         .as_deref()
                         .map(extract_palette)
                         .unwrap_or_else(AlbumPalette::default_dark);
+                    let cover_rgba = bytes
+                        .as_deref()
+                        .and_then(|b| decode_bounded_cover_rgba(b, MAX_ACTIVE_COVER_PX));
+                    let thumb_rgba = bytes.as_deref().and_then(decode_thumbnail_rgba_96);
                     let blur_rgba = bytes.as_deref().and_then(decode_art_blur_rgba).map(Arc::new);
-                    (track_uid, art_key, palette, bytes, blur_rgba)
+                    (track_uid, art_key, palette, cover_rgba, thumb_rgba, blur_rgba)
                 })
                 .await
                 .unwrap_or_else(|_| {
@@ -3013,15 +3144,19 @@ impl LumeApp {
                         AlbumPalette::default_dark(),
                         None,
                         None,
+                        None,
                     )
                 })
             },
-            |(track_uid, art_key, palette, art_bytes, art_blur_rgba)| Message::PaletteLoaded {
-                track_uid,
-                art_key,
-                palette,
-                art_bytes,
-                art_blur_rgba,
+            |(track_uid, art_key, palette, cover_rgba, thumb_rgba, art_blur_rgba)| {
+                Message::PaletteLoaded {
+                    track_uid,
+                    art_key,
+                    palette,
+                    cover_rgba,
+                    thumb_rgba,
+                    art_blur_rgba,
+                }
             },
         )
     }
@@ -3093,6 +3228,7 @@ impl LumeApp {
         }
 
         let db_path = self.db_path.clone();
+        let attempted_uids: Vec<String> = batch.iter().map(|(uid, _)| uid.clone()).collect();
         Task::perform(
             async move {
                 let client = shared_art_http_client().clone();
@@ -3127,9 +3263,12 @@ impl LumeApp {
                     .await;
                 }
 
-                resolved
+                (attempted_uids, resolved)
             },
-            Message::SpotifyArtworkEnriched,
+            |(attempted_uids, resolved)| Message::SpotifyArtworkEnriched {
+                attempted_uids,
+                resolved,
+            },
         )
     }
 
@@ -3724,25 +3863,150 @@ mod tests {
 
     #[test]
     fn never_ticks_when_hidden_or_minimized_even_while_playing() {
-        assert!(!should_tick_frames(false, false, false, true, true, false));
-        assert!(!should_tick_frames(true, true, false, true, true, false));
+        assert!(!should_tick_frames(
+            false,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            true,
+            true,
+            true,
+            false
+        ));
+        assert!(!should_tick_frames(
+            true,
+            true,
+            false,
+            ViewMode::NowPlayingLyrics,
+            true,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn never_ticks_when_reduced_motion_enabled() {
-        assert!(!should_tick_frames(true, false, true, true, true, false));
+        assert!(!should_tick_frames(
+            true,
+            false,
+            true,
+            ViewMode::NowPlayingLyrics,
+            true,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn stops_ticking_when_paused_and_transitions_and_spring_settled() {
-        assert!(!should_tick_frames(true, false, false, false, false, true));
+        assert!(!should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            false,
+            false,
+            false,
+            true
+        ));
     }
 
     #[test]
-    fn ticks_when_visible_and_playing_or_palette_transitioning() {
-        assert!(should_tick_frames(true, false, false, true, false, true));
-        assert!(should_tick_frames(true, false, false, false, true, true));
-        assert!(should_tick_frames(true, false, false, false, false, false));
+    fn browse_mode_skips_60fps_ticks_while_playing_unless_palette_crossfading() {
+        assert!(!should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::Browse,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::Browse,
+            true,
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn lyrics_mode_ticks_when_playing_loading_transitioning_or_spring_unsettled() {
+        assert!(should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            false,
+            false,
+            true,
+            true
+        ));
+        assert!(should_tick_frames(
+            true,
+            false,
+            false,
+            ViewMode::NowPlayingLyrics,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn bounded_cover_decoder_downscales_oversized_art_to_max_dim() {
+        let img = ::image::RgbaImage::from_pixel(1024, 1024, ::image::Rgba([200, 120, 80, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, ::image::ImageFormat::Png).unwrap();
+        let (w, h, rgba) = decode_bounded_cover_rgba(&png.into_inner(), 512).unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(rgba.len(), 512 * 512 * 4);
+    }
+
+    #[test]
+    fn phase4_edge_case_classifiers_handle_lapsed_premium_offline_and_ytm_403() {
+        assert!(is_spotify_lapsed_reason("Spotify Premium required for native playback"));
+        assert!(is_spotify_lapsed_reason("HTTP 403 Forbidden"));
+        assert!(!is_spotify_lapsed_reason("Temporary track decode glitch"));
+
+        assert!(is_likely_offline_error("error sending request for url: dns error"));
+        assert!(is_likely_offline_error("Network is unreachable"));
+        assert!(!is_likely_offline_error("HTTP 403 Forbidden"));
+
+        let no_ytdlp = format_ytm_stream_error_toast("HTTP 403 Forbidden (PO token)", false);
+        assert!(no_ytdlp.contains("winget install yt-dlp.yt-dlp"));
+        let with_ytdlp = format_ytm_stream_error_toast("HTTP 403 Forbidden", true);
+        assert!(with_ytdlp.contains("yt-dlp -U"));
+        let offline = format_ytm_stream_error_toast("dns error: no such host", false);
+        assert!(offline.contains("Offline"));
     }
 
     #[test]

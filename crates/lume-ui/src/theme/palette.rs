@@ -51,9 +51,9 @@ impl AlbumPalette {
     pub fn lerp(&self, target: &Self, t: f32) -> Self {
         let k = t.clamp(0.0, 1.0);
         let mut colors = [[0.0; 4]; 4];
-        for i in 0..4 {
-            for c in 0..4 {
-                colors[i][c] = self.colors[i][c] + (target.colors[i][c] - self.colors[i][c]) * k;
+        for (i, row) in colors.iter_mut().enumerate() {
+            for (c, slot) in row.iter_mut().enumerate() {
+                *slot = self.colors[i][c] + (target.colors[i][c] - self.colors[i][c]) * k;
             }
         }
         let scrim_alpha =
@@ -226,6 +226,37 @@ pub fn extract_palette(image_bytes: &[u8]) -> AlbumPalette {
     }
 }
 
+/// Maximum linear luminance allowed for the darkened album backdrop (`background.wgsl`),
+/// guaranteeing >= 4.5:1 WCAG AA contrast for white foreground typography.
+pub const MAX_BACKDROP_LINEAR_LUMA: f32 = 0.15;
+
+/// Mirrors the adaptive scrim + luminance ceiling applied in `background.wgsl` (`fs_main`).
+pub fn apply_backdrop_scrim_and_ceiling(linear_rgb: [f32; 3], scrim_alpha: f32) -> [f32; 3] {
+    let scrim = scrim_alpha.clamp(0.38, 0.55);
+    let mut darkened = [
+        (linear_rgb[0] * (1.0 - scrim)).clamp(0.0, 1.0),
+        (linear_rgb[1] * (1.0 - scrim)).clamp(0.0, 1.0),
+        (linear_rgb[2] * (1.0 - scrim)).clamp(0.0, 1.0),
+    ];
+    let luma = 0.2126 * darkened[0] + 0.7152 * darkened[1] + 0.0722 * darkened[2];
+    if luma > MAX_BACKDROP_LINEAR_LUMA {
+        let scale = MAX_BACKDROP_LINEAR_LUMA / luma;
+        darkened = [
+            darkened[0] * scale,
+            darkened[1] * scale,
+            darkened[2] * scale,
+        ];
+    }
+    darkened
+}
+
+/// Computes WCAG 2.1 contrast ratio from linear relative luminances in `[0.0, 1.0]`.
+pub fn wcag_contrast_ratio(luma_a: f32, luma_b: f32) -> f32 {
+    let hi = luma_a.max(luma_b);
+    let lo = luma_a.min(luma_b);
+    (hi + 0.05) / (lo + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +313,30 @@ mod tests {
         assert_ne!(accent, AccentTheme::default_cool());
         assert!(accent.primary.r > accent.primary.g);
         assert!(accent.primary.b > accent.primary.g);
+    }
+
+    #[test]
+    fn bright_covers_maintain_wcag_aa_contrast_for_white_text() {
+        let white_pal = extract_palette(&encode_solid_png(255, 255, 255, 16));
+        let bg_white = apply_backdrop_scrim_and_ceiling([1.0, 1.0, 1.0], white_pal.scrim_alpha);
+        let bg_white_luma = 0.2126 * bg_white[0] + 0.7152 * bg_white[1] + 0.0722 * bg_white[2];
+        // TEXT_PRIMARY is rgba(255, 255, 255, 0.96) -> ~0.92 linear luma against dark backdrop.
+        assert!(
+            wcag_contrast_ratio(0.92, bg_white_luma) >= 4.5,
+            "pure white cover contrast dropped below 4.5:1 (bg_luma={bg_white_luma})"
+        );
+
+        let yellow_pal = extract_palette(&encode_solid_png(255, 255, 40, 16));
+        let bg_yellow = apply_backdrop_scrim_and_ceiling([1.0, 1.0, 0.02], yellow_pal.scrim_alpha);
+        let bg_yellow_luma = 0.2126 * bg_yellow[0] + 0.7152 * bg_yellow[1] + 0.0722 * bg_yellow[2];
+        assert!(
+            wcag_contrast_ratio(0.92, bg_yellow_luma) >= 4.5,
+            "bright yellow cover contrast dropped below 4.5:1 (bg_luma={bg_yellow_luma})"
+        );
+
+        // Saturated mid-dark cover preserves its hue without hitting the ceiling prematurely.
+        let deep_rgb = [0.22, 0.06, 0.28];
+        let bg_deep = apply_backdrop_scrim_and_ceiling(deep_rgb, 0.42);
+        assert!(bg_deep[2] > bg_deep[0] && bg_deep[0] > bg_deep[1]);
     }
 }

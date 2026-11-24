@@ -9,10 +9,9 @@ use lume_core::{LyricsData, PlaybackStatus, RepeatMode, Track};
 use lume_storage::LyricsVisualMode;
 
 use crate::lyrics_anim::{
-    active_display_index, bloom_interlude_state, build_display_timeline, interlude_dot_states,
-    line_visual_style, lyrics_bottom_spacer_px, lyrics_top_spacer_px, lyrics_viewport_metrics,
-    resolve_line_words, LyricsDisplayItem, LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX,
-    LYRICS_LINE_HEIGHT_MULT,
+    active_display_index, bloom_interlude_state, interlude_dot_states, line_visual_style,
+    lyrics_bottom_spacer_px, lyrics_top_spacer_px, lyrics_viewport_metrics, resolve_line_words,
+    LyricsDisplayItem, LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX, LYRICS_LINE_HEIGHT_MULT,
 };
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::queue_drawer::view_inline_queue;
@@ -59,11 +58,13 @@ pub fn marquee_slice(text: &str, max_chars: usize, time_s: f32) -> String {
 pub struct LyricsViewProps<'a> {
     pub info: NowPlayingInfo<'a>,
     pub lyrics: Option<&'a LyricsData>,
+    pub lyrics_timeline: &'a [LyricsDisplayItem],
     pub lyrics_loading: bool,
     pub lyrics_mode: LyricsVisualMode,
     pub active_scale: f32,
     pub window_width: f32,
     pub window_height: f32,
+    pub active_cover: Option<&'a image::Handle>,
     pub art_handles: &'a HashMap<String, image::Handle>,
     pub time_s: f32,
     pub queue_open: bool,
@@ -221,9 +222,11 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
     )
     .width(Length::Fill);
 
-    let art = track
-        .and_then(|t| t.artwork_ref.as_deref())
-        .and_then(|k| props.art_handles.get(k));
+    let art = props.active_cover.or_else(|| {
+        track
+            .and_then(|t| t.artwork_ref.as_deref())
+            .and_then(|k| props.art_handles.get(k))
+    });
 
     let raw_title = track.map(|t| t.title.as_str()).unwrap_or("Nothing Playing");
     let display_title = marquee_slice(raw_title, 28, props.time_s);
@@ -732,8 +735,8 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
     };
 
     if !lyrics.synced.is_empty() {
-        let timeline = build_display_timeline(&lyrics.synced);
-        let active_idx = active_display_index(&timeline, props.info.position_ms);
+        let timeline = props.lyrics_timeline;
+        let active_idx = active_display_index(timeline, props.info.position_ms);
         let (_, viewport_h) = lyrics_viewport_metrics(props.window_width, props.window_height);
         let top_spacer = lyrics_top_spacer_px(viewport_h);
         let bottom_spacer = lyrics_bottom_spacer_px(viewport_h);

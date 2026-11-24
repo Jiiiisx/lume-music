@@ -230,11 +230,15 @@ pub enum Message {
         track_uid: String,
         art_key: Option<String>,
         palette: AlbumPalette,
-        art_bytes: Option<Vec<u8>>,
+        cover_rgba: Option<(u32, u32, Vec<u8>)>,
+        thumb_rgba: Option<(u32, u32, Vec<u8>)>,
         art_blur_rgba: Option<Arc<Vec<u8>>>,
     },
     ThumbnailsLoaded(Vec<(String, u32, u32, Vec<u8>)>),
-    SpotifyArtworkEnriched(Vec<(String, String)>),
+    SpotifyArtworkEnriched {
+        attempted_uids: Vec<String>,
+        resolved: Vec<(String, String)>,
+    },
 
     // Settings, Spotify auth & local library
     SetGlassmorphismMode(GlassmorphismMode),

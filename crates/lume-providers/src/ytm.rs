@@ -63,9 +63,9 @@ impl From<&AudioStream> for AudioStreamCandidate {
 }
 
 /// Select the best `symphonia`-compatible audio stream from candidates.
-pub fn select_best_audio_stream<'a>(
-    candidates: &'a [AudioStreamCandidate],
-) -> Result<&'a AudioStreamCandidate, CoreError> {
+pub fn select_best_audio_stream(
+    candidates: &[AudioStreamCandidate],
+) -> Result<&AudioStreamCandidate, CoreError> {
     let best = candidates
         .iter()
         .filter(|c| !c.url.trim().is_empty() && !c.is_drm && !c.is_opus)
@@ -864,11 +864,7 @@ impl YouTubeMusicProvider {
         let mut seen = std::collections::HashSet::with_capacity(limit);
 
         if let Ok(charts) = self.client.query().music_charts(Some(country)).await {
-            for item in charts
-                .top_tracks
-                .into_iter()
-                .chain(charts.trending_tracks.into_iter())
-            {
+            for item in charts.top_tracks.into_iter().chain(charts.trending_tracks) {
                 let t = map_track_item(item);
                 if seen.insert(t.uid.clone()) {
                     tracks.push(t);
