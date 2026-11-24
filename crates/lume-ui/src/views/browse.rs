@@ -92,6 +92,8 @@ pub struct BrowseViewProps<'a> {
     pub new_playlist_input: &'a str,
     pub show_import_url_modal: bool,
     pub import_url_input: &'a str,
+    pub importing_url: bool,
+    pub connection_status: &'a str,
     pub modal_error: Option<&'a str>,
     pub status_banner: Option<&'a str>,
     pub accent: AccentTheme,
@@ -113,7 +115,12 @@ fn format_duration_ms(ms: u64) -> String {
 }
 
 pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
-    let sidebar = view_sidebar(props.nav, props.playlists, props.accent);
+    let sidebar = view_sidebar(
+        props.nav,
+        props.playlists,
+        props.connection_status,
+        props.accent,
+    );
     let main_area = build_main_content(&props);
 
     let base = row![sidebar, main_area]
@@ -184,13 +191,31 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
     }
 
     if props.show_import_url_modal {
+        let import_btn = button(
+            text(if props.importing_url {
+                "Importing..."
+            } else {
+                "Import"
+            })
+            .size(13)
+            .font(FONT_SEMIBOLD)
+            .color(props.accent.on_primary),
+        )
+        .padding([8, 20])
+        .style(primary_pill_button_style(props.accent));
+        let import_btn = if props.importing_url {
+            import_btn
+        } else {
+            import_btn.on_press(Message::ImportSpotifyUrlSubmitted)
+        };
+
         let modal = container(
             column![
                 text("Import Public Spotify Playlist")
                     .size(20)
                     .font(FONT_BOLD)
                     .color(TEXT_PRIMARY),
-                text("Paste a public open.spotify.com/playlist/... link (Phase 3 importer hook).")
+                text("Paste a public open.spotify.com/playlist/... link to save it locally as an editable playlist playable via Spotify Premium or Smart YouTube Fallback.")
                     .size(13)
                     .color(TEXT_SECONDARY),
                 text_input(
@@ -212,15 +237,7 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
                         .padding([8, 16])
                         .style(glass_button_style(false, props.accent))
                         .on_press(Message::CloseModal),
-                    button(
-                        text("Import")
-                            .size(13)
-                            .font(FONT_SEMIBOLD)
-                            .color(props.accent.on_primary)
-                    )
-                    .padding([8, 20])
-                    .style(primary_pill_button_style(props.accent))
-                    .on_press(Message::ImportSpotifyUrlSubmitted),
+                    import_btn,
                 ]
                 .spacing(10),
             ]
@@ -253,6 +270,7 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
 pub fn view_sidebar<'a>(
     nav: &'a ActiveNav,
     playlists: &'a [Playlist],
+    connection_status: &'a str,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
     let nav_item = |label: &'a str,
@@ -305,31 +323,52 @@ pub fn view_sidebar<'a>(
             let count_col = if is_active { accent.light } else { TEXT_MUTED };
             let title_font = if is_active { FONT_SEMIBOLD } else { FONT_MEDIUM };
 
-            let row_btn = button(
-                row![
-                    icon_playlist(14.0, icon_col),
-                    text(pl.name.as_str())
-                        .size(12)
-                        .font(title_font)
-                        .color(title_col)
-                        .width(Length::Fill),
-                    container(text(format!("{}", pl.track_count)).size(10).color(count_col))
-                        .padding([2, 7])
-                        .style(|_| container::Style {
-                            background: Some(Background::Color(Color::from_rgba(
-                                1.0, 1.0, 1.0, 0.07,
-                            ))),
-                            border: iced::border::rounded(10.0),
+            let origin_tag = match &pl.origin {
+                lume_core::PlaylistOrigin::SpotifySynced => Some("SP"),
+                lume_core::PlaylistOrigin::SpotifyImported { .. } => Some("IMP"),
+                lume_core::PlaylistOrigin::LocalCustom => None,
+            };
+
+            let mut pl_row = row![
+                icon_playlist(14.0, icon_col),
+                text(pl.name.as_str())
+                    .size(12)
+                    .font(title_font)
+                    .color(title_col)
+                    .width(Length::Fill),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(6);
+
+            if let Some(tag) = origin_tag {
+                pl_row = pl_row.push(
+                    container(text(tag).size(9).font(FONT_SEMIBOLD).color(accent.light))
+                        .padding([1, 5])
+                        .style(move |_| container::Style {
+                            background: Some(Background::Color(accent.soft_bg)),
+                            border: iced::border::rounded(6.0),
                             ..Default::default()
                         }),
-                ]
-                .align_y(Alignment::Center)
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .padding([8, 10])
-            .style(sidebar_nav_style(is_active, accent))
-            .on_press(Message::SelectNav(ActiveNav::Playlist(pl.id.clone())));
+                );
+            }
+
+            pl_row = pl_row.push(
+                container(text(format!("{}", pl.track_count)).size(10).color(count_col))
+                    .padding([2, 7])
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba(
+                            1.0, 1.0, 1.0, 0.07,
+                        ))),
+                        border: iced::border::rounded(10.0),
+                        ..Default::default()
+                    }),
+            );
+
+            let row_btn = button(pl_row)
+                .width(Length::Fill)
+                .padding([8, 10])
+                .style(sidebar_nav_style(is_active, accent))
+                .on_press(Message::SelectNav(ActiveNav::Playlist(pl.id.clone())));
             playlist_col = playlist_col.push(row_btn);
         }
     }
@@ -398,6 +437,23 @@ pub fn view_sidebar<'a>(
                     ..Default::default()
                 }),
             column![
+                container(
+                    text(connection_status)
+                        .size(11)
+                        .font(FONT_MEDIUM)
+                        .color(accent.light),
+                )
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(accent.soft_bg)),
+                    border: iced::border::Border {
+                        color: accent.border,
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }),
                 button(
                     row![
                         icon_folder(14.0, ICON_LIGHT),
@@ -565,11 +621,17 @@ fn build_hero_banner<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
                 .into()
         };
 
+        let pl_overline = match pl.map(|p| &p.origin) {
+            Some(lume_core::PlaylistOrigin::SpotifySynced) => "SPOTIFY SYNCED PLAYLIST (READ-ONLY)",
+            Some(lume_core::PlaylistOrigin::SpotifyImported { .. }) => "IMPORTED SPOTIFY PLAYLIST",
+            _ => "CUSTOM PLAYLIST",
+        };
+
         return container(
             row![
                 art_tile,
                 column![
-                    text("PLAYLIST")
+                    text(pl_overline)
                         .size(10)
                         .font(FONT_SEMIBOLD)
                         .color(props.accent.light),
@@ -1068,6 +1130,15 @@ fn track_row<'a>(
     ]
     .spacing(8)
     .align_y(Alignment::Center);
+
+    if matches!(track.source, TrackSource::Spotify { .. }) {
+        actions = actions.push(
+            button(text("Re-match YouTube").size(12))
+                .padding([6, 12])
+                .style(glass_button_style(false, props.accent))
+                .on_press(Message::RematchYoutubeFallback(track.clone())),
+        );
+    }
 
     for pl in props.playlists.iter().filter(|p| p.origin.is_editable()) {
         actions = actions.push(

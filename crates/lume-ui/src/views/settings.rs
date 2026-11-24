@@ -1,15 +1,16 @@
 use std::path::Path;
 
-use iced::widget::{button, column, container, row, scrollable, space, text, toggler};
+use iced::widget::{button, column, container, row, scrollable, space, text, text_input, toggler};
 use iced::{Alignment, Background, Color, Element, Length};
+use lume_providers::{SpotifyAccountTier, SPOTIFY_WEB_API_REDIRECT_URI};
 use lume_storage::{AppConfig, GlassmorphismMode, LyricsVisualMode};
 
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
-use crate::views::Message;
+use crate::views::{Message, SpotifySettingsProps};
 use crate::widgets::{
-    glass_button_style, glass_card_style, glass_panel, icon_folder, icon_plus, icon_refresh,
-    icon_trash, primary_pill_button_style, thin_scrollable_style, ICON_LIGHT, ICON_MUTED,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_button_style, glass_card_style, glass_input_style, glass_panel, icon_folder, icon_link,
+    icon_plus, icon_refresh, icon_trash, primary_pill_button_style, thin_scrollable_style,
+    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn view_settings<'a>(
@@ -17,6 +18,7 @@ pub fn view_settings<'a>(
     scanning: bool,
     scan_summary: Option<&'a str>,
     yt_dlp_detected: Option<&'a Path>,
+    spotify: SpotifySettingsProps<'a>,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
 
@@ -87,11 +89,159 @@ pub fn view_settings<'a>(
             .font(FONT_SEMIBOLD)
             .color(TEXT_PRIMARY),
         toggler(config.prefer_youtube_fallback)
-            .label("Prefer YouTube Fallback when playing Spotify tracks (Phase 3)")
+            .label("Prefer YouTube Music Fallback when playing Spotify tracks")
             .on_toggle(Message::SetPreferYoutubeFallback)
             .text_size(13),
     ]
     .spacing(12);
+
+    let web_status_text = if spotify.web_api_connected {
+        let who = spotify.profile_name.unwrap_or("Connected account");
+        let tier_label = if spotify.lapsed_fallback {
+            "Lapsed / 403 — serving SQLite cache + YTM Fallback"
+        } else {
+            match spotify.account_tier {
+                SpotifyAccountTier::Premium => "Premium active",
+                SpotifyAccountTier::Free => "Free tier — YTM Auto-Fallback active",
+                SpotifyAccountTier::Unknown => "Connected",
+            }
+        };
+        if spotify.pending_mutations > 0 {
+            format!(
+                "Library Web API: {who} ({tier_label}) • {} queued likes",
+                spotify.pending_mutations
+            )
+        } else {
+            format!("Library Web API: {who} ({tier_label})")
+        }
+    } else if spotify.pending_mutations > 0 {
+        format!(
+            "Library Web API: Not connected • {} queued likes waiting for sign-in",
+            spotify.pending_mutations
+        )
+    } else {
+        "Library Web API: Not connected — enter your personal Spotify Developer Client ID below."
+            .to_string()
+    };
+
+    let playback_status_text = if spotify.playback_connected {
+        "Native Playback (librespot): Connected (up to 320 kbps Ogg Vorbis; auto-falls back to YTM if Premium lapses)."
+    } else {
+        "Native Playback (librespot): Not connected — Spotify tracks will play seamlessly via Smart YouTube Music Fallback."
+    };
+
+    let mut web_actions = row![].spacing(8).align_y(Alignment::Center);
+    if spotify.web_api_connected {
+        web_actions = web_actions
+            .push(
+                button(
+                    row![
+                        icon_refresh(12.0, accent.on_primary),
+                        text(if spotify.syncing { "Syncing..." } else { "Sync Library" })
+                            .size(12)
+                            .font(FONT_SEMIBOLD)
+                            .color(accent.on_primary),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 14])
+                .style(primary_pill_button_style(accent))
+                .on_press(Message::SyncSpotifyLibrary),
+            )
+            .push(
+                button(text("Disconnect Library").size(12).font(FONT_MEDIUM))
+                    .padding([8, 14])
+                    .style(glass_button_style(false, accent))
+                    .on_press(Message::DisconnectSpotifyWebApi),
+            );
+    } else {
+        web_actions = web_actions.push(
+            button(
+                row![
+                    icon_link(12.0, accent.on_primary),
+                    text(if spotify.logging_in_web {
+                        "Waiting for Browser..."
+                    } else {
+                        "Connect Library (Web API)"
+                    })
+                    .size(12)
+                    .font(FONT_SEMIBOLD)
+                    .color(accent.on_primary),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding([8, 16])
+            .style(primary_pill_button_style(accent))
+            .on_press(Message::ConnectSpotifyWebApi),
+        );
+    }
+
+    let playback_action = if spotify.playback_connected {
+        button(text("Disconnect Playback").size(12).font(FONT_MEDIUM))
+            .padding([8, 14])
+            .style(glass_button_style(false, accent))
+            .on_press(Message::DisconnectSpotifyPlayback)
+    } else {
+        button(
+            text(if spotify.logging_in_playback {
+                "Waiting for Browser..."
+            } else {
+                "Connect Native Playback (librespot)"
+            })
+            .size(12)
+            .font(FONT_MEDIUM),
+        )
+        .padding([8, 14])
+        .style(glass_button_style(false, accent))
+        .on_press(Message::ConnectSpotifyPlayback)
+    };
+
+    let spotify_section = column![
+        text("Spotify Premium & Smart Auto-Fallback")
+            .size(16)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_PRIMARY),
+        text(format!(
+            "Create a Spotify Developer app with Redirect URI {SPOTIFY_WEB_API_REDIRECT_URI} (use 127.0.0.1, never localhost), paste your Client ID, and connect. Tokens are encrypted via Windows DPAPI."
+        ))
+        .size(12)
+        .color(TEXT_SECONDARY),
+        row![
+            text_input(
+                "Personal Spotify Developer Client ID...",
+                spotify.client_id_input,
+            )
+            .on_input(Message::SpotifyClientIdChanged)
+            .on_submit(Message::SaveSpotifyClientId)
+            .style(glass_input_style(accent))
+            .padding([9, 14])
+            .width(Length::Fill),
+            button(
+                text("Save ID")
+                    .size(12)
+                    .font(FONT_SEMIBOLD)
+                    .color(accent.on_primary)
+            )
+            .padding([9, 16])
+            .style(primary_pill_button_style(accent))
+            .on_press(Message::SaveSpotifyClientId),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+        text(web_status_text).size(12).color(TEXT_PRIMARY),
+        text(playback_status_text).size(12).color(TEXT_SECONDARY),
+        if let Some(summary) = spotify.sync_summary {
+            Element::from(text(summary).size(12).color(accent.light))
+        } else {
+            Element::from(space().height(0))
+        },
+        row![web_actions, playback_action]
+            .spacing(10)
+            .align_y(Alignment::Center),
+    ]
+    .spacing(10);
 
     let mut folder_rows = column![].spacing(8);
     if config.local_folders.is_empty() {
@@ -264,6 +414,11 @@ pub fn view_settings<'a>(
         .width(Length::Fill)
         .style(glass_card_style);
 
+    let spotify_card = container(spotify_section.width(Length::Fill))
+        .padding(18)
+        .width(Length::Fill)
+        .style(glass_card_style);
+
     let youtube_card = container(youtube_section.width(Length::Fill))
         .padding(18)
         .width(Length::Fill)
@@ -280,6 +435,7 @@ pub fn view_settings<'a>(
                 text("Settings").size(24).font(FONT_BOLD).color(TEXT_PRIMARY),
                 appearance_card,
                 behavior_card,
+                spotify_card,
                 youtube_card,
                 local_library_card,
             ]

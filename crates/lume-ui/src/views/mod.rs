@@ -10,12 +10,43 @@ use std::sync::Arc;
 
 use lume_audio::AudioEvent;
 use lume_core::{
-    LyricsData, PlaybackSourceUsed, PlaybackStatus, RepeatMode, ResolvedStream, Track,
+    LyricsData, PlaybackSourceUsed, PlaybackStatus, Playlist, RepeatMode, ResolvedStream, Track,
 };
-use lume_providers::ScanReport;
-use lume_storage::{GlassmorphismMode, LyricsVisualMode};
+use lume_providers::{ScanReport, SpotifyAccountTier, SpotifyUserProfile};
+use lume_storage::{GlassmorphismMode, LyricsVisualMode, SpotifyTokenSet};
 
 use crate::theme::AlbumPalette;
+
+#[derive(Debug, Clone)]
+pub struct SpotifySyncReport {
+    pub profile: Option<SpotifyUserProfile>,
+    pub synced_playlists: usize,
+    pub synced_liked: usize,
+    pub flushed_mutations: usize,
+    pub lapsed: bool,
+    pub refreshed_token: Option<SpotifyTokenSet>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpotifySearchError {
+    LapsedOrForbidden,
+    Other(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SpotifySettingsProps<'a> {
+    pub client_id_input: &'a str,
+    pub web_api_connected: bool,
+    pub playback_connected: bool,
+    pub profile_name: Option<&'a str>,
+    pub account_tier: SpotifyAccountTier,
+    pub lapsed_fallback: bool,
+    pub syncing: bool,
+    pub logging_in_web: bool,
+    pub logging_in_playback: bool,
+    pub pending_mutations: usize,
+    pub sync_summary: Option<&'a str>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceFilter {
@@ -80,6 +111,11 @@ pub enum Message {
         request_id: u64,
         result: Result<Vec<Track>, String>,
     },
+    SpotifySearchFinished {
+        request_id: u64,
+        result: Result<Vec<Track>, SpotifySearchError>,
+        refreshed_token: Option<SpotifyTokenSet>,
+    },
 
     // Playlists & track actions
     NewPlaylistNameChanged(String),
@@ -91,6 +127,12 @@ pub enum Message {
     DeletePlaylist(String),
     ImportUrlInputChanged(String),
     ImportSpotifyUrlSubmitted,
+    SpotifyImportFinished(Result<Playlist, String>),
+    RematchYoutubeFallback(Track),
+    RematchFinished {
+        track: Track,
+        result: Result<String, String>,
+    },
     AddTrackToPlaylist {
         playlist_id: String,
         track: Track,
@@ -152,11 +194,33 @@ pub enum Message {
     },
     ThumbnailsLoaded(Vec<(String, Vec<u8>)>),
 
-    // Settings & local library
+    // Settings, Spotify auth & local library
     SetGlassmorphismMode(GlassmorphismMode),
     SetLyricsVisualMode(LyricsVisualMode),
     SetReducedMotion(bool),
     SetPreferYoutubeFallback(bool),
+    SpotifyClientIdChanged(String),
+    SaveSpotifyClientId,
+    ConnectSpotifyWebApi,
+    SpotifyWebApiLoginFinished(Result<(SpotifyTokenSet, SpotifyUserProfile), String>),
+    DisconnectSpotifyWebApi,
+    ConnectSpotifyPlayback,
+    SpotifyPlaybackLoginFinished(Result<SpotifyTokenSet, String>),
+    DisconnectSpotifyPlayback,
+    SyncSpotifyLibrary,
+    SpotifySyncFinished(Result<SpotifySyncReport, String>),
+    SpotifyPlaybackTokenReady {
+        request_id: u64,
+        track: Track,
+        result: Result<(SpotifyTokenSet, bool), String>,
+    },
+    SpotifyLikeSynced {
+        spotify_track_id: String,
+        liked: bool,
+        lapsed: bool,
+        failed: bool,
+        refreshed_token: Option<SpotifyTokenSet>,
+    },
     PickYtDlpBinary,
     YtDlpPicked(Option<PathBuf>),
     ClearYtDlpBinary,

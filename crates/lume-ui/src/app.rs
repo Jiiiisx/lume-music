@@ -12,10 +12,16 @@ use lume_core::{
     QueueEngine, ResolvedStream, Track, TrackSource,
 };
 use lume_providers::{
-    detect_yt_dlp_binary, find_sidecar_lrc, find_sidecar_ttml, parse_lrc, parse_ttml,
-    read_embedded_lyrics, LocalProvider, LrclibClient, YouTubeMusicProvider,
+    detect_yt_dlp_binary, ensure_fresh_token, find_sidecar_lrc, find_sidecar_ttml,
+    import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api, parse_lrc,
+    parse_ttml, read_embedded_lyrics, resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient,
+    SpotifyAccountTier, SpotifyApiError, SpotifyUserProfile, SpotifyWebClient,
+    YouTubeMusicProvider, SPOTIFY_PLAYBACK_CLIENT_ID,
 };
-use lume_storage::{AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup};
+use lume_storage::{
+    AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup, SpotifyTokenBundle,
+    TokenStore,
+};
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 
 use crate::lyrics_anim::{
@@ -32,7 +38,10 @@ use crate::views::player_bar::view_player_bar;
 use crate::views::queue_drawer::view_queue_drawer;
 use crate::views::settings::view_settings;
 use crate::views::titlebar::view_titlebar;
-use crate::views::{ActiveNav, Message, NowPlayingInfo, SmtcAction, SourceFilter, ViewMode};
+use crate::views::{
+    ActiveNav, Message, NowPlayingInfo, SmtcAction, SourceFilter, SpotifySearchError,
+    SpotifySettingsProps, SpotifySyncReport, ViewMode,
+};
 
 const MAX_IN_MEM_ART_HANDLES: usize = 30;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
@@ -41,6 +50,67 @@ const LRCLIB_BASE_URL: &str = "https://lrclib.net";
 
 pub fn is_remote_art_url(key: &str) -> bool {
     key.starts_with("https://") || key.starts_with("http://")
+}
+
+/// Decides whether a Spotify track should attempt native `librespot` playback or go straight
+/// to Smart YouTube Music Auto-Fallback.
+pub fn should_attempt_spotify_native(
+    prefer_youtube_fallback: bool,
+    has_playback_token: bool,
+    account_tier: SpotifyAccountTier,
+    spotify_lapsed: bool,
+) -> bool {
+    if prefer_youtube_fallback || !has_playback_token || spotify_lapsed {
+        return false;
+    }
+    account_tier != SpotifyAccountTier::Free
+}
+
+/// Concise sidebar status pill label reflecting Spotify + fallback connectivity.
+pub fn format_connection_status_pill(
+    web_connected: bool,
+    playback_connected: bool,
+    account_tier: SpotifyAccountTier,
+    spotify_lapsed: bool,
+    prefer_youtube_fallback: bool,
+) -> &'static str {
+    if !web_connected && !playback_connected {
+        return "Local + YouTube Music";
+    }
+    if spotify_lapsed {
+        return "Spotify Lapsed • YTM";
+    }
+    if account_tier == SpotifyAccountTier::Free {
+        return "Spotify Free • YTM";
+    }
+    if prefer_youtube_fallback {
+        return "Spotify • YTM Fallback";
+    }
+    if playback_connected {
+        return "Spotify Premium";
+    }
+    "Spotify Sync • YTM"
+}
+
+fn rewrite_stream_as_youtube_fallback(stream: ResolvedStream) -> ResolvedStream {
+    match stream {
+        ResolvedStream::HttpUrl { url, .. } => ResolvedStream::HttpUrl {
+            url,
+            source: PlaybackSourceUsed::YouTubeFallback,
+        },
+        ResolvedStream::YtDlpProcess {
+            binary,
+            watch_url,
+            format_selector,
+            ..
+        } => ResolvedStream::YtDlpProcess {
+            binary,
+            watch_url,
+            format_selector,
+            source: PlaybackSourceUsed::YouTubeFallback,
+        },
+        other => other,
+    }
 }
 
 pub fn merge_search_results(cached: Vec<Track>, remote: Vec<Track>) -> Vec<Track> {
@@ -160,6 +230,8 @@ pub struct LumeApp {
     db_path: PathBuf,
     db: Arc<Mutex<Database>>,
     art_cache: Arc<Mutex<ArtCache>>,
+    token_store: TokenStore,
+    tokens: SpotifyTokenBundle,
     audio: Option<AudioEngineHandle>,
 
     main_window: Option<window::Id>,
@@ -181,12 +253,24 @@ pub struct LumeApp {
     liked_tracks: Vec<Track>,
     playlist_tracks: Vec<Track>,
     search_results: Vec<Track>,
+    spotify_search_results: Vec<Track>,
     ytm_search_results: Vec<Track>,
+    searching_spotify: bool,
     searching_ytm: bool,
     resolving_stream: bool,
     search_request_id: u64,
     play_request_id: u64,
     yt_dlp_detected: Option<PathBuf>,
+
+    spotify_client_id_input: String,
+    spotify_profile: Option<SpotifyUserProfile>,
+    spotify_lapsed: bool,
+    spotify_logging_in_web: bool,
+    spotify_logging_in_playback: bool,
+    spotify_syncing: bool,
+    spotify_sync_summary: Option<String>,
+    pending_mutations_count: usize,
+    importing_url: bool,
 
     queue: QueueEngine,
     status: PlaybackStatus,
@@ -245,6 +329,11 @@ impl LumeApp {
         let local_tracks = db_raw.list_local_tracks().unwrap_or_default();
         let liked_tracks = db_raw.list_unified_liked_tracks().unwrap_or_default();
         let session = db_raw.load_playback_session().unwrap_or(None);
+        let pending_mutations_count = db_raw.count_pending_mutations().unwrap_or(0);
+
+        let token_store = TokenStore::open_default();
+        let tokens = token_store.load().unwrap_or_default();
+        let spotify_client_id_input = config.spotify_client_id.clone().unwrap_or_default();
 
         let art_cache = Arc::new(Mutex::new(ArtCache::new(
             ArtCache::default_cache_dir(),
@@ -289,6 +378,8 @@ impl LumeApp {
             db_path,
             db,
             art_cache,
+            token_store,
+            tokens,
             audio,
             main_window: None,
             window_visible: true,
@@ -307,12 +398,23 @@ impl LumeApp {
             liked_tracks,
             playlist_tracks: Vec::new(),
             search_results: Vec::new(),
+            spotify_search_results: Vec::new(),
             ytm_search_results: Vec::new(),
+            searching_spotify: false,
             searching_ytm: false,
             resolving_stream: false,
             search_request_id: 0,
             play_request_id: 0,
             yt_dlp_detected,
+            spotify_client_id_input,
+            spotify_profile: None,
+            spotify_lapsed: false,
+            spotify_logging_in_web: false,
+            spotify_logging_in_playback: false,
+            spotify_syncing: false,
+            spotify_sync_summary: None,
+            pending_mutations_count,
+            importing_url: false,
             queue,
             status: PlaybackStatus::Stopped,
             source_used: None,
@@ -372,6 +474,17 @@ impl LumeApp {
                 .take(MAX_IN_MEM_ART_HANDLES)
                 .collect();
             startup_tasks.push(app.preload_thumbnails_task(keys));
+        }
+
+        if app.tokens.web_api.is_some()
+            && app
+                .config
+                .spotify_client_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+        {
+            app.spotify_syncing = true;
+            startup_tasks.push(app.spawn_spotify_sync_task());
         }
 
         (app, Task::batch(startup_tasks))
@@ -683,16 +796,121 @@ impl LumeApp {
                 self.modal_error = None;
             }
             Message::ImportSpotifyUrlSubmitted => {
-                let url = self.import_url_input.trim();
-                if url.contains("open.spotify.com/playlist/") {
-                    self.modal_error = Some(
-                        "Spotify URL Importer is ready to connect in Phase 3.".to_string(),
-                    );
-                } else {
-                    self.modal_error =
-                        Some("Enter a valid https://open.spotify.com/playlist/... URL.".to_string());
+                if self.importing_url {
+                    return Task::none();
+                }
+                let url = self.import_url_input.trim().to_string();
+                if let Err(err) = lume_providers::extract_spotify_playlist_id(&url) {
+                    self.modal_error = Some(err.to_string());
+                    return Task::none();
+                }
+                self.importing_url = true;
+                self.modal_error = None;
+                let db_path = self.db_path.clone();
+                return Task::perform(
+                    async move {
+                        let imported = import_spotify_playlist_url(&url)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        tokio::task::spawn_blocking(move || {
+                            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+                            db.upsert_imported_spotify_playlist(
+                                &imported.name,
+                                &imported.source_url,
+                                &imported.tracks,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::SpotifyImportFinished,
+                );
+            }
+            Message::SpotifyImportFinished(res) => {
+                self.importing_url = false;
+                match res {
+                    Ok(playlist) => {
+                        self.show_import_url_modal = false;
+                        self.import_url_input.clear();
+                        self.modal_error = None;
+                        if let Ok(db) = self.db.lock() {
+                            self.playlists = db.list_playlists().unwrap_or_default();
+                            self.playlist_tracks =
+                                db.get_playlist_tracks(&playlist.id).unwrap_or_default();
+                        }
+                        self.nav = ActiveNav::Playlist(playlist.id.clone());
+                        self.status_toast = Some(format!(
+                            "Imported \"{}\" ({} tracks)",
+                            playlist.name, playlist.track_count
+                        ));
+                        let keys = self.missing_art_keys(&self.playlist_tracks);
+                        return self.preload_thumbnails_task(keys);
+                    }
+                    Err(err) => {
+                        self.modal_error = Some(err);
+                    }
                 }
             }
+            Message::RematchYoutubeFallback(track) => {
+                self.open_track_menu_uid = None;
+                if !matches!(track.source, TrackSource::Spotify { .. }) {
+                    return Task::none();
+                }
+                let is_current = self
+                    .queue
+                    .current()
+                    .map(|c| c.uid == track.uid)
+                    .unwrap_or(false);
+                if is_current {
+                    self.play_request_id = self.play_request_id.wrapping_add(1);
+                    let req_id = self.play_request_id;
+                    self.resolving_stream = true;
+                    self.source_used = Some(PlaybackSourceUsed::YouTubeFallback);
+                    self.status = PlaybackStatus::Buffering;
+                    self.status_toast =
+                        Some(format!("Re-matching \"{}\" on YouTube Music...", track.title));
+                    if let Some(audio) = &self.audio {
+                        let _ = audio.send(AudioCommand::Stop);
+                    }
+                    self.smtc.set_playback(PlaybackStatus::Buffering, 0);
+                    return self.resolve_spotify_fallback_stream_task(req_id, track, true);
+                }
+
+                self.status_toast =
+                    Some(format!("Re-matching \"{}\" on YouTube Music...", track.title));
+                let db = Arc::clone(&self.db);
+                let yt_dlp_path = self.config.yt_dlp_path.clone();
+                let track_for_msg = track.clone();
+                return Task::perform(
+                    async move {
+                        let ytm = YouTubeMusicProvider::new(
+                            YouTubeMusicProvider::default_cache_dir(),
+                            yt_dlp_path,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let matched = resolve_spotify_to_ytm_video_id(&track, &db, &ytm, true)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(matched.yt_video_id)
+                    },
+                    move |result| Message::RematchFinished {
+                        track: track_for_msg,
+                        result,
+                    },
+                );
+            }
+            Message::RematchFinished { track, result } => match result {
+                Ok(video_id) => {
+                    self.status_toast = Some(format!(
+                        "Updated YouTube fallback match for \"{}\" ({video_id})",
+                        track.title
+                    ));
+                }
+                Err(err) => {
+                    self.status_toast = Some(format!("Re-match failed: {err}"));
+                }
+            },
             Message::AddTrackToPlaylist { playlist_id, track } => {
                 self.open_track_menu_uid = None;
                 if let Ok(db) = self.db.lock() {
@@ -754,7 +972,9 @@ impl LumeApp {
             Message::SearchInputChanged(val) => {
                 self.search_query = val;
                 if self.search_query.trim().is_empty() {
+                    self.spotify_search_results.clear();
                     self.ytm_search_results.clear();
+                    self.searching_spotify = false;
                     self.searching_ytm = false;
                 }
                 self.refresh_search_results();
@@ -768,31 +988,24 @@ impl LumeApp {
                 self.nav = ActiveNav::Search;
                 self.refresh_search_results();
                 let query = self.search_query.trim().to_string();
-                if !query.is_empty()
-                    && matches!(
-                        self.source_filter,
-                        SourceFilter::All | SourceFilter::YouTubeMusic
-                    )
-                {
-                    self.search_request_id = self.search_request_id.wrapping_add(1);
-                    let req_id = self.search_request_id;
-                    self.searching_ytm = true;
-                    return self.spawn_ytm_search_task(query, req_id);
+                if !query.is_empty() {
+                    return self.trigger_remote_search_tasks(query);
                 }
             }
             Message::SourceFilterChanged(filter) => {
                 self.source_filter = filter;
                 let query = self.search_query.trim().to_string();
-                if matches!(self.nav, ActiveNav::Search)
-                    && matches!(filter, SourceFilter::YouTubeMusic | SourceFilter::All)
-                    && !query.is_empty()
-                    && self.ytm_search_results.is_empty()
-                    && !self.searching_ytm
-                {
-                    self.search_request_id = self.search_request_id.wrapping_add(1);
-                    let req_id = self.search_request_id;
-                    self.searching_ytm = true;
-                    return self.spawn_ytm_search_task(query, req_id);
+                if matches!(self.nav, ActiveNav::Search) && !query.is_empty() {
+                    let need_ytm = matches!(filter, SourceFilter::YouTubeMusic | SourceFilter::All)
+                        && self.ytm_search_results.is_empty()
+                        && !self.searching_ytm;
+                    let need_spotify = matches!(filter, SourceFilter::Spotify | SourceFilter::All)
+                        && self.can_query_spotify_web_api()
+                        && self.spotify_search_results.is_empty()
+                        && !self.searching_spotify;
+                    if need_ytm || need_spotify {
+                        return self.trigger_remote_search_tasks(query);
+                    }
                 }
             }
             Message::YtmSearchFinished { request_id, result } => {
@@ -819,6 +1032,50 @@ impl LumeApp {
                     }
                     Err(err) => {
                         self.status_toast = Some(format!("YouTube Music search failed: {err}"));
+                    }
+                }
+            }
+            Message::SpotifySearchFinished {
+                request_id,
+                result,
+                refreshed_token,
+            } => {
+                if let Some(tok) = refreshed_token {
+                    self.tokens.web_api = Some(tok);
+                    let _ = self.token_store.save(&self.tokens);
+                }
+                if request_id != self.search_request_id {
+                    return Task::none();
+                }
+                self.searching_spotify = false;
+                match result {
+                    Ok(mut tracks) => {
+                        let liked_uids: HashSet<String> = self
+                            .liked_tracks
+                            .iter()
+                            .map(|t| t.uid.clone())
+                            .collect();
+                        for t in &mut tracks {
+                            if liked_uids.contains(&t.uid) {
+                                t.is_liked = true;
+                            }
+                        }
+                        let keys = self.missing_art_keys(&tracks);
+                        self.spotify_search_results = tracks;
+                        self.refresh_search_results();
+                        return self.preload_thumbnails_task(keys);
+                    }
+                    Err(SpotifySearchError::LapsedOrForbidden) => {
+                        self.spotify_lapsed = true;
+                        self.spotify_search_results.clear();
+                        self.refresh_search_results();
+                        self.status_toast = Some(
+                            "Spotify Web API unavailable (Premium lapsed/403) — showing Local + YouTube Music."
+                                .to_string(),
+                        );
+                    }
+                    Err(SpotifySearchError::Other(err)) => {
+                        self.status_toast = Some(format!("Spotify search failed: {err}"));
                     }
                 }
             }
@@ -857,6 +1114,11 @@ impl LumeApp {
                         t.is_liked = next_liked;
                     }
                 }
+                for t in &mut self.spotify_search_results {
+                    if t.uid == track.uid {
+                        t.is_liked = next_liked;
+                    }
+                }
                 self.refresh_search_results();
                 // Reflect on currently active queue snapshot if matching.
                 let mut snap = self.queue.to_snapshot();
@@ -866,6 +1128,72 @@ impl LumeApp {
                     }
                 }
                 self.queue = QueueEngine::from_snapshot(snap);
+
+                // Sync Spotify Like/Unlike via `/me/library` or queue in `pending_mutations`.
+                if let TrackSource::Spotify { id: sp_id } = track.source {
+                    if self.can_query_spotify_web_api() {
+                        if let (Some(client_id), Some(tok)) = (
+                            self.config.spotify_client_id.clone(),
+                            self.tokens.web_api.clone(),
+                        ) {
+                            return Task::perform(
+                                async move {
+                                    let (tok, refreshed) =
+                                        match ensure_fresh_token(&client_id, tok).await {
+                                            Ok(pair) => pair,
+                                            Err(_) => {
+                                                return Message::SpotifyLikeSynced {
+                                                    spotify_track_id: sp_id,
+                                                    liked: next_liked,
+                                                    lapsed: false,
+                                                    failed: true,
+                                                    refreshed_token: None,
+                                                };
+                                            }
+                                        };
+                                    let client = SpotifyWebClient::new();
+                                    let ids = vec![sp_id.clone()];
+                                    let res = if next_liked {
+                                        client.save_tracks(&tok.access_token, &ids).await
+                                    } else {
+                                        client.remove_tracks(&tok.access_token, &ids).await
+                                    };
+                                    let refreshed_token = refreshed.then_some(tok);
+                                    match res {
+                                        Ok(()) => Message::SpotifyLikeSynced {
+                                            spotify_track_id: sp_id,
+                                            liked: next_liked,
+                                            lapsed: false,
+                                            failed: false,
+                                            refreshed_token,
+                                        },
+                                        Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => {
+                                            Message::SpotifyLikeSynced {
+                                                spotify_track_id: sp_id,
+                                                liked: next_liked,
+                                                lapsed: true,
+                                                failed: true,
+                                                refreshed_token,
+                                            }
+                                        }
+                                        Err(_) => Message::SpotifyLikeSynced {
+                                            spotify_track_id: sp_id,
+                                            liked: next_liked,
+                                            lapsed: false,
+                                            failed: true,
+                                            refreshed_token,
+                                        },
+                                    }
+                                },
+                                |msg| msg,
+                            );
+                        }
+                    } else if let Ok(db) = self.db.lock() {
+                        let action = if next_liked { "like" } else { "unlike" };
+                        let _ = db.enqueue_pending_mutation(action, &sp_id);
+                        self.pending_mutations_count = db.count_pending_mutations().unwrap_or(0);
+                    }
+                }
             }
             Message::TogglePlayPause => {
                 return self.handle_play_pause_toggle();
@@ -1029,10 +1357,8 @@ impl LumeApp {
                         }
                     }
                     Ok(ResolvedStream::SpotifyTrack { .. }) => {
-                        self.status = PlaybackStatus::Stopped;
-                        self.status_toast = Some(
-                            "Spotify native playback arrives in Phase 3.".to_string(),
-                        );
+                        self.resolving_stream = true;
+                        return self.prepare_spotify_playback_token_task(request_id, track);
                     }
                     Err(err) => {
                         self.status = PlaybackStatus::Stopped;
@@ -1102,6 +1428,240 @@ impl LumeApp {
             Message::SetPreferYoutubeFallback(enabled) => {
                 self.config.prefer_youtube_fallback = enabled;
                 let _ = self.config.save(&self.config_path);
+            }
+            Message::SpotifyClientIdChanged(val) => {
+                self.spotify_client_id_input = val;
+            }
+            Message::SaveSpotifyClientId => {
+                let trimmed = self.spotify_client_id_input.trim().to_string();
+                self.config.spotify_client_id = (!trimmed.is_empty()).then_some(trimmed);
+                let _ = self.config.save(&self.config_path);
+                self.status_toast = Some(if self.config.spotify_client_id.is_some() {
+                    "Saved Spotify Developer Client ID.".to_string()
+                } else {
+                    "Cleared Spotify Developer Client ID.".to_string()
+                });
+            }
+            Message::ConnectSpotifyWebApi => {
+                if self.spotify_logging_in_web {
+                    return Task::none();
+                }
+                let trimmed = self.spotify_client_id_input.trim().to_string();
+                if trimmed.is_empty() {
+                    self.status_toast = Some(
+                        "Enter your Spotify Developer Client ID in Settings first.".to_string(),
+                    );
+                    return Task::none();
+                }
+                self.config.spotify_client_id = Some(trimmed.clone());
+                let _ = self.config.save(&self.config_path);
+                self.spotify_logging_in_web = true;
+                self.status_toast =
+                    Some("Opened browser for Spotify Web API sign-in...".to_string());
+                return Task::perform(
+                    async move {
+                        let tok = login_spotify_web_api(&trimmed)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let profile = SpotifyWebClient::new()
+                            .get_profile(&tok.access_token)
+                            .await
+                            .unwrap_or(SpotifyUserProfile {
+                                id: "spotify".into(),
+                                display_name: "Spotify User".into(),
+                                product: SpotifyAccountTier::Unknown,
+                            });
+                        Ok((tok, profile))
+                    },
+                    Message::SpotifyWebApiLoginFinished,
+                );
+            }
+            Message::SpotifyWebApiLoginFinished(res) => {
+                self.spotify_logging_in_web = false;
+                match res {
+                    Ok((tok, profile)) => {
+                        self.tokens.web_api = Some(tok);
+                        let _ = self.token_store.save(&self.tokens);
+                        self.spotify_lapsed = false;
+                        self.status_toast = Some(format!(
+                            "Connected Spotify Library as {} — syncing playlists...",
+                            profile.display_name
+                        ));
+                        self.spotify_profile = Some(profile);
+                        self.spotify_syncing = true;
+                        return self.spawn_spotify_sync_task();
+                    }
+                    Err(err) => {
+                        self.status_toast = Some(format!("Spotify Web API login failed: {err}"));
+                    }
+                }
+            }
+            Message::DisconnectSpotifyWebApi => {
+                self.tokens.web_api = None;
+                let _ = self.token_store.save(&self.tokens);
+                self.spotify_profile = None;
+                self.spotify_lapsed = false;
+                self.spotify_search_results.clear();
+                self.spotify_sync_summary = None;
+                self.refresh_search_results();
+                self.status_toast = Some(
+                    "Disconnected Spotify Web API (cached playlists remain playable via YTM Fallback)."
+                        .to_string(),
+                );
+            }
+            Message::ConnectSpotifyPlayback => {
+                if self.spotify_logging_in_playback {
+                    return Task::none();
+                }
+                self.spotify_logging_in_playback = true;
+                self.status_toast = Some(
+                    "Opened browser for Spotify native playback (librespot) sign-in...".to_string(),
+                );
+                return Task::perform(
+                    async move { login_spotify_playback().await.map_err(|e| e.to_string()) },
+                    Message::SpotifyPlaybackLoginFinished,
+                );
+            }
+            Message::SpotifyPlaybackLoginFinished(res) => {
+                self.spotify_logging_in_playback = false;
+                match res {
+                    Ok(tok) => {
+                        self.tokens.playback = Some(tok);
+                        let _ = self.token_store.save(&self.tokens);
+                        self.spotify_lapsed = false;
+                        self.status_toast =
+                            Some("Connected Spotify native playback (librespot 320 kbps).".to_string());
+                    }
+                    Err(err) => {
+                        self.status_toast =
+                            Some(format!("Spotify playback login failed: {err}"));
+                    }
+                }
+            }
+            Message::DisconnectSpotifyPlayback => {
+                self.tokens.playback = None;
+                let _ = self.token_store.save(&self.tokens);
+                if let Some(audio) = &self.audio {
+                    let _ = audio.send(AudioCommand::DisconnectSpotify);
+                }
+                self.status_toast = Some(
+                    "Disconnected Spotify native playback (Spotify tracks will use Smart YTM Fallback)."
+                        .to_string(),
+                );
+            }
+            Message::SyncSpotifyLibrary => {
+                if self.spotify_syncing {
+                    return Task::none();
+                }
+                if self.tokens.web_api.is_none() {
+                    self.status_toast = Some("Connect Spotify Library first.".to_string());
+                    return Task::none();
+                }
+                self.spotify_syncing = true;
+                return self.spawn_spotify_sync_task();
+            }
+            Message::SpotifySyncFinished(res) => {
+                self.spotify_syncing = false;
+                match res {
+                    Ok(report) => {
+                        if let Some(tok) = report.refreshed_token {
+                            self.tokens.web_api = Some(tok);
+                            let _ = self.token_store.save(&self.tokens);
+                        }
+                        if let Some(profile) = report.profile {
+                            self.spotify_profile = Some(profile);
+                        }
+                        self.spotify_lapsed = report.lapsed;
+                        if let Ok(db) = self.db.lock() {
+                            self.playlists = db.list_playlists().unwrap_or_default();
+                            self.liked_tracks = db.list_unified_liked_tracks().unwrap_or_default();
+                            self.pending_mutations_count =
+                                db.count_pending_mutations().unwrap_or(0);
+                            if let ActiveNav::Playlist(pl_id) = &self.nav {
+                                self.playlist_tracks =
+                                    db.get_playlist_tracks(pl_id).unwrap_or_default();
+                            }
+                        }
+                        self.refresh_search_results();
+                        if report.lapsed {
+                            self.spotify_sync_summary = Some(
+                                "Spotify API returned 403 (Premium lapsed/restricted) — serving cached SQLite library via Smart YTM Fallback."
+                                    .to_string(),
+                            );
+                        } else {
+                            self.spotify_sync_summary = Some(format!(
+                                "Synced {} playlists • {} liked songs • {} queued likes flushed",
+                                report.synced_playlists,
+                                report.synced_liked,
+                                report.flushed_mutations
+                            ));
+                        }
+                        let keys = self.missing_art_keys(&self.liked_tracks);
+                        return self.preload_thumbnails_task(keys);
+                    }
+                    Err(err) => {
+                        self.spotify_sync_summary = Some(format!("Sync error: {err}"));
+                    }
+                }
+            }
+            Message::SpotifyPlaybackTokenReady {
+                request_id,
+                track,
+                result,
+            } => {
+                if request_id != self.play_request_id {
+                    return Task::none();
+                }
+                match result {
+                    Ok((tok, refreshed)) => {
+                        let access = tok.access_token.clone();
+                        if refreshed {
+                            self.tokens.playback = Some(tok);
+                            let _ = self.token_store.save(&self.tokens);
+                        }
+                        if let TrackSource::Spotify { id: sp_id } = &track.source {
+                            self.resolving_stream = false;
+                            self.source_used = Some(PlaybackSourceUsed::SpotifyNative);
+                            if let Some(audio) = &self.audio {
+                                let _ = audio.send(AudioCommand::LoadSpotify {
+                                    spotify_id: sp_id.clone(),
+                                    track_uid: track.uid,
+                                    duration_ms: track.duration_ms,
+                                    access_token: access,
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.source_used = Some(PlaybackSourceUsed::YouTubeFallback);
+                        self.status_toast = Some(format!(
+                            "Spotify playback token unavailable ({err}) — using Smart YouTube Fallback."
+                        ));
+                        return self.resolve_spotify_fallback_stream_task(request_id, track, false);
+                    }
+                }
+            }
+            Message::SpotifyLikeSynced {
+                spotify_track_id,
+                liked,
+                lapsed,
+                failed,
+                refreshed_token,
+            } => {
+                if let Some(tok) = refreshed_token {
+                    self.tokens.web_api = Some(tok);
+                    let _ = self.token_store.save(&self.tokens);
+                }
+                if lapsed {
+                    self.spotify_lapsed = true;
+                }
+                if failed {
+                    if let Ok(db) = self.db.lock() {
+                        let action = if liked { "like" } else { "unlike" };
+                        let _ = db.enqueue_pending_mutation(action, &spotify_track_id);
+                        self.pending_mutations_count = db.count_pending_mutations().unwrap_or(0);
+                    }
+                }
             }
             Message::PickYtDlpBinary => {
                 return Task::perform(
@@ -1220,6 +1780,22 @@ impl LumeApp {
                     }
                     QueueActionResult::Stopped => self.stop_playback(),
                 },
+                AudioEvent::SpotifyFallbackNeeded { track_uid, reason } => {
+                    if let Some(current) = self.queue.current().cloned() {
+                        if current.uid == track_uid
+                            && matches!(current.source, TrackSource::Spotify { .. })
+                        {
+                            self.play_request_id = self.play_request_id.wrapping_add(1);
+                            let req_id = self.play_request_id;
+                            self.resolving_stream = true;
+                            self.source_used = Some(PlaybackSourceUsed::YouTubeFallback);
+                            self.status = PlaybackStatus::Buffering;
+                            self.status_toast = Some(reason);
+                            self.smtc.set_playback(PlaybackStatus::Buffering, 0);
+                            return self.resolve_spotify_fallback_stream_task(req_id, current, false);
+                        }
+                    }
+                }
                 AudioEvent::Error(err) => {
                     self.status = PlaybackStatus::Stopped;
                     self.status_toast = Some(err);
@@ -1327,15 +1903,39 @@ impl LumeApp {
                     accent,
                 );
 
+                let connection_status = format_connection_status_pill(
+                    self.tokens.web_api.is_some(),
+                    self.tokens.playback.is_some(),
+                    self.spotify_account_tier(),
+                    self.spotify_lapsed,
+                    self.config.prefer_youtube_fallback,
+                );
+
                 let center_content: Element<'_, Message> = if matches!(self.nav, ActiveNav::Settings)
                 {
                     row![
-                        view_sidebar(&self.nav, &self.playlists, accent),
+                        view_sidebar(&self.nav, &self.playlists, connection_status, accent),
                         view_settings(
                             &self.config,
                             self.scanning_folders,
                             self.scan_summary.as_deref(),
                             self.yt_dlp_detected.as_deref(),
+                            SpotifySettingsProps {
+                                client_id_input: &self.spotify_client_id_input,
+                                web_api_connected: self.tokens.web_api.is_some(),
+                                playback_connected: self.tokens.playback.is_some(),
+                                profile_name: self
+                                    .spotify_profile
+                                    .as_ref()
+                                    .map(|p| p.display_name.as_str()),
+                                account_tier: self.spotify_account_tier(),
+                                lapsed_fallback: self.spotify_lapsed,
+                                syncing: self.spotify_syncing,
+                                logging_in_web: self.spotify_logging_in_web,
+                                logging_in_playback: self.spotify_logging_in_playback,
+                                pending_mutations: self.pending_mutations_count,
+                                sync_summary: self.spotify_sync_summary.as_deref(),
+                            },
                             accent,
                         ),
                     ]
@@ -1354,7 +1954,7 @@ impl LumeApp {
                         nav: &self.nav,
                         search_query: &self.search_query,
                         source_filter: self.source_filter,
-                        searching_remote: self.searching_ytm,
+                        searching_remote: self.searching_ytm || self.searching_spotify,
                         playlists: &self.playlists,
                         visible_tracks,
                         active_track_uid: self.queue.current().map(|t| t.uid.as_str()),
@@ -1367,6 +1967,8 @@ impl LumeApp {
                         new_playlist_input: &self.new_playlist_input,
                         show_import_url_modal: self.show_import_url_modal,
                         import_url_input: &self.import_url_input,
+                        importing_url: self.importing_url,
+                        connection_status,
                         modal_error: self.modal_error.as_deref(),
                         status_banner: self.status_toast.as_deref(),
                         accent,
@@ -1499,6 +2101,50 @@ impl LumeApp {
         }
     }
 
+    fn spotify_account_tier(&self) -> SpotifyAccountTier {
+        self.spotify_profile
+            .as_ref()
+            .map(|p| p.product)
+            .unwrap_or(SpotifyAccountTier::Unknown)
+    }
+
+    fn can_query_spotify_web_api(&self) -> bool {
+        !self.spotify_lapsed
+            && self.tokens.web_api.is_some()
+            && self
+                .config
+                .spotify_client_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+    }
+
+    fn trigger_remote_search_tasks(&mut self, query: String) -> Task<Message> {
+        self.search_request_id = self.search_request_id.wrapping_add(1);
+        let req_id = self.search_request_id;
+        let mut tasks = Vec::new();
+
+        if matches!(
+            self.source_filter,
+            SourceFilter::All | SourceFilter::YouTubeMusic
+        ) {
+            self.searching_ytm = true;
+            tasks.push(self.spawn_ytm_search_task(query.clone(), req_id));
+        }
+
+        if matches!(self.source_filter, SourceFilter::All | SourceFilter::Spotify)
+            && self.can_query_spotify_web_api()
+        {
+            self.searching_spotify = true;
+            tasks.push(self.spawn_spotify_search_task(query, req_id));
+        }
+
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
     fn refresh_search_results(&mut self) {
         let cached = if let Ok(db) = self.db.lock() {
             db.search_cached_tracks(&self.search_query, 200)
@@ -1506,7 +2152,8 @@ impl LumeApp {
         } else {
             Vec::new()
         };
-        self.search_results = merge_search_results(cached, self.ytm_search_results.clone());
+        let with_spotify = merge_search_results(cached, self.spotify_search_results.clone());
+        self.search_results = merge_search_results(with_spotify, self.ytm_search_results.clone());
     }
 
     fn missing_art_keys(&self, tracks: &[Track]) -> Vec<String> {
@@ -1605,10 +2252,29 @@ impl LumeApp {
                 tasks.push(self.resolve_ytm_stream_task(req_id, track));
             }
             TrackSource::Spotify { .. } => {
-                self.resolving_stream = false;
-                self.source_used = Some(PlaybackSourceUsed::SpotifyNative);
-                self.status_toast =
-                    Some("Spotify playback & auto-fallback arrive in Phase 3.".to_string());
+                if let Ok(db) = self.db.lock() {
+                    let _ = db.upsert_track(&track, None);
+                }
+                self.resolving_stream = true;
+                self.status = PlaybackStatus::Buffering;
+                self.status_toast = None;
+                if let Some(audio) = &self.audio {
+                    let _ = audio.send(AudioCommand::Stop);
+                }
+                self.smtc.set_playback(PlaybackStatus::Buffering, 0);
+
+                if should_attempt_spotify_native(
+                    self.config.prefer_youtube_fallback,
+                    self.tokens.playback.is_some(),
+                    self.spotify_account_tier(),
+                    self.spotify_lapsed,
+                ) {
+                    self.source_used = Some(PlaybackSourceUsed::SpotifyNative);
+                    tasks.push(self.prepare_spotify_playback_token_task(req_id, track));
+                } else {
+                    self.source_used = Some(PlaybackSourceUsed::YouTubeFallback);
+                    tasks.push(self.resolve_spotify_fallback_stream_task(req_id, track, false));
+                }
             }
         }
 
@@ -1759,6 +2425,273 @@ impl LumeApp {
                 track: track_for_msg,
                 result,
             },
+        )
+    }
+
+    fn prepare_spotify_playback_token_task(&self, request_id: u64, track: Track) -> Task<Message> {
+        let current_tok = self.tokens.playback.clone();
+        let track_for_msg = track.clone();
+        Task::perform(
+            async move {
+                let Some(tok) = current_tok else {
+                    return Err("Spotify playback not signed in".to_string());
+                };
+                ensure_fresh_token(SPOTIFY_PLAYBACK_CLIENT_ID, tok)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::SpotifyPlaybackTokenReady {
+                request_id,
+                track: track_for_msg,
+                result,
+            },
+        )
+    }
+
+    fn resolve_spotify_fallback_stream_task(
+        &self,
+        request_id: u64,
+        track: Track,
+        force_rematch: bool,
+    ) -> Task<Message> {
+        let db = Arc::clone(&self.db);
+        let yt_dlp_path = self.config.yt_dlp_path.clone();
+        let track_for_msg = track.clone();
+        Task::perform(
+            async move {
+                let ytm = YouTubeMusicProvider::new(
+                    YouTubeMusicProvider::default_cache_dir(),
+                    yt_dlp_path,
+                )
+                .map_err(|e| e.to_string())?;
+                let matched = resolve_spotify_to_ytm_video_id(&track, &db, &ytm, force_rematch)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let ytm_proxy = Track {
+                    uid: format!("ytm:{}", matched.yt_video_id),
+                    source: TrackSource::YouTubeMusic {
+                        video_id: matched.yt_video_id,
+                    },
+                    title: track.title.clone(),
+                    artists: track.artists.clone(),
+                    album: track.album.clone(),
+                    duration_ms: track.duration_ms,
+                    artwork_ref: track.artwork_ref.clone(),
+                    is_liked: track.is_liked,
+                };
+                let resolved = ytm
+                    .resolve_stream(&ytm_proxy)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(rewrite_stream_as_youtube_fallback(resolved))
+            },
+            move |result| Message::StreamResolved {
+                request_id,
+                track: track_for_msg,
+                result,
+            },
+        )
+    }
+
+    fn spawn_spotify_search_task(&self, query: String, request_id: u64) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        Task::perform(
+            async move {
+                let Some(tok) = tok else {
+                    return Message::SpotifySearchFinished {
+                        request_id,
+                        result: Err(SpotifySearchError::LapsedOrForbidden),
+                        refreshed_token: None,
+                    };
+                };
+                let (tok, refreshed) = match ensure_fresh_token(&client_id, tok).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        return Message::SpotifySearchFinished {
+                            request_id,
+                            result: Err(SpotifySearchError::Other(e.to_string())),
+                            refreshed_token: None,
+                        };
+                    }
+                };
+                let client = SpotifyWebClient::new();
+                let res = client.search_tracks(&tok.access_token, &query, 20).await;
+                let refreshed_token = refreshed.then_some(tok);
+                match res {
+                    Ok(tracks) => Message::SpotifySearchFinished {
+                        request_id,
+                        result: Ok(tracks),
+                        refreshed_token,
+                    },
+                    Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
+                    | Err(SpotifyApiError::Unauthorized) => Message::SpotifySearchFinished {
+                        request_id,
+                        result: Err(SpotifySearchError::LapsedOrForbidden),
+                        refreshed_token,
+                    },
+                    Err(err) => Message::SpotifySearchFinished {
+                        request_id,
+                        result: Err(SpotifySearchError::Other(err.to_string())),
+                        refreshed_token,
+                    },
+                }
+            },
+            |msg| msg,
+        )
+    }
+
+    fn spawn_spotify_sync_task(&self) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        let db_path = self.db_path.clone();
+
+        Task::perform(
+            async move {
+                let Some(tok) = tok else {
+                    return Err("Spotify Web API is not connected.".to_string());
+                };
+                let (tok, refreshed) = ensure_fresh_token(&client_id, tok)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let access = tok.access_token.clone();
+                let refreshed_token = refreshed.then_some(tok);
+
+                let client = SpotifyWebClient::new();
+                let profile = match client.get_profile(&access).await {
+                    Ok(p) => Some(p),
+                    Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => {
+                        return Ok(SpotifySyncReport {
+                            profile: None,
+                            synced_playlists: 0,
+                            synced_liked: 0,
+                            flushed_mutations: 0,
+                            lapsed: true,
+                            refreshed_token,
+                        });
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
+
+                // Flush queued offline Like/Unlike mutations first (never hold !Sync Database across .await).
+                let db_path_flush = db_path.clone();
+                let pending = tokio::task::spawn_blocking(move || {
+                    Database::open(&db_path_flush)
+                        .and_then(|db| db.list_pending_mutations())
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+
+                let mut flushed_ids = Vec::new();
+                for item in pending {
+                    let ids = vec![item.spotify_track_id.clone()];
+                    let res = match item.action.as_str() {
+                        "like" => client.save_tracks(&access, &ids).await,
+                        "unlike" => client.remove_tracks(&access, &ids).await,
+                        _ => Ok(()),
+                    };
+                    match res {
+                        Ok(()) => flushed_ids.push(item.id),
+                        Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => {
+                            if !flushed_ids.is_empty() {
+                                let p = db_path.clone();
+                                let done = flushed_ids.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if let Ok(db) = Database::open(&p) {
+                                        for id in done {
+                                            let _ = db.delete_pending_mutation(id);
+                                        }
+                                    }
+                                })
+                                .await;
+                            }
+                            return Ok(SpotifySyncReport {
+                                profile,
+                                synced_playlists: 0,
+                                synced_liked: 0,
+                                flushed_mutations: flushed_ids.len(),
+                                lapsed: true,
+                                refreshed_token,
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let flushed_mutations = flushed_ids.len();
+                if !flushed_ids.is_empty() {
+                    let p = db_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(db) = Database::open(&p) {
+                            for id in flushed_ids {
+                                let _ = db.delete_pending_mutation(id);
+                            }
+                        }
+                    })
+                    .await;
+                }
+
+                let playlists = match client.get_playlists(&access).await {
+                    Ok(pls) => pls,
+                    Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => {
+                        return Ok(SpotifySyncReport {
+                            profile,
+                            synced_playlists: 0,
+                            synced_liked: 0,
+                            flushed_mutations,
+                            lapsed: true,
+                            refreshed_token,
+                        });
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
+
+                let mut playlist_payloads = Vec::with_capacity(playlists.len());
+                for pl in playlists {
+                    match client.get_playlist_tracks(&access, &pl.id).await {
+                        Ok(tracks) => playlist_payloads.push((pl.id, pl.name, tracks)),
+                        Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => continue,
+                        Err(_) => continue,
+                    }
+                }
+
+                let liked_tracks = match client.get_liked_tracks(&access).await {
+                    Ok(t) => t,
+                    Err(SpotifyApiError::PremiumRequiredOrForbidden(_)) => Vec::new(),
+                    Err(_) => Vec::new(),
+                };
+
+                let synced_playlists = playlist_payloads.len();
+                let synced_liked = liked_tracks.len();
+
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+                    let mut keep_ids = HashSet::with_capacity(playlist_payloads.len());
+                    for (id, name, tracks) in playlist_payloads {
+                        keep_ids.insert(id.clone());
+                        db.upsert_synced_spotify_playlist(&id, &name, &tracks)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    let _ = db.prune_stale_synced_spotify_playlists(&keep_ids);
+                    if !liked_tracks.is_empty() {
+                        db.sync_spotify_liked_tracks(&liked_tracks)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+
+                Ok(SpotifySyncReport {
+                    profile,
+                    synced_playlists,
+                    synced_liked,
+                    flushed_mutations,
+                    lapsed: false,
+                    refreshed_token,
+                })
+            },
+            Message::SpotifySyncFinished,
         )
     }
 
@@ -1964,5 +2897,69 @@ mod tests {
         assert_eq!(merged.len(), 3);
         let ytm1 = merged.iter().find(|t| t.uid == "ytm:vid1").unwrap();
         assert!(ytm1.is_liked, "cached liked state must be preserved");
+    }
+
+    #[test]
+    fn spotify_native_routing_respects_fallback_preference_tier_and_lapsed_state() {
+        assert!(should_attempt_spotify_native(
+            false,
+            true,
+            SpotifyAccountTier::Premium,
+            false
+        ));
+        assert!(should_attempt_spotify_native(
+            false,
+            true,
+            SpotifyAccountTier::Unknown,
+            false
+        ));
+        assert!(!should_attempt_spotify_native(
+            true,
+            true,
+            SpotifyAccountTier::Premium,
+            false
+        ));
+        assert!(!should_attempt_spotify_native(
+            false,
+            false,
+            SpotifyAccountTier::Premium,
+            false
+        ));
+        assert!(!should_attempt_spotify_native(
+            false,
+            true,
+            SpotifyAccountTier::Free,
+            false
+        ));
+        assert!(!should_attempt_spotify_native(
+            false,
+            true,
+            SpotifyAccountTier::Premium,
+            true
+        ));
+    }
+
+    #[test]
+    fn connection_status_pill_reflects_active_spotify_and_fallback_modes() {
+        assert_eq!(
+            format_connection_status_pill(false, false, SpotifyAccountTier::Unknown, false, false),
+            "Local + YouTube Music"
+        );
+        assert_eq!(
+            format_connection_status_pill(true, true, SpotifyAccountTier::Premium, false, false),
+            "Spotify Premium"
+        );
+        assert_eq!(
+            format_connection_status_pill(true, true, SpotifyAccountTier::Premium, true, false),
+            "Spotify Lapsed • YTM"
+        );
+        assert_eq!(
+            format_connection_status_pill(true, false, SpotifyAccountTier::Free, false, false),
+            "Spotify Free • YTM"
+        );
+        assert_eq!(
+            format_connection_status_pill(true, true, SpotifyAccountTier::Premium, false, true),
+            "Spotify • YTM Fallback"
+        );
     }
 }
