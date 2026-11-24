@@ -17,4 +17,7 @@ pub enum StorageError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("token encryption error: {0}")]
+    Crypto(String),
 }

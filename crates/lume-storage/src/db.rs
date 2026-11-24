@@ -26,6 +26,24 @@ pub struct PlaybackSession {
     pub muted: bool,
 }
 
+/// Cached Spotify track ID -> YouTube Music video ID mapping for Smart Auto-Fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct YtMapping {
+    pub spotify_track_id: String,
+    pub yt_video_id: String,
+    pub confidence: f32,
+    pub updated_at: i64,
+}
+
+/// Queued Spotify `/me/library` mutation recorded while offline or during a Premium lapse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMutation {
+    pub id: i64,
+    pub action: String,
+    pub spotify_track_id: String,
+    pub created_at: i64,
+}
+
 /// Thread-local / owned SQLite persistence layer for Lume Music.
 pub struct Database {
     conn: Connection,
@@ -560,6 +578,123 @@ impl Database {
         Ok(())
     }
 
+    pub fn upsert_imported_spotify_playlist(
+        &self,
+        name: &str,
+        source_url: &str,
+        tracks: &[Track],
+    ) -> Result<Playlist, StorageError> {
+        let trimmed_name = name.trim();
+        let final_name = if trimmed_name.is_empty() {
+            "Imported Spotify Playlist"
+        } else {
+            trimmed_name
+        };
+        for track in tracks {
+            self.upsert_track(track, None)?;
+        }
+
+        let existing_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM playlists WHERE origin = 'spotify_imported' AND source_url = ?1",
+                [source_url],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = now_epoch_s();
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO playlists (id, name, origin, source_url, is_editable, created_at, updated_at)
+            VALUES (?1, ?2, 'spotify_imported', ?3, 1, ?4, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source_url = excluded.source_url,
+                origin = 'spotify_imported',
+                is_editable = 1,
+                updated_at = excluded.updated_at
+            "#,
+            params![id, final_name, source_url, now],
+        )?;
+        tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", [&id])?;
+        for (pos, track) in tracks.iter().enumerate() {
+            tx.execute(
+                r#"
+                INSERT INTO playlist_tracks (playlist_id, track_uid, position, added_at)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![id, track.uid, pos as i64, now],
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(Playlist {
+            id,
+            name: final_name.to_string(),
+            origin: PlaylistOrigin::SpotifyImported {
+                source_url: source_url.to_string(),
+            },
+            track_count: tracks.len(),
+        })
+    }
+
+    pub fn prune_stale_synced_spotify_playlists(
+        &self,
+        keep_ids: &HashSet<String>,
+    ) -> Result<usize, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM playlists WHERE origin = 'spotify_synced'")?;
+        let existing: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut removed = 0usize;
+        for id in existing {
+            if !keep_ids.contains(&id) {
+                self.conn
+                    .execute("DELETE FROM playlists WHERE id = ?1", [&id])?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn sync_spotify_liked_tracks(&self, tracks: &[Track]) -> Result<(), StorageError> {
+        let keep_uids: HashSet<String> = tracks.iter().map(|t| t.uid.clone()).collect();
+        for track in tracks {
+            let mut liked = track.clone();
+            liked.is_liked = true;
+            self.upsert_track(&liked, None)?;
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uid FROM tracks WHERE source_type = 'spotify' AND is_liked = 1")?;
+        let existing_liked: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        for uid in existing_liked {
+            if !keep_uids.contains(&uid) {
+                self.conn.execute(
+                    "UPDATE tracks SET is_liked = 0 WHERE uid = ?1",
+                    [&uid],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM local_favorites WHERE track_uid = ?1",
+                    [&uid],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_local_favorite(&self, track_uid: &str, liked: bool) -> Result<(), StorageError> {
         let updated = self.conn.execute(
             "UPDATE tracks SET is_liked = ?1 WHERE uid = ?2",
@@ -607,9 +742,102 @@ impl Database {
         action: &str,
         spotify_track_id: &str,
     ) -> Result<(), StorageError> {
+        // Deduplicate: replace any older pending mutation for the same Spotify track ID
+        // so rapid Like -> Unlike -> Like only replays the final desired state.
+        self.conn.execute(
+            "DELETE FROM pending_mutations WHERE spotify_track_id = ?1",
+            [spotify_track_id],
+        )?;
         self.conn.execute(
             "INSERT INTO pending_mutations (action, spotify_track_id, created_at) VALUES (?1, ?2, ?3)",
             params![action, spotify_track_id, now_epoch_s()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pending_mutations(&self) -> Result<Vec<PendingMutation>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action, spotify_track_id, created_at FROM pending_mutations ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PendingMutation {
+                id: r.get(0)?,
+                action: r.get(1)?,
+                spotify_track_id: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_pending_mutation(&self, id: i64) -> Result<(), StorageError> {
+        self.conn
+            .execute("DELETE FROM pending_mutations WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn count_pending_mutations(&self) -> Result<usize, StorageError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM pending_mutations", [], |r| r.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn get_yt_mapping(
+        &self,
+        spotify_track_id: &str,
+    ) -> Result<Option<YtMapping>, StorageError> {
+        let row = self
+            .conn
+            .query_row(
+                r#"
+                SELECT spotify_track_id, yt_video_id, confidence, updated_at
+                FROM yt_mappings
+                WHERE spotify_track_id = ?1
+                "#,
+                [spotify_track_id],
+                |r| {
+                    let confidence: f64 = r.get(2)?;
+                    Ok(YtMapping {
+                        spotify_track_id: r.get(0)?,
+                        yt_video_id: r.get(1)?,
+                        confidence: confidence as f32,
+                        updated_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn put_yt_mapping(
+        &self,
+        spotify_track_id: &str,
+        yt_video_id: &str,
+        confidence: f32,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            r#"
+            INSERT INTO yt_mappings (spotify_track_id, yt_video_id, confidence, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(spotify_track_id) DO UPDATE SET
+                yt_video_id = excluded.yt_video_id,
+                confidence = excluded.confidence,
+                updated_at = excluded.updated_at
+            "#,
+            params![spotify_track_id, yt_video_id, confidence as f64, now_epoch_s()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_yt_mapping(&self, spotify_track_id: &str) -> Result<(), StorageError> {
+        self.conn.execute(
+            "DELETE FROM yt_mappings WHERE spotify_track_id = ?1",
+            [spotify_track_id],
         )?;
         Ok(())
     }
@@ -954,5 +1182,90 @@ mod tests {
                 .unwrap(),
             LyricsCacheLookup::Miss
         );
+    }
+
+    #[test]
+    fn yt_mappings_crud_and_overwrite_work() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.get_yt_mapping("sp_track_1").unwrap().is_none());
+
+        db.put_yt_mapping("sp_track_1", "yt_vid_a", 0.92).unwrap();
+        let m1 = db.get_yt_mapping("sp_track_1").unwrap().unwrap();
+        assert_eq!(m1.yt_video_id, "yt_vid_a");
+        assert!((m1.confidence - 0.92).abs() < 1e-4);
+
+        db.put_yt_mapping("sp_track_1", "yt_vid_b", 0.98).unwrap();
+        let m2 = db.get_yt_mapping("sp_track_1").unwrap().unwrap();
+        assert_eq!(m2.yt_video_id, "yt_vid_b");
+
+        db.delete_yt_mapping("sp_track_1").unwrap();
+        assert!(db.get_yt_mapping("sp_track_1").unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_mutations_deduplicates_per_track_and_deletes_cleanly() {
+        let db = Database::open_in_memory().unwrap();
+        db.enqueue_pending_mutation("like", "sp_1").unwrap();
+        db.enqueue_pending_mutation("unlike", "sp_1").unwrap();
+        db.enqueue_pending_mutation("like", "sp_2").unwrap();
+
+        let pending = db.list_pending_mutations().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].spotify_track_id, "sp_1");
+        assert_eq!(pending[0].action, "unlike");
+        assert_eq!(pending[1].spotify_track_id, "sp_2");
+        assert_eq!(pending[1].action, "like");
+
+        db.delete_pending_mutation(pending[0].id).unwrap();
+        assert_eq!(db.count_pending_mutations().unwrap(), 1);
+    }
+
+    #[test]
+    fn imported_spotify_playlist_is_editable_and_updates_by_source_url() {
+        let db = Database::open_in_memory().unwrap();
+        let sp1 = track_sp("sp_a", "Track A", false);
+        let sp2 = track_sp("sp_b", "Track B", false);
+        let url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+
+        let pl1 = db
+            .upsert_imported_spotify_playlist("Today's Top Hits", url, &[sp1.clone()])
+            .unwrap();
+        assert!(pl1.origin.is_editable());
+        assert_eq!(pl1.track_count, 1);
+
+        // Re-importing the same URL updates in place instead of creating duplicates.
+        let pl2 = db
+            .upsert_imported_spotify_playlist("Today's Top Hits", url, &[sp1.clone(), sp2.clone()])
+            .unwrap();
+        assert_eq!(pl1.id, pl2.id);
+        assert_eq!(pl2.track_count, 2);
+
+        // Editable locally: rename succeeds.
+        db.rename_playlist(&pl2.id, "My Imported Mix").unwrap();
+        let tracks = db.get_playlist_tracks(&pl2.id).unwrap();
+        assert_eq!(tracks.len(), 2);
+    }
+
+    #[test]
+    fn sync_spotify_liked_tracks_reconciles_spotify_while_keeping_local_favorites() {
+        let db = Database::open_in_memory().unwrap();
+        let sp_old = track_sp("sp_old", "Old Fav", true);
+        let sp_new = track_sp("sp_new", "New Fav", true);
+        let ytm = track_ytm("yt_keep", "Keep YTM");
+
+        db.upsert_track(&sp_old, None).unwrap();
+        db.upsert_track(&ytm, None).unwrap();
+        db.set_local_favorite(&ytm.uid, true).unwrap();
+
+        db.sync_spotify_liked_tracks(&[sp_new.clone()]).unwrap();
+        let liked_uids: HashSet<String> = db
+            .list_unified_liked_tracks()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.uid)
+            .collect();
+        assert!(liked_uids.contains(&sp_new.uid));
+        assert!(liked_uids.contains(&ytm.uid));
+        assert!(!liked_uids.contains(&sp_old.uid));
     }
 }
