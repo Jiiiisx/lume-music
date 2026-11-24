@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod importer;
+pub mod matcher;
 
 pub use api::{
     SpotifyAccountTier, SpotifyApiError, SpotifyPlaylistSummary, SpotifyUserProfile,
@@ -14,4 +15,8 @@ pub use auth::{
 pub use importer::{
     canonical_playlist_url, extract_spotify_playlist_id, import_spotify_playlist_from_embed_url,
     import_spotify_playlist_url, parse_spotify_embed_html, ImportedSpotifyPlaylist,
+};
+pub use matcher::{
+    build_fallback_search_query, clean_track_title, resolve_spotify_to_ytm_video_id,
+    score_ytm_candidate, select_best_ytm_match, FallbackMatch,
 };
