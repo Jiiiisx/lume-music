@@ -18,14 +18,14 @@
 
 Heavy Electron/CEF desktop music clients routinely consume **1–2 GB of RAM** across nearly a dozen background processes and break completely whenever a Spotify Premium subscription temporarily lapses or third-party lyrics plugins go down.
 
-**Lume Music** is built natively in Rust (`iced 0.14`, `wgpu`, `symphonia`/`rodio`, `librespot`, `rustypipe`, `rusqlite`) to keep the visual polish and animated lyrics experience you love — at a fraction of the memory footprint and with seamless multi-source resilience.
+**Lume Music** is built natively in Rust (`iced 0.14`, `wgpu`, `symphonia`/`rodio`, `librespot`, `rustypipe`, `rusqlite`) to keep the visual polish and animated lyrics experience you love at a fraction of the memory footprint and with seamless multi-source resilience.
 
 ---
 
 ## Features
 
 ### Unified Multi-Source Playback & Queue
-- **Spotify Premium (Native):** Direct Ogg Vorbis playback via `librespot` + Spotify Web API sync (Dual OAuth 2.0 PKCE with Windows **DPAPI-encrypted** token storage — never stored in plaintext).
+- **Spotify Premium (Native):** Direct Ogg Vorbis playback via `librespot` + Spotify Web API sync (Dual OAuth 2.0 PKCE with Windows **DPAPI-encrypted** token storage never stored in plaintext).
 - **Smart Auto-Fallback (Spotify → YouTube Music):** Playlists and Liked Songs are cached in local SQLite. If Spotify Premium lapses, Web API returns `403`, or *"Prefer YouTube Fallback"* is enabled, tracks automatically match and stream via YouTube Music (`yt_mappings` cached in SQLite, plus one-click **Re-match YouTube track** override). Like/Unlike mutations queue in `pending_mutations` for sync upon renewal.
 - **Public Playlist & CSV Import:** Import public/editorial Spotify playlists via URL (embed metadata parser) or Exportify `.csv` files into locally editable playlists.
 - **Anonymous YouTube Music (No Google Login):** Fast InnerTube search, trending charts (Indonesia & Global), chunked `Range` seekable temp-file streaming (`%LOCALAPPDATA%\LumeMusic\cache\stream-*.tmp`, deleted automatically on track change/exit), and automatic `yt-dlp` fallback when YouTube enforces PO-token `403` blocks.
@@ -33,7 +33,7 @@ Heavy Electron/CEF desktop music clients routinely consume **1–2 GB of RAM** a
 - **Unified Library:** Cross-source **Liked Songs**, custom mixed-source playlists (CRUD + reordering + persistent sorting by Custom, Recently Added, Title, Artist, Album, Duration), **Home** view with play history & charts, and a unified cross-source **Queue** with Shuffle & Repeat (`Off` / `All` / `One`).
 
 ### Visuals & Animated Synced Lyrics
-- **Hybrid Glassmorphism UI:** Frameless custom window with three visual modes — **Dynamic Album Blur** (custom `wgpu` fragment shader with WCAG AA luminance floor for bright album covers), **Windows 11 Native Acrylic** (`HostBackdropBrush` via DirectComposition), and **PureClear**.
+- **Hybrid Glassmorphism UI:** Frameless custom window with three visual modes **Dynamic Album Blur** (custom `wgpu` fragment shader with WCAG AA luminance floor for bright album covers), **Windows 11 Native Acrylic** (`HostBackdropBrush` via DirectComposition), and **PureClear**.
 - **2-Column Now Playing & Lyrics Cinema View:**
   - Multi-provider resilient lyrics chain: SQLite cache → local sidecar `.ttml`/`.lrc` & embedded tags → **LyricsPlus** (Apple Music / Musixmatch / QQ syllable-synced) → **LRCLIB**.
   - Custom `SpicyLyricLine` bloom/character-sweep highlight, interlude indicator dots, critically-damped spring auto-scroll, click-any-line-to-seek, and *Spicy Smooth* vs. *Ultra-Light* visual toggle.
