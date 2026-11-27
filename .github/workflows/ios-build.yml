@@ -33,10 +33,10 @@ jobs:
       - name: Build lume-ffi static library for iOS (aarch64-apple-ios)
         run: |
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          export IPHONEOS_DEPLOYMENT_TARGET="15.1"
+          export IPHONEOS_DEPLOYMENT_TARGET="16.4"
           export LIBCLANG_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
-          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="-isysroot ${IOS_SDK} -miphoneos-version-min=15.1"
-          export BINDGEN_EXTRA_CLANG_ARGS="-isysroot ${IOS_SDK} -miphoneos-version-min=15.1"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="-isysroot ${IOS_SDK} -miphoneos-version-min=16.4"
+          export BINDGEN_EXTRA_CLANG_ARGS="-isysroot ${IOS_SDK} -miphoneos-version-min=16.4"
           cargo build -p lume-ffi --release --target aarch64-apple-ios
 
       - name: Generate UniFFI Swift bindings & package LumeFfi.xcframework

@@ -4,8 +4,10 @@ Pod::Spec.new do |s|
   s.summary        = 'Lume Music Rust Core (UniFFI) + iOS Remote Media Controls bridge'
   s.description    = 'Exposes lume-core, lume-storage, and lume-providers to Expo React Native via UniFFI XCFramework.'
   s.author         = 'Lume Music'
+  s.license        = 'MIT'
   s.homepage       = 'https://github.com/Jiiiisx/lume-music'
-  s.platforms      = { :ios => '15.1' }
+  s.platforms      = { :ios => '16.4' }
+  s.swift_version  = '5.9'
   s.source         = { :git => '' }
   s.static_framework = true
 
