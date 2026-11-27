@@ -169,3 +169,18 @@ pub fn icon_trending<'a, Message: 'a>(size: f32, color: Color) -> Element<'a, Me
     const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>"##;
     render_svg(SVG, size, color)
 }
+
+pub fn icon_artist<'a, Message: 'a>(size: f32, color: Color) -> Element<'a, Message> {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>"##;
+    render_svg(SVG, size, color)
+}
+
+pub fn icon_disc<'a, Message: 'a>(size: f32, color: Color) -> Element<'a, Message> {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>"##;
+    render_svg(SVG, size, color)
+}
+
+pub fn icon_check<'a, Message: 'a>(size: f32, color: Color) -> Element<'a, Message> {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>"##;
+    render_svg(SVG, size, color)
+}

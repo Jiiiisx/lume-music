@@ -10,8 +10,9 @@ use lume_storage::LyricsVisualMode;
 
 use crate::lyrics_anim::{
     active_display_index, bloom_interlude_state, interlude_dot_states, line_visual_style,
-    lyrics_bottom_spacer_px, lyrics_top_spacer_px, lyrics_viewport_metrics, resolve_line_words,
-    LyricsDisplayItem, LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX, LYRICS_LINE_HEIGHT_MULT,
+    line_visual_style_continuous, lyrics_bottom_spacer_px, lyrics_top_spacer_px,
+    lyrics_viewport_metrics, resolve_line_words, LyricsDisplayItem, BLOOM_LIT_ALPHA,
+    LYRICS_INTERLUDE_HEIGHT_PX, LYRICS_ITEM_SPACING_PX, LYRICS_LINE_HEIGHT_MULT,
 };
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::queue_drawer::view_inline_queue;
@@ -62,6 +63,7 @@ pub struct LyricsViewProps<'a> {
     pub lyrics_loading: bool,
     pub lyrics_mode: LyricsVisualMode,
     pub active_scale: f32,
+    pub visual_active_idx: Option<f32>,
     pub window_width: f32,
     pub window_height: f32,
     pub active_cover: Option<&'a image::Handle>,
@@ -263,9 +265,12 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         ICON_MUTED
     };
 
-    const ART_SIZE: f32 = 332.0;
+    let art_size = (props.window_height * 0.39)
+        .min(props.window_width * 0.30)
+        .clamp(200.0, 332.0);
+    let left_stage_width = (art_size + 68.0).clamp(264.0, 400.0);
 
-    let framed_art = container(cover_art_widget(art, ART_SIZE, 20.0)).style(|_| container::Style {
+    let framed_art = container(cover_art_widget(art, art_size, 20.0)).style(|_| container::Style {
         shadow: Shadow {
             color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
             offset: Vector::new(0.0, 18.0),
@@ -280,14 +285,33 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         .font(FONT_BOLD)
         .line_height(1.22)
         .color(TEXT_PRIMARY)
-        .width(Length::Fixed(ART_SIZE));
+        .width(Length::Fixed(art_size));
 
-    let mut artist_album_col = column![text(artist)
-        .size(14)
-        .font(FONT_MEDIUM)
-        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.74))]
-    .spacing(2)
-    .width(Length::Fill);
+    let artist_el: Element<'a, Message> = if let Some(t) = track {
+        let primary_artist = t
+            .artists
+            .first()
+            .cloned()
+            .unwrap_or_else(|| t.artist_display());
+        button(text(artist).size(14).font(FONT_MEDIUM))
+            .padding([0, 0])
+            .style(crate::widgets::artist_link_button_style(accent))
+            .on_press(Message::OpenArtistByName {
+                name: primary_artist,
+                source_hint: t.source.clone(),
+            })
+            .into()
+    } else {
+        text(artist)
+            .size(14)
+            .font(FONT_MEDIUM)
+            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.74))
+            .into()
+    };
+
+    let mut artist_album_col = column![artist_el]
+        .spacing(2)
+        .width(Length::Fill);
 
     if let Some(album) = album_label {
         artist_album_col = artist_album_col.push(
@@ -346,11 +370,11 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         title_block,
         row![artist_album_col, meta_actions]
             .spacing(10)
-            .width(Length::Fixed(ART_SIZE))
+            .width(Length::Fixed(art_size))
             .align_y(Alignment::Center),
     ]
     .spacing(6)
-    .width(Length::Fixed(ART_SIZE));
+    .width(Length::Fixed(art_size));
 
     let seek_block = column![
         slider(0.0..=max_dur, cur_pos, |v| {
@@ -358,7 +382,7 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         })
         .step(250.0_f32)
         .style(seek_slider_style(accent))
-        .width(Length::Fixed(ART_SIZE)),
+        .width(Length::Fixed(art_size)),
         row![
             text(format_timestamp_ms(props.info.position_ms))
                 .size(11)
@@ -368,7 +392,7 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
                 .size(11)
                 .color(Color::from_rgba(1.0, 1.0, 1.0, 0.58)),
         ]
-        .width(Length::Fixed(ART_SIZE)),
+        .width(Length::Fixed(art_size)),
     ]
     .spacing(4);
 
@@ -443,7 +467,7 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         .width(Length::Fill),
     ]
     .spacing(10)
-    .width(Length::Fixed(ART_SIZE))
+    .width(Length::Fixed(art_size))
     .align_y(Alignment::Center);
 
     // Frameless Spicy Lyrics cinema left stage: artwork floats directly on the blurred backdrop.
@@ -459,7 +483,7 @@ pub fn view_now_playing_lyrics<'a>(props: LyricsViewProps<'a>) -> Element<'a, Me
         .spacing(14)
         .align_x(Alignment::Center),
     )
-    .width(Length::Fixed(400.0))
+    .width(Length::Fixed(left_stage_width))
     .height(Length::Fill)
     .padding(Padding {
         top: 12.0,
@@ -751,12 +775,24 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
             .width(Length::Fill)
             .align_x(Alignment::Start);
 
+        let smooth_active = props
+            .visual_active_idx
+            .or_else(|| active_idx.map(|i| i as f32));
+
         for (display_idx, item) in timeline.iter().enumerate() {
             let distance = match active_idx {
                 Some(active) => display_idx as isize - active as isize,
                 None => display_idx as isize + 1,
             };
-            let style = line_visual_style(distance, props.lyrics_mode);
+            let float_distance = match smooth_active {
+                Some(va) => (display_idx as f32) - va,
+                None => (display_idx as f32) + 1.0,
+            };
+            let style = if props.lyrics_mode == LyricsVisualMode::SpicySmooth {
+                line_visual_style_continuous(float_distance, props.lyrics_mode)
+            } else {
+                line_visual_style(distance, props.lyrics_mode)
+            };
             let is_active = distance == 0;
 
             let row_el: Element<'a, Message> = match *item {
@@ -765,11 +801,9 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                     end_ms,
                     opposite_aligned,
                 } => {
-                    let dot_alpha = if distance < 0 {
-                        (style.opacity * 0.55).max(0.08)
-                    } else {
-                        style.opacity
-                    };
+                    let past_blend = (-float_distance).clamp(0.0, 1.0);
+                    let dot_alpha =
+                        (style.opacity * (1.0 - past_blend * 0.45)).max(0.08);
                     let dots = render_interlude_dots(
                         start_ms,
                         end_ms,
@@ -797,17 +831,52 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                     let line = &lyrics.synced[line_idx];
                     let pos_ms = props.info.position_ms;
                     let bloom_fx = props.lyrics_mode == LyricsVisualMode::SpicySmooth;
-                    let base_active = if is_bg_vocal { 26.0 } else { 36.0 };
-                    let base_idle = if is_bg_vocal { 23.0 } else { 31.0 };
+                    let base_active = if is_bg_vocal {
+                        crate::lyrics_anim::LYRICS_ACTIVE_BG_FONT_PX
+                    } else {
+                        crate::lyrics_anim::LYRICS_ACTIVE_FONT_PX
+                    };
+                    let base_idle = if is_bg_vocal {
+                        crate::lyrics_anim::LYRICS_IDLE_BG_FONT_PX
+                    } else {
+                        crate::lyrics_anim::LYRICS_IDLE_FONT_PX
+                    };
 
-                    // Support overlapping duet / background lines and Bloom's 500ms settling tail
-                    // (`RushMs` + Flame settle) so lines never snap abruptly when finishing.
+                    let active_start_ms = active_idx
+                        .and_then(|ai| timeline.get(ai))
+                        .map(LyricsDisplayItem::start_ms)
+                        .unwrap_or(pos_ms);
+                    let has_exact_timing = line.end_ms.is_some()
+                        || line.words.as_ref().is_some_and(|w| !w.is_empty());
+
+                    // Only treat a non-primary line as simultaneously active when the provider
+                    // supplies exact end/word timing (e.g. TTML/LyricsPlus duets). Line-only
+                    // LRCLIB tracks never overlap, so previous lines shrink immediately.
                     let is_overlapping_active =
-                        !is_active && pos_ms >= start_ms && pos_ms <= end_ms;
-                    let is_settling = !is_active
-                        && distance == -1
+                        !is_active && has_exact_timing && pos_ms >= start_ms && pos_ms <= end_ms;
+
+                    // Continuous spring-driven focus factor (0.0 at |d|>=1 -> 1.0 at d==0) makes
+                    // both incoming active lines grow smoothly and outgoing lines shrink/dim in
+                    // lockstep with the critically-damped scroll spring.
+                    let focus_raw = (1.0 - float_distance.abs()).clamp(0.0, 1.0);
+                    let focus_smooth = focus_raw * focus_raw * (3.0 - 2.0 * focus_raw);
+
+                    // For overlapping TTML/LyricsPlus duets that finish after `active_start_ms`,
+                    // give them a smooth 320ms cubic ease-out settle after their exact `end_ms`.
+                    const DUET_SETTLE_MS: u64 = 320;
+                    let duet_settling = !is_active
+                        && !is_overlapping_active
+                        && has_exact_timing
+                        && end_ms > active_start_ms
                         && pos_ms > end_ms
-                        && pos_ms <= end_ms.saturating_add(500);
+                        && pos_ms <= end_ms.saturating_add(DUET_SETTLE_MS);
+
+                    let spring_settling = !is_active
+                        && !is_overlapping_active
+                        && bloom_fx
+                        && distance == -1
+                        && focus_smooth > 0.015;
+                    let is_settling = duet_settling || spring_settling;
 
                     let h_align = if opposite_aligned {
                         Horizontal::Right
@@ -815,22 +884,38 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                         Horizontal::Left
                     };
 
+                    let bg_dim = if is_bg_vocal { 0.78 } else { 1.0 };
+                    let past_dim = 1.0 - (-float_distance).clamp(0.0, 1.0) * 0.32;
+                    let idle_size = base_idle * style.scale;
+                    let idle_alpha = (style.opacity * past_dim * bg_dim).max(0.08);
+
                     if is_active || is_overlapping_active || is_settling {
                         let resolved_words =
                             resolve_line_words(&lyrics.synced, line_idx, props.info.duration_ms);
-                        let settle_opacity = if is_settling {
-                            let t = ((pos_ms.saturating_sub(end_ms)) as f32 / 500.0).clamp(0.0, 1.0);
-                            1.0 - t * (1.0 - (style.opacity * 0.72).max(0.24))
+                        let target_mult =
+                            (idle_alpha / (BLOOM_LIT_ALPHA * bg_dim)).clamp(0.08, 1.0);
+
+                        let (active_size, settle_opacity) = if is_active {
+                            // Smoothly grow from idle size -> active size as `visual_active_idx`
+                            // glides onto this line (zero 1-frame height/font snap!).
+                            let grow = if bloom_fx { focus_smooth } else { 1.0 };
+                            let size = idle_size + (base_active - idle_size) * grow;
+                            (size, 1.0)
                         } else if is_overlapping_active {
-                            0.94
+                            (base_active * 0.96, 0.94)
+                        } else if duet_settling {
+                            let raw_t = ((pos_ms.saturating_sub(end_ms)) as f32
+                                / (DUET_SETTLE_MS as f32))
+                                .clamp(0.0, 1.0);
+                            let eased = 1.0 - (1.0 - raw_t).powi(3);
+                            let size = base_active + (idle_size - base_active) * eased;
+                            let op = 1.0 - eased * (1.0 - target_mult);
+                            (size, op)
                         } else {
-                            1.0
-                        };
-                        let active_size = if is_settling {
-                            let t = ((pos_ms.saturating_sub(end_ms)) as f32 / 500.0).clamp(0.0, 1.0);
-                            base_active + (base_idle * style.scale - base_active) * t
-                        } else {
-                            base_active
+                            // Spring-driven shrink & dim synchronized with `visual_active_idx`.
+                            let size = idle_size + (base_active - idle_size) * focus_smooth;
+                            let op = target_mult + (1.0 - target_mult) * focus_smooth;
+                            (size, op)
                         };
 
                         if !resolved_words.is_empty() {
@@ -860,7 +945,7 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                                         .color(Color::from_rgba(1.0, 1.0, 1.0, settle_opacity))
                                         .align_x(h_align),
                                 )
-                                .padding([2, 6])
+                                .padding([5, 6])
                                 .width(Length::Fill)
                                 .align_x(h_align),
                             )
@@ -868,23 +953,16 @@ fn build_lyrics_column<'a>(props: &LyricsViewProps<'a>) -> Element<'a, Message> 
                             .into()
                         }
                     } else {
-                        let font_size = base_idle * style.scale;
-                        let bg_dim = if is_bg_vocal { 0.78 } else { 1.0 };
-                        let alpha = if distance < 0 {
-                            (style.opacity * 0.68 * bg_dim).max(0.08)
-                        } else {
-                            (style.opacity * bg_dim).max(0.08)
-                        };
                         mouse_area(
                             container(
                                 text(line.text.as_str())
-                                    .size(font_size)
+                                    .size(idle_size)
                                     .font(FONT_BOLD)
                                     .line_height(LYRICS_LINE_HEIGHT_MULT)
-                                    .color(Color::from_rgba(1.0, 1.0, 1.0, alpha))
+                                    .color(Color::from_rgba(1.0, 1.0, 1.0, idle_alpha))
                                     .align_x(h_align),
                             )
-                            .padding([2, 6])
+                            .padding([5, 6])
                             .width(Length::Fill)
                             .align_x(h_align),
                         )

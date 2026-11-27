@@ -1,2 +1,10 @@
 ﻿/target
 .superpowers/
+mobile/node_modules/
+mobile/.expo/
+mobile/ios/
+mobile/android/
+mobile/dist/
+mobile/modules/lume-core/ios/Generated/
+mobile/modules/lume-core/ios/Frameworks/
+

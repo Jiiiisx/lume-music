@@ -19,9 +19,10 @@ pub const REFRESHED_LIFT_EM: f32 = 0.0588;
 pub const REFRESHED_SWEEP_RUSH_MS: f32 = 500.0;
 /// Minimum sustained syllable/word duration (ms) to trigger letter-by-letter Flame emphasis (`IsLetterCapable.ts`).
 pub const FLAME_MIN_DURATION_MS: f32 = 1_000.0;
-/// Exact Spicy Lyrics Bloom unlit & lit text tones (`Mixed.css --SLR_Unlit / --SLR_Lit`).
-pub const BLOOM_UNLIT_ALPHA: f32 = 0.22;
-pub const BLOOM_LIT_ALPHA: f32 = 0.96;
+/// Exact Spicy Lyrics Bloom unlit & lit text tones (tuned so incoming +1 lines at 0.36 opacity
+/// never flash darker when transitioning into the active Bloom sweep).
+pub const BLOOM_UNLIT_ALPHA: f32 = 0.34;
+pub const BLOOM_LIT_ALPHA: f32 = 0.98;
 
 /// CSS `cubic-bezier(x1, y1, x2, y2)` solver ported 1:1 from Spicy Lyrics `CubicBezier.ts`.
 pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
@@ -468,12 +469,18 @@ pub fn bloom_interlude_state(start_ms: u64, end_ms: u64, pos_ms: u64) -> BloomIn
 pub const LYRICS_ITEM_SPACING_PX: f32 = 20.0;
 pub const LYRICS_INTERLUDE_HEIGHT_PX: f32 = 34.0;
 pub const LYRICS_LINE_HEIGHT_MULT: f32 = 1.22;
-pub const LYRICS_LINE_VPAD_PX: f32 = 4.0;
+pub const LYRICS_LINE_VPAD_PX: f32 = 10.0;
+pub const LYRICS_ACTIVE_FONT_PX: f32 = 36.0;
+pub const LYRICS_ACTIVE_BG_FONT_PX: f32 = 26.0;
+pub const LYRICS_IDLE_FONT_PX: f32 = 33.0;
+pub const LYRICS_IDLE_BG_FONT_PX: f32 = 24.0;
 
 pub fn lyrics_viewport_metrics(window_w: f32, window_h: f32) -> (f32, f32) {
     let viewport_h = (window_h - 66.0).max(240.0);
-    // Left stage (400) + row gap (20) + body padding (28) + lyrics horiz padding (64) + inner line padding (12)
-    let text_max_w = (window_w - 524.0).max(220.0);
+    let art_size = (window_h * 0.39).min(window_w * 0.30).clamp(200.0, 332.0);
+    let left_stage_w = (art_size + 68.0).clamp(264.0, 400.0);
+    // Left stage + row gap (20) + body padding (28) + lyrics horiz padding (64) + inner padding (12)
+    let text_max_w = (window_w - left_stage_w - 124.0).max(220.0);
     (text_max_w, viewport_h)
 }
 
@@ -562,14 +569,17 @@ pub fn target_scroll_y_for_item(
                 ..
             } => {
                 let font_size = if is_active {
-                    let base = if is_bg_vocal { 26.0 } else { 36.0 };
-                    if mode == LyricsVisualMode::SpicySmooth {
-                        base * 1.045
+                    if is_bg_vocal {
+                        LYRICS_ACTIVE_BG_FONT_PX
                     } else {
-                        base
+                        LYRICS_ACTIVE_FONT_PX
                     }
                 } else {
-                    let base = if is_bg_vocal { 23.0 } else { 31.0 };
+                    let base = if is_bg_vocal {
+                        LYRICS_IDLE_BG_FONT_PX
+                    } else {
+                        LYRICS_IDLE_FONT_PX
+                    };
                     base * style.scale
                 };
                 let text = lines
@@ -698,12 +708,15 @@ impl SpicySpring {
     }
 }
 
-/// Critically/lightly-damped spring scroll + active-line pop state for synced lyrics.
+/// Critically-damped spring scroll + continuous visual active-index + subtle active-line breath
+/// for silky Apple Music / Spicy Lyrics transitions across both syllable-synced and LRCLIB tracks.
 #[derive(Debug, Clone, Copy)]
 pub struct LyricsSpringState {
     scroll: SpicySpring,
+    visual_idx: SpicySpring,
     active_scale: SpicySpring,
     last_active_idx: Option<usize>,
+    has_visual_idx: bool,
 }
 
 impl Default for LyricsSpringState {
@@ -715,47 +728,72 @@ impl Default for LyricsSpringState {
 impl LyricsSpringState {
     pub fn new() -> Self {
         Self {
-            // Smooth Apple Music / Spicy Lyrics scroll settle
-            scroll: SpicySpring::new(0.0, 1.85, 0.92),
-            // Exact Spicy Lyrics ScaleFrequency = 0.88, ScaleDamping = 0.64
-            active_scale: SpicySpring::new(1.0, 1.35, 0.68),
+            // Critically-damped Apple Music scroll glide (zero overshoot/bounce, velvet settle)
+            scroll: SpicySpring::new(0.0, 1.75, 1.0),
+            // Smooth continuous line-focus glide so every line's scale & opacity interpolates at 60 FPS
+            visual_idx: SpicySpring::new(0.0, 2.25, 0.98),
+            // Subtle active-line breath without jarring jump
+            active_scale: SpicySpring::new(1.0, 1.65, 0.85),
             last_active_idx: None,
+            has_visual_idx: false,
         }
     }
 
     pub fn update(&mut self, dt_s: f32, target_y: f32) {
         self.scroll.set_goal(target_y);
         self.scroll.step(dt_s);
+        if self.has_visual_idx {
+            self.visual_idx.step(dt_s);
+        }
         self.active_scale.step(dt_s);
     }
 
     pub fn notify_active_item(&mut self, item_idx: Option<usize>) {
         if item_idx != self.last_active_idx {
+            let prev = self.last_active_idx;
             self.last_active_idx = item_idx;
-            if item_idx.is_some() {
-                // Spicy Lyrics active line subtle pop: 0.95 -> springs to 1.045
-                self.active_scale.snap_to(0.95);
-                self.active_scale.set_goal(1.045);
+            if let Some(idx) = item_idx {
+                let target = idx as f32;
+                // Snap on initial entry or large seeks (> 3 lines); glide smoothly on normal advance.
+                let is_large_jump = prev.is_some_and(|p| p.abs_diff(idx) > 3);
+                if !self.has_visual_idx || is_large_jump {
+                    self.visual_idx.snap_to(target);
+                    self.has_visual_idx = true;
+                } else {
+                    self.visual_idx.set_goal(target);
+                }
+                self.active_scale.snap_to(0.985);
+                self.active_scale.set_goal(1.02);
             }
         }
     }
 
     pub fn snap_to(&mut self, y: f32) {
         self.scroll.snap_to(y);
+        self.visual_idx.snap_to(0.0);
         self.active_scale.snap_to(1.0);
         self.last_active_idx = None;
+        self.has_visual_idx = false;
     }
 
     pub fn scroll_y(&self) -> f32 {
         self.scroll.position()
     }
 
+    pub fn visual_active_idx(&self) -> Option<f32> {
+        self.has_visual_idx.then_some(self.visual_idx.position())
+    }
+
     pub fn active_scale(&self) -> f32 {
-        self.active_scale.position().clamp(0.94, 1.08)
+        self.active_scale.position().clamp(0.96, 1.05)
     }
 
     pub fn is_settled(&self) -> bool {
+        let idx_settled = !self.has_visual_idx
+            || ((self.visual_idx.position() - self.visual_idx.goal()).abs() < 0.005
+                && self.visual_idx.velocity.abs() < 0.02);
         self.scroll.is_settled()
+            && idx_settled
             && (self.active_scale.position() - self.active_scale.goal()).abs() < 0.002
     }
 }
@@ -827,7 +865,9 @@ pub fn build_display_timeline(lines: &[LyricsLine]) -> Vec<LyricsDisplayItem> {
             continue;
         }
 
-        let est_line_end = line
+        let has_exact_end = line.end_ms.is_some()
+            || line.words.as_ref().is_some_and(|w| !w.is_empty());
+        let mut est_line_end = line
             .end_ms
             .or_else(|| {
                 line.words
@@ -838,6 +878,16 @@ pub fn build_display_timeline(lines: &[LyricsLine]) -> Vec<LyricsDisplayItem> {
                 let wc = trimmed.split_whitespace().count() as u64;
                 line.time_ms.saturating_add((wc * 520).clamp(1_600, 4_800))
             });
+        // Line-only lyrics (e.g. LRCLIB) lack explicit end timestamps and never overlap
+        // the next line; clamp estimated end to `next.time_ms` so fast long lines never
+        // stay falsely active after the next line has already started.
+        if !has_exact_end {
+            if let Some(next) = lines.get(idx + 1) {
+                if next.time_ms > line.time_ms {
+                    est_line_end = est_line_end.min(next.time_ms);
+                }
+            }
+        }
 
         items.push(LyricsDisplayItem::Line {
             line_idx: idx,
@@ -853,8 +903,6 @@ pub fn build_display_timeline(lines: &[LyricsLine]) -> Vec<LyricsDisplayItem> {
         // to avoid false interludes during slow sustained vocals.
         if let Some(next) = lines.get(idx + 1) {
             if !next.text.trim().is_empty() {
-                let has_exact_end = line.end_ms.is_some()
-                    || line.words.as_ref().is_some_and(|w| !w.is_empty());
                 let min_gap = if has_exact_end {
                     3_500
                 } else {
@@ -946,6 +994,24 @@ pub fn line_visual_style(distance_from_active: isize, mode: LyricsVisualMode) ->
                 glow: 0.0,
             },
         },
+    }
+}
+
+/// Continuously interpolated visual depth style for fractional distance from the spring-driven
+/// `visual_active_idx`, eliminating 1-frame opacity/scale pops across every visible lyric line.
+pub fn line_visual_style_continuous(float_distance: f32, mode: LyricsVisualMode) -> LineStyle {
+    let abs_d = float_distance.abs().min(4.0);
+    let lo = abs_d.floor() as isize;
+    let hi = (lo + 1).min(4);
+    let raw_t = (abs_d - lo as f32).clamp(0.0, 1.0);
+    // Smoothstep interpolation between depth stops
+    let t = raw_t * raw_t * (3.0 - 2.0 * raw_t);
+    let a = line_visual_style(lo, mode);
+    let b = line_visual_style(hi, mode);
+    LineStyle {
+        scale: a.scale + (b.scale - a.scale) * t,
+        opacity: a.opacity + (b.opacity - a.opacity) * t,
+        glow: a.glow + (b.glow - a.glow) * t,
     }
 }
 
@@ -1394,6 +1460,25 @@ mod tests {
         assert!(s0.opacity > s1.opacity && s1.opacity > s2.opacity && s2.opacity >= s4.opacity);
         assert!(s0.scale > s1.scale && s1.scale >= s2.scale && s2.scale >= s4.scale);
         assert!(s0.glow > s1.glow);
+
+        let mid = line_visual_style_continuous(0.5, LyricsVisualMode::SpicySmooth);
+        assert!(mid.opacity < s0.opacity && mid.opacity > s1.opacity);
+        assert!(mid.scale < s0.scale && mid.scale > s1.scale);
+
+        let mut sp = LyricsSpringState::new();
+        sp.notify_active_item(Some(0));
+        assert_eq!(sp.visual_active_idx(), Some(0.0));
+        sp.notify_active_item(Some(1));
+        for _ in 0..10 {
+            sp.update(1.0 / 60.0, 80.0);
+        }
+        let v_mid = sp.visual_active_idx().unwrap();
+        assert!(v_mid > 0.1 && v_mid < 0.99, "visual_active_idx should glide smoothly, got {v_mid}");
+        for _ in 0..200 {
+            sp.update(1.0 / 60.0, 80.0);
+        }
+        assert!((sp.visual_active_idx().unwrap() - 1.0).abs() < 0.01);
+        assert!(sp.is_settled());
     }
 
     #[test]
@@ -1430,6 +1515,32 @@ mod tests {
         assert!(matches!(items[1], LyricsDisplayItem::Line { line_idx: 0, is_bg_vocal: false, .. }));
         assert!(matches!(items[2], LyricsDisplayItem::Interlude { end_ms: 30_000, .. }));
         assert!(matches!(items[3], LyricsDisplayItem::Line { line_idx: 1, is_bg_vocal: true, .. }));
+    }
+
+    #[test]
+    fn build_display_timeline_clamps_lrclib_line_end_to_next_line_start() {
+        // 8-word fast line (raw estimate 4160ms) followed only 2200ms later by the next line.
+        let lines = vec![
+            mk_line(16_000, "One second you hate me, then it's false alarm"),
+            mk_line(18_200, "That's just what you always do, every time"),
+        ];
+        let items = build_display_timeline(&lines);
+        let first_line = items
+            .iter()
+            .find(|it| matches!(it, LyricsDisplayItem::Line { line_idx: 0, .. }))
+            .unwrap();
+        match *first_line {
+            LyricsDisplayItem::Line {
+                start_ms, end_ms, ..
+            } => {
+                assert_eq!(start_ms, 16_000);
+                assert_eq!(
+                    end_ms, 18_200,
+                    "LRCLIB line end_ms must never bleed past next line start"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

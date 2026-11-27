@@ -16,6 +16,8 @@ pub const SPOTIFY_ACCOUNTS_TOKEN_URL: &str = "https://accounts.spotify.com/api/t
 
 /// Personal Developer App Web API redirect URI (strictly `127.0.0.1` per 2025/2026 Spotify OAuth rules).
 pub const SPOTIFY_WEB_API_REDIRECT_URI: &str = "http://127.0.0.1:43821/callback";
+/// Mobile custom URL scheme redirect URI for iOS `ASWebAuthenticationSession` / Android Custom Tabs.
+pub const SPOTIFY_MOBILE_REDIRECT_URI: &str = "lumemusic://callback";
 pub const SPOTIFY_WEB_API_BIND_ADDR: &str = "127.0.0.1:43821";
 pub const SPOTIFY_WEB_API_SCOPES: &[&str] = &[
     "user-read-private",

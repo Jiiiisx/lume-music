@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "Lume Music",
+    "slug": "lume-music",
+    "scheme": "lumemusic",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0C12",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0C12"
+    },
+    "ios": {
+      "bundleIdentifier": "com.lumemusic.ios",
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ],
+        "NSLocalNetworkUsageDescription": "Lume Music connects to your local development server over Wi-Fi for Fast Refresh."
+      }
+    },
+    "android": {
+      "package": "com.lumemusic.android",
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0C12",
+        "foregroundImage": "./assets/icon.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true,
+          "microphonePermission": false
+        }
+      ],
+      "expo-secure-store",
+      "expo-web-browser"
+    ]
+  }
+}

@@ -4,22 +4,31 @@ use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, space, text, text_input,
 };
 use iced::{Alignment, Background, Color, Element, Length};
-use lume_core::{Playlist, Track, TrackSource};
+use lume_core::{
+    AlbumDetail, ArtistProfile, ArtistSummary, Playlist, RemotePlaylistDetail,
+    RemotePlaylistSummary, Track, TrackSource,
+};
 
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
+use crate::views::catalog::{
+    build_artists_grid_view, build_artists_strip, build_playlists_grid_view, build_playlists_strip,
+    build_search_tabs_bar, collect_filtered_artists, collect_filtered_playlists, view_album_detail,
+    view_artist_profile, view_remote_playlist,
+};
 use crate::views::{
-    ActiveNav, ChartRegion, Message, PlaylistSort, PlaylistSortField, SortDirection, SourceFilter,
+    responsive_sidebar_width, show_track_album_column, show_track_source_column, ActiveNav,
+    ChartRegion, Message, PlaylistSort, PlaylistSortField, SearchTab, SortDirection, SourceFilter,
     ViewMode,
 };
 use crate::widgets::{
-    cover_art_widget, ghost_button_style, glass_button_style, glass_card_style,
-    glass_elevated_style, glass_input_style, glass_panel, glass_sidebar_style, hero_banner_style,
-    hidden_scrollbar, icon_chevron_down, icon_chevron_up, icon_clock, icon_folder, icon_heart,
-    icon_home, icon_link, icon_lyrics, icon_more, icon_music, icon_pause, icon_play, icon_playlist,
-    icon_plus, icon_refresh, icon_search, icon_settings, icon_trash, icon_trending,
-    primary_pill_button_style, sidebar_nav_style, thin_scrollable_style, track_row_button_style,
-    GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE, ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    artist_link_button_style, cover_art_widget, ghost_button_style, glass_button_style,
+    glass_card_style, glass_elevated_style, glass_input_style, glass_panel, glass_sidebar_style,
+    hero_banner_style, hidden_scrollbar, icon_chevron_down, icon_chevron_up, icon_clock,
+    icon_folder, icon_heart, icon_home, icon_link, icon_lyrics, icon_more, icon_music, icon_pause,
+    icon_play, icon_playlist, icon_plus, icon_refresh, icon_search, icon_settings, icon_trash,
+    icon_trending, primary_pill_button_style, sidebar_nav_style, thin_scrollable_style,
+    track_row_button_style, track_row_surface_style, GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE,
+    ICON_LIGHT, ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn group_tracks_by_source(
@@ -177,12 +186,32 @@ pub fn validate_playlist_name(raw: &str) -> Result<String, &'static str> {
 
 pub struct BrowseViewProps<'a> {
     pub nav: &'a ActiveNav,
+    pub window_width: f32,
+    pub can_go_back: bool,
     pub search_query: &'a str,
+    pub search_tab: SearchTab,
     pub source_filter: SourceFilter,
+    pub spotify_web_api_active: bool,
     pub playlist_sort: PlaylistSort,
     pub searching_remote: bool,
     pub playlists: &'a [Playlist],
     pub visible_tracks: &'a [Track],
+    pub spotify_search_artists: &'a [ArtistSummary],
+    pub spotify_search_playlists: &'a [RemotePlaylistSummary],
+    pub ytm_search_artists: &'a [ArtistSummary],
+    pub ytm_search_playlists: &'a [RemotePlaylistSummary],
+    pub active_artist_profile: Option<&'a ArtistProfile>,
+    pub loading_artist: bool,
+    pub artist_error: Option<&'a str>,
+    pub artist_tracks_expanded: bool,
+    pub active_album_detail: Option<&'a AlbumDetail>,
+    pub loading_album: bool,
+    pub album_error: Option<&'a str>,
+    pub active_remote_playlist: Option<&'a RemotePlaylistDetail>,
+    pub loading_remote_playlist: bool,
+    pub remote_playlist_error: Option<&'a str>,
+    pub saving_remote_playlist: bool,
+    pub remote_playlist_is_saved: bool,
     pub recent_tracks: &'a [Track],
     pub home_region: ChartRegion,
     pub home_spotify_trending: &'a [Track],
@@ -217,6 +246,9 @@ fn source_label(source: &TrackSource) -> &'static str {
 }
 
 fn format_duration_ms(ms: u64) -> String {
+    if ms == 0 {
+        return "—".to_string();
+    }
     let total_secs = ms / 1000;
     let mins = total_secs / 60;
     let secs = total_secs % 60;
@@ -228,6 +260,7 @@ pub fn view_browse<'a>(props: BrowseViewProps<'a>) -> Element<'a, Message> {
         props.nav,
         props.playlists,
         props.connection_status,
+        props.window_width,
         props.accent,
     );
     let main_area = build_main_content(&props);
@@ -400,8 +433,10 @@ pub fn view_sidebar<'a>(
     nav: &'a ActiveNav,
     playlists: &'a [Playlist],
     connection_status: &'a str,
+    window_width: f32,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
+    let sidebar_w = responsive_sidebar_width(window_width);
     let nav_item = |label: &'a str,
                     target: ActiveNav,
                     active_icon: Element<'a, Message>,
@@ -455,6 +490,7 @@ pub fn view_sidebar<'a>(
             let origin_tag = match &pl.origin {
                 lume_core::PlaylistOrigin::SpotifySynced => Some("SP"),
                 lume_core::PlaylistOrigin::SpotifyImported { .. } => Some("IMP"),
+                lume_core::PlaylistOrigin::YouTubeImported { .. } => Some("YTM"),
                 lume_core::PlaylistOrigin::LocalCustom => None,
             };
 
@@ -616,7 +652,7 @@ pub fn view_sidebar<'a>(
         ]
         .spacing(10)
         .padding(14)
-        .width(Length::Fixed(224.0))
+        .width(Length::Fixed(sidebar_w))
         .height(Length::Fill),
     )
     .height(Length::Fill)
@@ -764,6 +800,7 @@ fn build_hero_banner<'a>(
         let pl_overline = match pl.map(|p| &p.origin) {
             Some(lume_core::PlaylistOrigin::SpotifySynced) => "SPOTIFY SYNCED PLAYLIST (READ-ONLY)",
             Some(lume_core::PlaylistOrigin::SpotifyImported { .. }) => "IMPORTED SPOTIFY PLAYLIST",
+            Some(lume_core::PlaylistOrigin::YouTubeImported { .. }) => "IMPORTED YOUTUBE PLAYLIST",
             _ => "CUSTOM PLAYLIST",
         };
 
@@ -818,10 +855,13 @@ fn build_hero_banner<'a>(
             ActiveNav::LocalFiles => "Local Files",
             ActiveNav::Settings => "Settings",
             ActiveNav::Playlist(_) => "Playlist",
+            ActiveNav::ArtistProfile { name, .. } => name.as_str(),
+            ActiveNav::AlbumDetail { title, .. } => title.as_str(),
+            ActiveNav::RemotePlaylist { name, .. } => name.as_str(),
         };
         let sub = if total_tracks == 0 {
             match props.nav {
-                ActiveNav::Home => "Listening history & live charts".to_string(),
+                ActiveNav::Home => "Listening history & weekly charts".to_string(),
                 ActiveNav::LikedSongs => {
                     "Heart any song to collect your favorites here".to_string()
                 }
@@ -986,7 +1026,7 @@ fn build_playlist_sort_bar<'a>(sort: PlaylistSort, accent: AccentTheme) -> Eleme
         "Desc"
     };
 
-    row![
+    let chips = row![
         text("Sort:")
             .size(11)
             .font(FONT_SEMIBOLD)
@@ -997,7 +1037,13 @@ fn build_playlist_sort_bar<'a>(sort: PlaylistSort, accent: AccentTheme) -> Eleme
         sort_chip("Artist", PlaylistSortField::Artist),
         sort_chip("Album", PlaylistSortField::Album),
         sort_chip("Duration", PlaylistSortField::Duration),
-        space().width(Length::Fill),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .wrap();
+
+    row![
+        container(chips).width(Length::Fill),
         button(
             row![
                 dir_icon,
@@ -1010,7 +1056,7 @@ fn build_playlist_sort_bar<'a>(sort: PlaylistSort, accent: AccentTheme) -> Eleme
         .style(glass_button_style(false, accent))
         .on_press(Message::TogglePlaylistSortDirection),
     ]
-    .spacing(6)
+    .spacing(8)
     .padding([0, 6])
     .align_y(Alignment::Center)
     .into()
@@ -1190,7 +1236,7 @@ fn build_home_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
     let home_header = row![
         column![
             text("Home").size(22).font(FONT_BOLD).color(TEXT_PRIMARY),
-            text("Listening history, playlists & live charts")
+            text("Listening history, playlists & weekly charts")
                 .size(12)
                 .color(TEXT_SECONDARY),
         ]
@@ -1233,47 +1279,62 @@ fn build_home_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         feed = feed.push(build_hero_banner(props, None));
     }
 
-    // Quick Access: Your Playlists cards
+    // Quick Access: Your Playlists cards (responsive columns: 2 / 3 / 4)
     if !props.playlists.is_empty() {
-        let mut pl_row = row![].spacing(10).width(Length::Fill);
-        for pl in props.playlists.iter().take(4) {
-            let origin_tag = match &pl.origin {
-                lume_core::PlaylistOrigin::SpotifySynced => "Spotify",
-                lume_core::PlaylistOrigin::SpotifyImported { .. } => "Imported",
-                lume_core::PlaylistOrigin::LocalCustom => "Custom",
-            };
-            let card = button(
-                row![
-                    container(icon_playlist(16.0, accent.light))
-                        .width(Length::Fixed(36.0))
-                        .height(Length::Fixed(36.0))
-                        .center_x(Length::Fixed(36.0))
-                        .center_y(Length::Fixed(36.0))
-                        .style(move |_| container::Style {
-                            background: Some(Background::Color(accent.soft_bg)),
-                            border: iced::border::rounded(10.0),
-                            ..Default::default()
-                        }),
-                    column![
-                        text(truncate_label(&pl.name, 16))
-                            .size(12)
-                            .font(FONT_SEMIBOLD)
-                            .color(TEXT_PRIMARY),
-                        text(format!("{} songs • {origin_tag}", pl.track_count))
-                            .size(10)
-                            .color(TEXT_MUTED),
+        let per_row = if props.window_width < 940.0 {
+            2
+        } else if props.window_width < 1220.0 {
+            3
+        } else {
+            4
+        };
+        let mut pl_grid = column![].spacing(8).width(Length::Fill);
+        let cards_data: Vec<&Playlist> = props.playlists.iter().take(4).collect();
+        for chunk in cards_data.chunks(per_row) {
+            let mut pl_row = row![].spacing(10).width(Length::Fill);
+            for pl in chunk {
+                let origin_tag = match &pl.origin {
+                    lume_core::PlaylistOrigin::SpotifySynced => "Spotify",
+                    lume_core::PlaylistOrigin::SpotifyImported { .. } => "Imported",
+                    lume_core::PlaylistOrigin::YouTubeImported { .. } => "YouTube",
+                    lume_core::PlaylistOrigin::LocalCustom => "Custom",
+                };
+                let card = button(
+                    row![
+                        container(icon_playlist(16.0, accent.light))
+                            .width(Length::Fixed(36.0))
+                            .height(Length::Fixed(36.0))
+                            .center_x(Length::Fixed(36.0))
+                            .center_y(Length::Fixed(36.0))
+                            .style(move |_| container::Style {
+                                background: Some(Background::Color(accent.soft_bg)),
+                                border: iced::border::rounded(10.0),
+                                ..Default::default()
+                            }),
+                        column![
+                            text(truncate_label(&pl.name, 16))
+                                .size(12)
+                                .font(FONT_SEMIBOLD)
+                                .color(TEXT_PRIMARY)
+                                .wrapping(text::Wrapping::None),
+                            text(format!("{} songs • {origin_tag}", pl.track_count))
+                                .size(10)
+                                .color(TEXT_MUTED)
+                                .wrapping(text::Wrapping::None),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
                     ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([10, 12])
-            .style(glass_button_style(false, accent))
-            .on_press(Message::SelectNav(ActiveNav::Playlist(pl.id.clone())));
-            pl_row = pl_row.push(card);
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([10, 12])
+                .style(glass_button_style(false, accent))
+                .on_press(Message::SelectNav(ActiveNav::Playlist(pl.id.clone())));
+                pl_row = pl_row.push(card);
+            }
+            pl_grid = pl_grid.push(pl_row);
         }
 
         feed = feed.push(
@@ -1282,7 +1343,7 @@ fn build_home_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
                     .size(10)
                     .font(FONT_SEMIBOLD)
                     .color(TEXT_MUTED),
-                pl_row,
+                pl_grid,
             ]
             .spacing(8),
         );
@@ -1429,9 +1490,27 @@ fn build_home_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
 }
 
 fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
-    if matches!(props.nav, ActiveNav::Home) {
-        return build_home_content(props);
+    match props.nav {
+        ActiveNav::Home => return build_home_content(props),
+        ActiveNav::ArtistProfile { .. } => return view_artist_profile(props),
+        ActiveNav::AlbumDetail { .. } => return view_album_detail(props),
+        ActiveNav::RemotePlaylist { .. } => return view_remote_playlist(props),
+        _ => {}
     }
+
+    let is_search_view = matches!(props.nav, ActiveNav::Search);
+    let effective_filter = if is_search_view
+        && props.source_filter == SourceFilter::Spotify
+        && !props.spotify_web_api_active
+        && !props
+            .visible_tracks
+            .iter()
+            .any(|t| matches!(t.source, TrackSource::Spotify { .. }))
+    {
+        SourceFilter::All
+    } else {
+        props.source_filter
+    };
 
     let active_filter_label = match props.source_filter {
         SourceFilter::All => "All Sources",
@@ -1466,7 +1545,7 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
     let grouped = if is_playlist_view {
         Vec::new()
     } else {
-        group_tracks_by_source(props.visible_tracks, props.source_filter)
+        group_tracks_by_source(props.visible_tracks, effective_filter)
     };
     let displayed_count: usize = if is_playlist_view {
         sorted_playlist_entries.len()
@@ -1474,11 +1553,33 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         grouped.iter().map(|(_, items)| items.len()).sum()
     };
 
+    let filtered_artists = if is_search_view {
+        collect_filtered_artists(props)
+    } else {
+        Vec::new()
+    };
+    let filtered_playlists = if is_search_view {
+        collect_filtered_playlists(props)
+    } else {
+        Vec::new()
+    };
+
     let mut content_col = column![hero].spacing(12);
-    if props.searching_remote && matches!(props.nav, ActiveNav::Search) {
+    if props.searching_remote && is_search_view {
+        let search_label = if props.spotify_web_api_active {
+            format!(
+                "Searching Spotify & YouTube Music for \"{}\"...",
+                props.search_query.trim()
+            )
+        } else {
+            format!(
+                "Searching YouTube Music for \"{}\"...",
+                props.search_query.trim()
+            )
+        };
         content_col = content_col.push(
             container(
-                text(format!("Searching YouTube Music for \"{}\"...", props.search_query.trim()))
+                text(search_label)
                     .size(12)
                     .font(FONT_MEDIUM)
                     .color(props.accent.light),
@@ -1504,11 +1605,27 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         );
     }
 
+    if is_search_view {
+        content_col = content_col.push(build_search_tabs_bar(
+            props.search_tab,
+            displayed_count,
+            filtered_artists.len(),
+            filtered_playlists.len(),
+            props.accent,
+        ));
+    }
+
     if is_playlist_view && !props.visible_tracks.is_empty() {
         content_col = content_col.push(build_playlist_sort_bar(props.playlist_sort, props.accent));
     }
 
-    if displayed_count > 0 {
+    let show_songs_section = !is_search_view
+        || matches!(props.search_tab, SearchTab::All | SearchTab::Songs);
+
+    let show_album = show_track_album_column(props.window_width);
+    let show_source = show_track_source_column(props.window_width);
+
+    if show_songs_section && displayed_count > 0 && (!is_search_view || props.search_tab == SearchTab::Songs) {
         let header_row: Element<'a, Message> = if is_playlist_view {
             let col_btn = |label: &'static str, field: PlaylistSortField, width: Length| {
                 let active = props.playlist_sort.field == field;
@@ -1529,49 +1646,77 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
                     .style(ghost_button_style)
                     .on_press(Message::SetPlaylistSort(field))
             };
-            row![
+            let mut hrow = row![
                 col_btn("#", PlaylistSortField::Custom, Length::Fixed(30.0)),
+                space().width(Length::Fixed(40.0)),
                 col_btn("TITLE", PlaylistSortField::Title, Length::FillPortion(4)),
-                col_btn("ALBUM", PlaylistSortField::Album, Length::FillPortion(3)),
-                text("SOURCE")
-                    .size(11)
-                    .color(TEXT_MUTED)
-                    .width(Length::Fixed(72.0)),
-                col_btn("TIME", PlaylistSortField::Duration, Length::Fixed(48.0)),
-                space().width(Length::Fixed(64.0)),
             ]
             .spacing(12)
             .padding([4, 12])
-            .align_y(Alignment::Center)
-            .into()
+            .align_y(Alignment::Center);
+            if show_album {
+                hrow = hrow.push(col_btn(
+                    "ALBUM",
+                    PlaylistSortField::Album,
+                    Length::FillPortion(3),
+                ));
+            }
+            if show_source {
+                hrow = hrow.push(
+                    text("SOURCE")
+                        .size(11)
+                        .color(TEXT_MUTED)
+                        .width(Length::Fixed(72.0)),
+                );
+            }
+            hrow = hrow
+                .push(col_btn(
+                    "TIME",
+                    PlaylistSortField::Duration,
+                    Length::Fixed(48.0),
+                ))
+                .push(space().width(Length::Fixed(64.0)));
+            hrow.into()
         } else {
-            row![
+            let mut hrow = row![
                 text("#")
                     .size(11)
                     .color(TEXT_MUTED)
                     .width(Length::Fixed(30.0)),
+                space().width(Length::Fixed(40.0)),
                 text("TITLE")
                     .size(11)
                     .color(TEXT_MUTED)
                     .width(Length::FillPortion(4)),
-                text("ALBUM")
-                    .size(11)
-                    .color(TEXT_MUTED)
-                    .width(Length::FillPortion(3)),
-                text("SOURCE")
-                    .size(11)
-                    .color(TEXT_MUTED)
-                    .width(Length::Fixed(72.0)),
-                text("TIME")
-                    .size(11)
-                    .color(TEXT_MUTED)
-                    .width(Length::Fixed(48.0)),
-                space().width(Length::Fixed(64.0)),
             ]
             .spacing(12)
             .padding([4, 12])
-            .align_y(Alignment::Center)
-            .into()
+            .align_y(Alignment::Center);
+            if show_album {
+                hrow = hrow.push(
+                    text("ALBUM")
+                        .size(11)
+                        .color(TEXT_MUTED)
+                        .width(Length::FillPortion(3)),
+                );
+            }
+            if show_source {
+                hrow = hrow.push(
+                    text("SOURCE")
+                        .size(11)
+                        .color(TEXT_MUTED)
+                        .width(Length::Fixed(72.0)),
+                );
+            }
+            hrow = hrow
+                .push(
+                    text("TIME")
+                        .size(11)
+                        .color(TEXT_MUTED)
+                        .width(Length::Fixed(48.0)),
+                )
+                .push(space().width(Length::Fixed(64.0)));
+            hrow.into()
         };
 
         let table_header = column![
@@ -1587,50 +1732,80 @@ fn build_main_content<'a>(props: &BrowseViewProps<'a>) -> Element<'a, Message> {
         content_col = content_col.push(table_header);
     }
 
-    let mut track_list = column![].spacing(4);
-    if props.visible_tracks.is_empty() {
-        track_list = track_list.push(empty_state_card(props.nav, props.accent));
-    } else if displayed_count == 0 {
-        track_list = track_list.push(
-            container(
-                text(format!("No tracks match the {active_filter_label} filter."))
-                    .size(13)
-                    .color(TEXT_SECONDARY),
-            )
-            .padding(28)
-            .width(Length::Fill)
-            .center_x(Length::Fill),
-        );
-    } else if is_playlist_view {
-        for (display_idx, (orig_pos, track)) in sorted_playlist_entries.into_iter().enumerate() {
-            track_list = track_list.push(track_row(
-                props,
-                track,
-                display_idx,
-                orig_pos,
-                &sorted_playlist_tracks,
-            ));
-        }
+    let mut track_list = column![].spacing(6);
+    if is_search_view && props.search_tab == SearchTab::Artists {
+        track_list = track_list.push(build_artists_grid_view(props, &filtered_artists));
+    } else if is_search_view && props.search_tab == SearchTab::Playlists {
+        track_list = track_list.push(build_playlists_grid_view(props, &filtered_playlists));
     } else {
-        for (section_title, items) in grouped {
-            if props.source_filter == SourceFilter::All {
-                track_list = track_list.push(
-                    container(text(section_title).size(11).color(TEXT_MUTED)).padding([6, 10]),
-                );
+        if is_search_view && props.search_tab == SearchTab::All {
+            if !filtered_artists.is_empty() {
+                track_list = track_list.push(build_artists_strip(props, &filtered_artists));
             }
-            for track in items {
-                let global_idx = props
-                    .visible_tracks
-                    .iter()
-                    .position(|t| t.uid == track.uid)
-                    .unwrap_or(0);
+            if !filtered_playlists.is_empty() {
+                track_list = track_list.push(build_playlists_strip(props, &filtered_playlists));
+            }
+        }
+
+        let has_any_search_cards = is_search_view
+            && props.search_tab == SearchTab::All
+            && (!filtered_artists.is_empty() || !filtered_playlists.is_empty());
+
+        if props.visible_tracks.is_empty() && !has_any_search_cards {
+            track_list = track_list.push(empty_state_card(props.nav, props.accent));
+        } else if displayed_count == 0 && !has_any_search_cards {
+            track_list = track_list.push(
+                container(
+                    text(format!("No tracks match the {active_filter_label} filter."))
+                        .size(13)
+                        .color(TEXT_SECONDARY),
+                )
+                .padding(28)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+            );
+        } else if is_playlist_view {
+            for (display_idx, (orig_pos, track)) in sorted_playlist_entries.into_iter().enumerate() {
                 track_list = track_list.push(track_row(
                     props,
                     track,
-                    global_idx,
-                    global_idx,
-                    props.visible_tracks,
+                    display_idx,
+                    orig_pos,
+                    &sorted_playlist_tracks,
                 ));
+            }
+        } else if displayed_count > 0 {
+            if is_search_view && props.search_tab == SearchTab::All {
+                track_list = track_list.push(
+                    container(
+                        text("Songs")
+                            .size(14)
+                            .font(FONT_BOLD)
+                            .color(TEXT_PRIMARY),
+                    )
+                    .padding([6, 6]),
+                );
+            }
+            for (section_title, items) in grouped {
+                if effective_filter == SourceFilter::All {
+                    track_list = track_list.push(
+                        container(text(section_title).size(11).color(TEXT_MUTED)).padding([6, 10]),
+                    );
+                }
+                for track in items {
+                    let global_idx = props
+                        .visible_tracks
+                        .iter()
+                        .position(|t| t.uid == track.uid)
+                        .unwrap_or(0);
+                    track_list = track_list.push(track_row(
+                        props,
+                        track,
+                        global_idx,
+                        global_idx,
+                        props.visible_tracks,
+                    ));
+                }
             }
         }
     }
@@ -1666,8 +1841,8 @@ fn empty_state_card<'a>(nav: &'a ActiveNav, accent: AccentTheme) -> Element<'a, 
             None,
         ),
         ActiveNav::Search => (
-            "Search Local & YouTube Music",
-            "Type to filter Local tracks, or press Enter to search YouTube Music anonymously.",
+            "Explore Songs, Artists & Playlists",
+            "Start typing to search Spotify, YouTube Music, and Local tracks automatically.",
             None,
         ),
         ActiveNav::Playlist(_) => (
@@ -1675,7 +1850,11 @@ fn empty_state_card<'a>(nav: &'a ActiveNav, accent: AccentTheme) -> Element<'a, 
             "Open any track's ••• menu to add Spotify, YouTube, or Local tracks here.",
             None,
         ),
-        ActiveNav::Settings | ActiveNav::Home => ("", "", None),
+        ActiveNav::Settings
+        | ActiveNav::Home
+        | ActiveNav::ArtistProfile { .. }
+        | ActiveNav::AlbumDetail { .. }
+        | ActiveNav::RemotePlaylist { .. } => ("", "", None),
     };
 
     let mut inner = column![
@@ -1725,7 +1904,7 @@ fn empty_state_card<'a>(nav: &'a ActiveNav, accent: AccentTheme) -> Element<'a, 
         .into()
 }
 
-fn track_row<'a>(
+pub(crate) fn track_row<'a>(
     props: &BrowseViewProps<'a>,
     track: &'a Track,
     index: usize,
@@ -1762,60 +1941,141 @@ fn track_row<'a>(
             .into()
     };
 
-    let play_row_btn = button(
-        row![
-            index_cell,
-            cover_art_widget(art, 40.0, 8.0),
+    let primary_artist = track
+        .artists
+        .first()
+        .cloned()
+        .unwrap_or_else(|| track.artist_display());
+    let artist_el: Element<'a, Message> = if primary_artist.eq_ignore_ascii_case("unknown artist") {
+        text(track.artist_display())
+            .size(11)
+            .color(TEXT_SECONDARY)
+            .wrapping(text::Wrapping::None)
+            .into()
+    } else {
+        button(
+            text(track.artist_display())
+                .size(11)
+                .wrapping(text::Wrapping::None),
+        )
+        .padding([0, 0])
+        .style(artist_link_button_style(props.accent))
+        .on_press(Message::OpenArtistByName {
+            name: primary_artist.clone(),
+            source_hint: track.source.clone(),
+        })
+        .into()
+    };
+
+    let show_album = show_track_album_column(props.window_width);
+    let show_source = show_track_source_column(props.window_width);
+
+    let mut surface_row = row![
+        mouse_area(
+            row![index_cell, cover_art_widget(art, 40.0, 8.0)]
+                .spacing(12)
+                .align_y(Alignment::Center),
+        )
+        .on_press(play_msg.clone()),
+        container(
             column![
-                text(track.title.as_str())
-                    .size(13)
-                    .font(if is_active { FONT_SEMIBOLD } else { FONT_MEDIUM })
+                mouse_area(
+                    container(
+                        text(track.title.as_str())
+                            .size(13)
+                            .font(if is_active { FONT_SEMIBOLD } else { FONT_MEDIUM })
+                            .color(if is_active {
+                                props.accent.light
+                            } else {
+                                TEXT_PRIMARY
+                            })
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .width(Length::Fill)
+                    .clip(true),
+                )
+                .on_press(play_msg.clone()),
+                container(artist_el).width(Length::Fill).clip(true),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+        )
+        .width(Length::FillPortion(4))
+        .clip(true),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+
+    if show_album {
+        surface_row = surface_row.push(
+            container(
+                mouse_area(
+                    container(
+                        text(track.album.as_deref().unwrap_or("—"))
+                            .size(12)
+                            .color(TEXT_MUTED)
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .width(Length::Fill)
+                    .clip(true),
+                )
+                .on_press(play_msg.clone()),
+            )
+            .width(Length::FillPortion(3))
+            .clip(true),
+        );
+    }
+
+    if show_source {
+        surface_row = surface_row.push(
+            mouse_area(
+                container(
+                    text(source_label(&track.source))
+                        .size(10)
+                        .font(FONT_MEDIUM)
+                        .color(TEXT_SECONDARY)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Length::Fixed(72.0))
+                .center_x(Length::Fixed(72.0))
+                .padding([3, 6])
+                .style(|_| container::Style {
+                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.065))),
+                    border: iced::border::rounded(10.0),
+                    ..Default::default()
+                }),
+            )
+            .on_press(play_msg.clone()),
+        );
+    }
+
+    surface_row = surface_row.push(
+        mouse_area(
+            container(
+                text(format_duration_ms(track.duration_ms))
+                    .size(12)
                     .color(if is_active {
                         props.accent.light
                     } else {
-                        TEXT_PRIMARY
-                    }),
-                text(track.artist_display()).size(11).color(TEXT_SECONDARY),
-            ]
-            .spacing(2)
-            .width(Length::FillPortion(4)),
-            text(track.album.as_deref().unwrap_or("—"))
-                .size(12)
-                .color(TEXT_MUTED)
-                .width(Length::FillPortion(3)),
-            container(
-                text(source_label(&track.source))
-                    .size(10)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_SECONDARY),
+                        TEXT_SECONDARY
+                    })
+                    .wrapping(text::Wrapping::None),
             )
-            .width(Length::Fixed(72.0))
-            .padding([3, 8])
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.065))),
-                border: iced::border::rounded(10.0),
-                ..Default::default()
-            }),
-            text(format_duration_ms(track.duration_ms))
-                .size(12)
-                .color(if is_active {
-                    props.accent.light
-                } else {
-                    TEXT_SECONDARY
-                })
-                .width(Length::Fixed(48.0)),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding([7, 10])
-    .style(track_row_button_style(is_active, props.accent))
-    .on_press(play_msg);
+            .width(Length::Fixed(48.0))
+            .align_x(iced::alignment::Horizontal::Right),
+        )
+        .on_press(play_msg),
+    );
+
+    let play_row_surface = container(surface_row)
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(track_row_surface_style(is_active, props.accent));
 
     let main_row = mouse_area(
         row![
-            play_row_btn,
+            play_row_surface,
             button(heart_icon)
                 .padding([6, 7])
                 .style(ghost_button_style)
@@ -1847,6 +2107,18 @@ fn track_row<'a>(
     ]
     .spacing(8)
     .align_y(Alignment::Center);
+
+    if !primary_artist.eq_ignore_ascii_case("unknown artist") {
+        actions = actions.push(
+            button(text("Go to Artist").size(12))
+                .padding([6, 12])
+                .style(glass_button_style(false, props.accent))
+                .on_press(Message::OpenArtistByName {
+                    name: primary_artist,
+                    source_hint: track.source.clone(),
+                }),
+        );
+    }
 
     if matches!(track.source, TrackSource::Spotify { .. }) {
         actions = actions.push(
@@ -1919,7 +2191,7 @@ fn track_row<'a>(
 
     column![
         main_row,
-        container(actions)
+        container(actions.wrap())
             .padding([8, 14])
             .width(Length::Fill)
             .style(glass_elevated_style)

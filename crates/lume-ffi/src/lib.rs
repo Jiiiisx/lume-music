@@ -1,0 +1,949 @@
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use lume_core::{PlaybackSourceUsed, ResolvedStream, Track, TrackSource};
+use lume_providers::{
+    build_authorize_url, exchange_authorization_code, import_spotify_playlist_url,
+    refresh_spotify_token, resolve_spotify_to_ytm_video_id, ChainedLyricsProvider, PkceChallenge,
+    SpotifyWebClient, YouTubeMusicProvider, SPOTIFY_ACCOUNTS_TOKEN_URL,
+    SPOTIFY_MOBILE_REDIRECT_URI, SPOTIFY_WEB_API_SCOPES,
+};
+use lume_storage::{Database, OfflineTrackRecord, SpotifyTokenSet, WEEKLY_CHARTS_TTL_S};
+use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
+
+uniffi::setup_scaffolding!();
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum LumeFfiError {
+    #[error("{message}")]
+    InvalidInput { message: String },
+    #[error("{message}")]
+    Storage { message: String },
+    #[error("{message}")]
+    Network { message: String },
+    #[error("{message}")]
+    Auth { message: String },
+    #[error("{message}")]
+    Internal { message: String },
+}
+
+impl LumeFfiError {
+    fn invalid(msg: impl Into<String>) -> Self {
+        Self::InvalidInput {
+            message: msg.into(),
+        }
+    }
+    fn storage(msg: impl Into<String>) -> Self {
+        Self::Storage {
+            message: msg.into(),
+        }
+    }
+    fn network(msg: impl Into<String>) -> Self {
+        Self::Network {
+            message: msg.into(),
+        }
+    }
+    fn auth(msg: impl Into<String>) -> Self {
+        Self::Auth {
+            message: msg.into(),
+        }
+    }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal {
+            message: msg.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayableStreamDto {
+    pub uri: String,
+    pub is_offline: bool,
+    pub source_used: PlaybackSourceUsed,
+    pub resolved_video_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineEntryDto {
+    pub track: Track,
+    pub record: OfflineTrackRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobileSpotifyAuthStartDto {
+    pub authorize_url: String,
+    pub code_verifier: String,
+    pub state: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotifySyncSummaryDto {
+    pub display_name: String,
+    pub liked_count: usize,
+    pub playlist_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckDto {
+    pub version: String,
+    pub target_os: String,
+    pub db_path: String,
+    pub offline_dir: String,
+    pub offline_track_count: usize,
+    pub offline_storage_bytes: u64,
+}
+
+#[derive(uniffi::Object)]
+pub struct LumeMobileCore {
+    runtime: Runtime,
+    db: Mutex<Database>,
+    ytm: YouTubeMusicProvider,
+    lyrics: ChainedLyricsProvider,
+    http: reqwest::Client,
+    db_path: PathBuf,
+    offline_dir: PathBuf,
+}
+
+fn sanitize_filename(uid: &str) -> String {
+    uid.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn to_file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw.starts_with('/') {
+        format!("file://{raw}")
+    } else {
+        format!("file:///{raw}")
+    }
+}
+
+fn parse_track_json(track_json: &str) -> Result<Track, LumeFfiError> {
+    serde_json::from_str(track_json)
+        .map_err(|e| LumeFfiError::invalid(format!("invalid Track JSON: {e}")))
+}
+
+fn to_json<T: Serialize>(value: &T) -> Result<String, LumeFfiError> {
+    serde_json::to_string(value)
+        .map_err(|e| LumeFfiError::internal(format!("JSON serialization failed: {e}")))
+}
+
+impl LumeMobileCore {
+    async fn resolve_remote_http_stream(
+        &self,
+        track: &Track,
+        force_rematch: bool,
+    ) -> Result<(String, PlaybackSourceUsed, Option<String>), LumeFfiError> {
+        match &track.source {
+            TrackSource::YouTubeMusic { video_id } => {
+                let resolved = self
+                    .ytm
+                    .resolve_stream_for_video_id(video_id)
+                    .await
+                    .map_err(|e| LumeFfiError::network(e.to_string()))?;
+                match resolved {
+                    ResolvedStream::HttpUrl { url, source } => {
+                        Ok((url, source, Some(video_id.clone())))
+                    }
+                    _ => Err(LumeFfiError::network(
+                        "Direct HTTP audio stream unavailable for this YouTube track",
+                    )),
+                }
+            }
+            TrackSource::Spotify { .. } => {
+                let matched =
+                    resolve_spotify_to_ytm_video_id(track, &self.db, &self.ytm, force_rematch)
+                        .await
+                        .map_err(|e| LumeFfiError::network(e.to_string()))?;
+                let resolved = self
+                    .ytm
+                    .resolve_stream_for_video_id(&matched.yt_video_id)
+                    .await
+                    .map_err(|e| LumeFfiError::network(e.to_string()))?;
+                match resolved {
+                    ResolvedStream::HttpUrl { url, .. } => Ok((
+                        url,
+                        PlaybackSourceUsed::YouTubeFallback,
+                        Some(matched.yt_video_id),
+                    )),
+                    _ => Err(LumeFfiError::network(
+                        "Direct HTTP audio stream unavailable for matched Spotify track",
+                    )),
+                }
+            }
+            TrackSource::Local { path } => Ok((
+                to_file_uri(path),
+                PlaybackSourceUsed::LocalFile,
+                None,
+            )),
+        }
+    }
+}
+
+#[uniffi::export]
+impl LumeMobileCore {
+    /// Initializes the shared Rust core using explicit iOS/mobile app-container paths.
+    #[uniffi::constructor]
+    pub fn new(data_dir: String, cache_dir: String) -> Result<Arc<Self>, LumeFfiError> {
+        let data_path = PathBuf::from(data_dir.trim());
+        let cache_path = PathBuf::from(cache_dir.trim());
+        if data_path.as_os_str().is_empty() || cache_path.as_os_str().is_empty() {
+            return Err(LumeFfiError::invalid(
+                "data_dir and cache_dir must be non-empty paths",
+            ));
+        }
+
+        let offline_dir = data_path.join("offline");
+        std::fs::create_dir_all(&offline_dir)
+            .map_err(|e| LumeFfiError::storage(format!("failed to create offline dir: {e}")))?;
+
+        let ytm_cache = cache_path.join("ytm");
+        std::fs::create_dir_all(&ytm_cache)
+            .map_err(|e| LumeFfiError::storage(format!("failed to create ytm cache dir: {e}")))?;
+
+        let db_path = data_path.join("lume.db");
+        let db = Database::open(&db_path).map_err(|e| LumeFfiError::storage(e.to_string()))?;
+
+        let ytm = YouTubeMusicProvider::new(ytm_cache, None)
+            .map_err(|e| LumeFfiError::internal(e.to_string()))?;
+        let lyrics = ChainedLyricsProvider::new("https://lrclib.net".to_string());
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| LumeFfiError::internal(format!("failed to build HTTP client: {e}")))?;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("lume-ffi-tokio")
+            .enable_all()
+            .build()
+            .map_err(|e| LumeFfiError::internal(format!("failed to build tokio runtime: {e}")))?;
+
+        Ok(Arc::new(Self {
+            runtime,
+            db: Mutex::new(db),
+            ytm,
+            lyrics,
+            http,
+            db_path,
+            offline_dir,
+        }))
+    }
+
+    pub fn health_check_json(&self) -> Result<String, LumeFfiError> {
+        let (offline_track_count, offline_storage_bytes) = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            let count = db
+                .list_offline_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+                .len();
+            let bytes = db
+                .offline_storage_total_bytes()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+            (count, bytes)
+        };
+        to_json(&HealthCheckDto {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            db_path: self.db_path.to_string_lossy().into_owned(),
+            offline_dir: self.offline_dir.to_string_lossy().into_owned(),
+            offline_track_count,
+            offline_storage_bytes,
+        })
+    }
+
+    /// Resolves a track to an AVPlayer-ready URI, prioritizing locally cached offline audio first.
+    pub fn resolve_playable_track_json(
+        &self,
+        track_json: String,
+        force_rematch: bool,
+    ) -> Result<String, LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+
+        if !force_rematch {
+            let offline_hit = {
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+                db.get_offline_track(&track.uid)
+                    .map_err(|e| LumeFfiError::storage(e.to_string()))?
+            };
+            if let Some(rec) = offline_hit {
+                let path = PathBuf::from(&rec.file_path);
+                if path.is_file() {
+                    return to_json(&PlayableStreamDto {
+                        uri: to_file_uri(&path),
+                        is_offline: true,
+                        source_used: PlaybackSourceUsed::LocalFile,
+                        resolved_video_id: None,
+                    });
+                }
+            }
+        }
+
+        if let TrackSource::Local { path } = &track.source {
+            return to_json(&PlayableStreamDto {
+                uri: to_file_uri(path),
+                is_offline: true,
+                source_used: PlaybackSourceUsed::LocalFile,
+                resolved_video_id: None,
+            });
+        }
+
+        let (url, source_used, resolved_video_id) = self
+            .runtime
+            .block_on(self.resolve_remote_http_stream(&track, force_rematch))?;
+
+        to_json(&PlayableStreamDto {
+            uri: url,
+            is_offline: false,
+            source_used,
+            resolved_video_id,
+        })
+    }
+
+    /// Downloads a track's M4A/audio stream to local offline storage and caches lyrics for driving mode.
+    pub fn download_track_offline_json(&self, track_json: String) -> Result<String, LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+        let (url, _, _) = self
+            .runtime
+            .block_on(self.resolve_remote_http_stream(&track, false))?;
+
+        if url.starts_with("file://") {
+            return Err(LumeFfiError::invalid(
+                "track is already a local file on device",
+            ));
+        }
+
+        let target_path = self
+            .offline_dir
+            .join(format!("{}.m4a", sanitize_filename(&track.uid)));
+        let tmp_path = target_path.with_extension("m4a.tmp");
+
+        let (bytes_written, mime_type) = self.runtime.block_on(async {
+            let resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| LumeFfiError::network(format!("offline download failed: {e}")))?;
+
+            if !resp.status().is_success() {
+                return Err(LumeFfiError::network(format!(
+                    "offline download returned HTTP {}",
+                    resp.status()
+                )));
+            }
+
+            let mime = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/mp4")
+                .split(';')
+                .next()
+                .unwrap_or("audio/mp4")
+                .trim()
+                .to_string();
+
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| LumeFfiError::network(format!("reading audio stream failed: {e}")))?;
+            if bytes.is_empty() {
+                return Err(LumeFfiError::network("downloaded audio stream was empty"));
+            }
+
+            std::fs::write(&tmp_path, &bytes)
+                .map_err(|e| LumeFfiError::storage(format!("writing offline file failed: {e}")))?;
+            std::fs::rename(&tmp_path, &target_path).map_err(|e| {
+                LumeFfiError::storage(format!("finalizing offline file failed: {e}"))
+            })?;
+
+            Ok::<(u64, String), LumeFfiError>((bytes.len() as u64, mime))
+        })?;
+
+        let record = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.upsert_offline_track(
+                &track,
+                &target_path.to_string_lossy(),
+                bytes_written,
+                &mime_type,
+            )
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+
+        // Best-effort lyrics pre-cache so synced lyrics also work completely offline.
+        let _ = self.fetch_lyrics_json(track_json, false);
+
+        to_json(&OfflineEntryDto { track, record })
+    }
+
+    pub fn list_offline_tracks_json(&self) -> Result<String, LumeFfiError> {
+        let items: Vec<OfflineEntryDto> = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.list_offline_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+                .into_iter()
+                .map(|(track, record)| OfflineEntryDto { track, record })
+                .collect()
+        };
+        to_json(&items)
+    }
+
+    pub fn delete_offline_track(&self, track_uid: String) -> Result<(), LumeFfiError> {
+        let removed_path = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.delete_offline_track(track_uid.trim())
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        if let Some(path) = removed_path {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn offline_storage_bytes(&self) -> Result<u64, LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.offline_storage_total_bytes()
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn search_ytm_json(&self, query: String, limit: u32) -> Result<String, LumeFfiError> {
+        let cap = (limit as usize).clamp(1, 50);
+        let result = self
+            .runtime
+            .block_on(self.ytm.search_catalog_full(&query, cap, (cap / 2).max(4), 8, 8))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&result)
+    }
+
+    pub fn get_charts_json(
+        &self,
+        indonesia: bool,
+        limit: u32,
+        force_refresh: bool,
+    ) -> Result<String, LumeFfiError> {
+        let chart_key = if indonesia {
+            "ytm:mobile:id"
+        } else {
+            "ytm:mobile:global"
+        };
+
+        if !force_refresh {
+            let cached = {
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+                db.get_cached_chart(chart_key, WEEKLY_CHARTS_TTL_S)
+                    .map_err(|e| LumeFfiError::storage(e.to_string()))?
+            };
+            if let Some(c) = cached {
+                if c.is_fresh && !c.tracks.is_empty() {
+                    return to_json(&c.tracks);
+                }
+            }
+        }
+
+        let cap = (limit as usize).clamp(1, 50);
+        match self.runtime.block_on(self.ytm.fetch_charts(indonesia, cap)) {
+            Ok(tracks) => {
+                if !tracks.is_empty() {
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+                    let _ = db.put_cached_chart(chart_key, &tracks);
+                }
+                to_json(&tracks)
+            }
+            Err(err) => {
+                // Offline fallback: return stale cached charts if available.
+                let stale = {
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+                    db.get_cached_chart(chart_key, WEEKLY_CHARTS_TTL_S)
+                        .map_err(|e| LumeFfiError::storage(e.to_string()))?
+                };
+                if let Some(c) = stale {
+                    if !c.tracks.is_empty() {
+                        return to_json(&c.tracks);
+                    }
+                }
+                Err(LumeFfiError::network(err.to_string()))
+            }
+        }
+    }
+
+    pub fn get_artist_profile_json(&self, artist_id: String) -> Result<String, LumeFfiError> {
+        let profile = self
+            .runtime
+            .block_on(self.ytm.get_artist_profile(&artist_id))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&profile)
+    }
+
+    pub fn get_album_detail_json(&self, album_id: String) -> Result<String, LumeFfiError> {
+        let album = self
+            .runtime
+            .block_on(self.ytm.get_album_detail(&album_id))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&album)
+    }
+
+    pub fn get_ytm_playlist_detail_json(
+        &self,
+        playlist_id: String,
+    ) -> Result<String, LumeFfiError> {
+        let detail = self
+            .runtime
+            .block_on(self.ytm.get_playlist_detail(&playlist_id))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&detail)
+    }
+
+    pub fn list_playlists_json(&self) -> Result<String, LumeFfiError> {
+        let playlists = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.list_playlists()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&playlists)
+    }
+
+    pub fn create_playlist_json(&self, name: String) -> Result<String, LumeFfiError> {
+        let playlist = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.create_playlist(&name)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&playlist)
+    }
+
+    pub fn delete_playlist(&self, playlist_id: String) -> Result<(), LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.delete_playlist(&playlist_id)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn get_playlist_tracks_json(&self, playlist_id: String) -> Result<String, LumeFfiError> {
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.get_playlist_tracks(&playlist_id)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn add_track_to_playlist(
+        &self,
+        playlist_id: String,
+        track_json: String,
+    ) -> Result<(), LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.upsert_track(&track, None)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+        db.add_track_to_playlist(&playlist_id, &track.uid)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn remove_track_from_playlist(
+        &self,
+        playlist_id: String,
+        position: u32,
+    ) -> Result<(), LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.remove_track_from_playlist(&playlist_id, position as usize)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn set_track_liked(&self, track_json: String, liked: bool) -> Result<(), LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.upsert_track(&track, None)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+        db.set_local_favorite(&track.uid, liked)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn list_liked_tracks_json(&self) -> Result<String, LumeFfiError> {
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.list_unified_liked_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn record_play_history(&self, track_json: String) -> Result<(), LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.record_play_history(&track)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn list_recent_tracks_json(&self, limit: u32) -> Result<String, LumeFfiError> {
+        let cap = (limit as usize).clamp(1, 100);
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.list_recent_tracks(cap)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn fetch_lyrics_json(
+        &self,
+        track_json: String,
+        force_refresh: bool,
+    ) -> Result<String, LumeFfiError> {
+        let track = parse_track_json(&track_json)?;
+        let db = Database::open(&self.db_path).map_err(|e| LumeFfiError::storage(e.to_string()))?;
+        let data = self
+            .runtime
+            .block_on(self.lyrics.fetch(&track, &db, force_refresh))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&data)
+    }
+
+    /// Generates an OAuth 2.0 PKCE challenge and authorize URL using `lumemusic://callback`.
+    pub fn begin_spotify_mobile_auth_json(&self, client_id: String) -> Result<String, LumeFfiError> {
+        let cid = client_id.trim();
+        if cid.is_empty() {
+            return Err(LumeFfiError::invalid("Spotify Client ID cannot be empty"));
+        }
+        let pkce = PkceChallenge::generate();
+        let authorize_url = build_authorize_url(
+            cid,
+            SPOTIFY_MOBILE_REDIRECT_URI,
+            SPOTIFY_WEB_API_SCOPES,
+            &pkce,
+        )
+        .map_err(|e| LumeFfiError::auth(e.to_string()))?;
+
+        to_json(&MobileSpotifyAuthStartDto {
+            authorize_url,
+            code_verifier: pkce.code_verifier,
+            state: pkce.state,
+            redirect_uri: SPOTIFY_MOBILE_REDIRECT_URI.to_string(),
+        })
+    }
+
+    /// Exchanges a mobile OAuth callback code for a `SpotifyTokenSet` JSON (store in iOS Keychain!).
+    pub fn exchange_spotify_mobile_code_json(
+        &self,
+        client_id: String,
+        code: String,
+        code_verifier: String,
+    ) -> Result<String, LumeFfiError> {
+        let token_set = self
+            .runtime
+            .block_on(exchange_authorization_code(
+                SPOTIFY_ACCOUNTS_TOKEN_URL,
+                client_id.trim(),
+                code.trim(),
+                SPOTIFY_MOBILE_REDIRECT_URI,
+                code_verifier.trim(),
+            ))
+            .map_err(|e| LumeFfiError::auth(e.to_string()))?;
+        to_json(&token_set)
+    }
+
+    pub fn refresh_spotify_token_json(
+        &self,
+        client_id: String,
+        token_json: String,
+    ) -> Result<String, LumeFfiError> {
+        let current: SpotifyTokenSet = serde_json::from_str(&token_json)
+            .map_err(|e| LumeFfiError::invalid(format!("invalid SpotifyTokenSet JSON: {e}")))?;
+        let refreshed = self
+            .runtime
+            .block_on(refresh_spotify_token(client_id.trim(), &current))
+            .map_err(|e| LumeFfiError::auth(e.to_string()))?;
+        to_json(&refreshed)
+    }
+
+    pub fn sync_spotify_library_json(&self, access_token: String) -> Result<String, LumeFfiError> {
+        let token = access_token.trim();
+        if token.is_empty() {
+            return Err(LumeFfiError::auth("Spotify access token is empty"));
+        }
+        let client = SpotifyWebClient::new();
+        let (profile, liked_tracks, playlists_with_tracks) = self.runtime.block_on(async {
+            let profile = client
+                .get_profile(token)
+                .await
+                .map_err(|e| LumeFfiError::auth(e.to_string()))?;
+            let liked = client
+                .get_liked_tracks(token)
+                .await
+                .map_err(|e| LumeFfiError::network(e.to_string()))?;
+            let playlists = client
+                .get_playlists(token)
+                .await
+                .map_err(|e| LumeFfiError::network(e.to_string()))?;
+
+            let mut full_playlists = Vec::with_capacity(playlists.len());
+            for pl in playlists {
+                if let Ok(tracks) = client.get_playlist_tracks(token, &pl.id).await {
+                    full_playlists.push((pl, tracks));
+                }
+            }
+            Ok::<_, LumeFfiError>((profile, liked, full_playlists))
+        })?;
+
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.sync_spotify_liked_tracks(&liked_tracks)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+
+        let mut synced_ids = std::collections::HashSet::with_capacity(playlists_with_tracks.len());
+        for (pl, tracks) in &playlists_with_tracks {
+            db.upsert_synced_spotify_playlist(&pl.id, &pl.name, tracks)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+            synced_ids.insert(pl.id.clone());
+        }
+        let _ = db.prune_stale_synced_spotify_playlists(&synced_ids);
+
+        to_json(&SpotifySyncSummaryDto {
+            display_name: profile.display_name,
+            liked_count: liked_tracks.len(),
+            playlist_count: playlists_with_tracks.len(),
+        })
+    }
+
+    pub fn import_spotify_playlist_url_json(&self, url: String) -> Result<String, LumeFfiError> {
+        let imported = self
+            .runtime
+            .block_on(import_spotify_playlist_url(url.trim()))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        let playlist = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.upsert_imported_spotify_playlist(
+                &imported.name,
+                &imported.source_url,
+                &imported.tracks,
+            )
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&playlist)
+    }
+
+    pub fn rematch_spotify_track(
+        &self,
+        spotify_track_id: String,
+        yt_video_id: String,
+    ) -> Result<(), LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.put_yt_mapping(spotify_track_id.trim(), yt_video_id.trim(), 1.0)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_ytm_track(video_id: &str) -> Track {
+        let source = TrackSource::YouTubeMusic {
+            video_id: video_id.to_string(),
+        };
+        Track {
+            uid: source.canonical_uid(),
+            source,
+            title: "Night Drive".into(),
+            artists: vec!["Lume Artist".into()],
+            album: Some("Highway EP".into()),
+            duration_ms: 215_000,
+            artwork_ref: None,
+            is_liked: false,
+        }
+    }
+
+    #[test]
+    fn mobile_core_initializes_and_reports_health() {
+        let dir = TempDir::new().unwrap();
+        let core = LumeMobileCore::new(
+            dir.path().join("data").to_string_lossy().into_owned(),
+            dir.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let health: HealthCheckDto =
+            serde_json::from_str(&core.health_check_json().unwrap()).unwrap();
+        assert_eq!(health.offline_track_count, 0);
+        assert_eq!(health.offline_storage_bytes, 0);
+        assert!(Path::new(&health.db_path).exists());
+    }
+
+    #[test]
+    fn playlist_like_and_history_round_trip_over_json_boundary() {
+        let dir = TempDir::new().unwrap();
+        let core = LumeMobileCore::new(
+            dir.path().join("data").to_string_lossy().into_owned(),
+            dir.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let created: lume_core::Playlist =
+            serde_json::from_str(&core.create_playlist_json("Driving Mix".into()).unwrap())
+                .unwrap();
+        assert_eq!(created.name, "Driving Mix");
+
+        let track = sample_ytm_track("drv001");
+        let track_json = serde_json::to_string(&track).unwrap();
+        core.add_track_to_playlist(created.id.clone(), track_json.clone())
+            .unwrap();
+        core.set_track_liked(track_json.clone(), true).unwrap();
+        core.record_play_history(track_json).unwrap();
+
+        let pl_tracks: Vec<Track> =
+            serde_json::from_str(&core.get_playlist_tracks_json(created.id).unwrap()).unwrap();
+        assert_eq!(pl_tracks.len(), 1);
+        assert_eq!(pl_tracks[0].title, "Night Drive");
+
+        let liked: Vec<Track> =
+            serde_json::from_str(&core.list_liked_tracks_json().unwrap()).unwrap();
+        assert_eq!(liked.len(), 1);
+
+        let recent: Vec<Track> =
+            serde_json::from_str(&core.list_recent_tracks_json(10).unwrap()).unwrap();
+        assert_eq!(recent.len(), 1);
+    }
+
+    #[test]
+    fn offline_file_takes_priority_without_network_and_deletes_cleanly() {
+        let dir = TempDir::new().unwrap();
+        let core = LumeMobileCore::new(
+            dir.path().join("data").to_string_lossy().into_owned(),
+            dir.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let track = sample_ytm_track("offline_vid_99");
+        let audio_file = core.offline_dir.join("ytm_offline_vid_99.m4a");
+        std::fs::write(&audio_file, b"fake-m4a-bytes").unwrap();
+
+        {
+            let db = core.db.lock().unwrap();
+            db.upsert_offline_track(
+                &track,
+                &audio_file.to_string_lossy(),
+                14,
+                "audio/mp4",
+            )
+            .unwrap();
+        }
+
+        let resolved: PlayableStreamDto = serde_json::from_str(
+            &core
+                .resolve_playable_track_json(serde_json::to_string(&track).unwrap(), false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(resolved.is_offline);
+        assert!(resolved.uri.starts_with("file://"));
+        assert_eq!(resolved.source_used, PlaybackSourceUsed::LocalFile);
+        assert_eq!(core.offline_storage_bytes().unwrap(), 14);
+
+        core.delete_offline_track(track.uid.clone()).unwrap();
+        assert!(!audio_file.exists());
+        assert_eq!(core.offline_storage_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn spotify_mobile_auth_uses_custom_url_scheme_and_pkce() {
+        let dir = TempDir::new().unwrap();
+        let core = LumeMobileCore::new(
+            dir.path().join("data").to_string_lossy().into_owned(),
+            dir.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let started: MobileSpotifyAuthStartDto = serde_json::from_str(
+            &core
+                .begin_spotify_mobile_auth_json("test_client_id".into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(started.redirect_uri, "lumemusic://callback");
+        assert!(started.authorize_url.contains("lumemusic%3A%2F%2Fcallback"));
+        assert!(started.authorize_url.contains("code_challenge_method=S256"));
+        assert!(!started.code_verifier.is_empty());
+        assert!(!started.state.is_empty());
+    }
+}

@@ -54,7 +54,8 @@ pub fn view_settings<'a>(
                     GlassmorphismMode::DynamicAlbumBlur
                 )),
         ]
-        .spacing(10),
+        .spacing(10)
+        .wrap(),
         text("Lyrics Visual Mode")
             .size(15)
             .font(FONT_SEMIBOLD)
@@ -75,7 +76,8 @@ pub fn view_settings<'a>(
                 ))
                 .on_press(Message::SetLyricsVisualMode(LyricsVisualMode::UltraLight)),
         ]
-        .spacing(10),
+        .spacing(10)
+        .wrap(),
         toggler(config.reduced_motion)
             .label("Reduced Motion (disables shader & spring frame ticks)")
             .on_toggle(Message::SetReducedMotion)
@@ -239,7 +241,8 @@ pub fn view_settings<'a>(
         },
         row![web_actions, playback_action]
             .spacing(10)
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            .wrap(),
     ]
     .spacing(10);
 

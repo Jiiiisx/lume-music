@@ -1,0 +1,32 @@
+[package]
+name = "lume-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "lume_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+default = []
+bindgen-cli = ["uniffi/cli"]
+
+[dependencies]
+lume-core.workspace = true
+lume-providers.workspace = true
+lume-storage.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uniffi = "0.28"
+
+[dev-dependencies]
+tempfile.workspace = true

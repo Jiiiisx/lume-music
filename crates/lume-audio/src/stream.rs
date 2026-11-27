@@ -700,6 +700,26 @@ fn parse_sidx_box_total(box_bytes: &[u8], sidx_end_offset: u64) -> Option<u64> {
     )
 }
 
+/// Decodes subprocess stderr cleanly, handling both UTF-8 and Windows-1252 smart punctuation
+/// (e.g. `0x92` right single quote in `you're`) without producing U+FFFD replacement characters.
+fn decode_process_stderr(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            0x00..=0x7F => out.push(b as char),
+            0x91 | 0x92 => out.push('\''),
+            0x93 | 0x94 => out.push('"'),
+            0x96 | 0x97 => out.push('-'),
+            0x85 => out.push_str("..."),
+            _ => out.push(' '),
+        }
+    }
+    out
+}
+
 /// Stream audio from `yt-dlp -f <selector> --no-playlist --no-part --fixup never -o - <url>`
 /// into `temp_path`, invoking `on_ready` progressively once `prebuffer_bytes` have arrived
 /// (using the MP4 `sidx` box when present to expose exact file length immediately so seeking works
@@ -719,22 +739,23 @@ where
     use tokio::io::AsyncReadExt;
 
     let mut cmd = tokio::process::Command::new(&binary);
-    cmd.args([
-        "-f",
-        &format_selector,
-        "--no-playlist",
-        "--no-part",
-        "--fixup",
-        "never",
-        "--no-warnings",
-        "-o",
-        "-",
-        &video_url,
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true);
+    cmd.env("PYTHONIOENCODING", "utf-8")
+        .args([
+            "-f",
+            &format_selector,
+            "--no-playlist",
+            "--no-part",
+            "--fixup",
+            "never",
+            "--no-warnings",
+            "-o",
+            "-",
+            &video_url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
 
     #[cfg(windows)]
     {
@@ -757,7 +778,7 @@ where
         if let Some(ref mut err_pipe) = stderr {
             let _ = err_pipe.read_to_end(&mut buf).await;
         }
-        String::from_utf8_lossy(&buf).into_owned()
+        decode_process_stderr(&buf)
     });
 
     let mut writer = OpenOptions::new()

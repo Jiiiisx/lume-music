@@ -1,0 +1,18 @@
+export const LumeTheme = {
+  bg: '#0A0C12',
+  bgElevated: '#121622',
+  bgCard: 'rgba(255, 255, 255, 0.06)',
+  bgCardStrong: 'rgba(255, 255, 255, 0.10)',
+  border: 'rgba(255, 255, 255, 0.10)',
+  borderAccent: 'rgba(99, 102, 241, 0.45)',
+  accent: '#6366F1',
+  accentBright: '#818CF8',
+  violet: '#8B5CF6',
+  emerald: '#10B981',
+  amber: '#F59E0B',
+  rose: '#F43F5E',
+  spotify: '#1DB954',
+  textPrimary: '#F8FAFC',
+  textSecondary: '#94A3B8',
+  textMuted: '#64748B',
+} as const;

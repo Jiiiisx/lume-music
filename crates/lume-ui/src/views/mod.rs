@@ -1,4 +1,5 @@
 pub mod browse;
+pub mod catalog;
 pub mod lyrics_view;
 pub mod player_bar;
 pub mod queue_drawer;
@@ -10,9 +11,14 @@ use std::sync::Arc;
 
 use lume_audio::AudioEvent;
 use lume_core::{
-    LyricsData, PlaybackSourceUsed, PlaybackStatus, Playlist, RepeatMode, ResolvedStream, Track,
+    AlbumDetail, AlbumSummary, ArtistProfile, ArtistSummary, CatalogSource, LyricsData,
+    PlaybackSourceUsed, PlaybackStatus, Playlist, RemotePlaylistDetail, RemotePlaylistSummary,
+    RepeatMode, ResolvedStream, Track, TrackSource,
 };
-use lume_providers::{ScanReport, SpotifyAccountTier, SpotifyUserProfile};
+use lume_providers::{
+    ScanReport, SpotifyAccountTier, SpotifyCatalogSearchResult, SpotifyUserProfile,
+    YtmCatalogSearchResult,
+};
 use lume_storage::{GlassmorphismMode, LyricsVisualMode, SpotifyTokenSet};
 pub use lume_storage::{PlaylistSort, PlaylistSortField, SortDirection};
 
@@ -78,6 +84,26 @@ impl ChartRegion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchTab {
+    #[default]
+    All,
+    Songs,
+    Artists,
+    Playlists,
+}
+
+impl SearchTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Songs => "Songs",
+            Self::Artists => "Artists",
+            Self::Playlists => "Playlists",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveNav {
     #[default]
@@ -86,6 +112,21 @@ pub enum ActiveNav {
     LikedSongs,
     LocalFiles,
     Playlist(String),
+    ArtistProfile {
+        source: CatalogSource,
+        id: String,
+        name: String,
+    },
+    AlbumDetail {
+        source: CatalogSource,
+        id: String,
+        title: String,
+    },
+    RemotePlaylist {
+        source: CatalogSource,
+        id: String,
+        name: String,
+    },
     Settings,
 }
 
@@ -119,6 +160,7 @@ pub enum Message {
 
     // Navigation & modals
     SelectNav(ActiveNav),
+    NavigateBack,
     SelectHomeRegion(ChartRegion),
     RefreshHomeCharts,
     ToggleExpandSpotifyTrending,
@@ -139,17 +181,53 @@ pub enum Message {
 
     // Search & filters
     SearchInputChanged(String),
+    SearchDebounceFired {
+        seq: u64,
+        query: String,
+    },
     SearchSubmitted,
+    SearchTabChanged(SearchTab),
     SourceFilterChanged(SourceFilter),
     YtmSearchFinished {
         request_id: u64,
-        result: Result<Vec<Track>, String>,
+        result: Result<YtmCatalogSearchResult, String>,
     },
     SpotifySearchFinished {
         request_id: u64,
-        result: Result<Vec<Track>, SpotifySearchError>,
+        result: Result<SpotifyCatalogSearchResult, SpotifySearchError>,
         refreshed_token: Option<SpotifyTokenSet>,
     },
+
+    // Catalog detail views (Artist Profile, Album Detail, Remote Playlist Preview)
+    OpenArtist(ArtistSummary),
+    OpenArtistByName {
+        name: String,
+        source_hint: TrackSource,
+    },
+    ToggleExpandArtistTracks,
+    ArtistProfileLoaded {
+        request_id: u64,
+        result: Result<ArtistProfile, String>,
+        refreshed_token: Option<SpotifyTokenSet>,
+        fallback_notice: Option<String>,
+        spotify_lapsed: bool,
+    },
+    OpenAlbum(AlbumSummary),
+    AlbumDetailLoaded {
+        request_id: u64,
+        result: Result<AlbumDetail, String>,
+        refreshed_token: Option<SpotifyTokenSet>,
+        spotify_lapsed: bool,
+    },
+    OpenRemotePlaylist(RemotePlaylistSummary),
+    RemotePlaylistLoaded {
+        request_id: u64,
+        result: Result<RemotePlaylistDetail, String>,
+        refreshed_token: Option<SpotifyTokenSet>,
+        spotify_lapsed: bool,
+    },
+    SaveRemotePlaylistToLibrary,
+    RemotePlaylistSaved(Result<(Playlist, bool), String>),
 
     // Playlists & track actions
     NewPlaylistNameChanged(String),
@@ -296,4 +374,55 @@ pub struct NowPlayingInfo<'a> {
     pub repeat: RepeatMode,
     pub volume: f32,
     pub muted: bool,
+}
+
+/// Computes sidebar width (and matching titlebar left brand width) for the current window size.
+pub fn responsive_sidebar_width(window_width: f32) -> f32 {
+    if window_width < 1020.0 {
+        192.0
+    } else {
+        224.0
+    }
+}
+
+/// Whether track tables have enough width to display the Album column cleanly alongside Title/Source/Time.
+pub fn show_track_album_column(window_width: f32) -> bool {
+    window_width >= 960.0
+}
+
+/// Whether track tables have enough width to display the Source badge column.
+pub fn show_track_source_column(window_width: f32) -> bool {
+    window_width >= 760.0
+}
+
+/// Computes responsive card-grid column count for Artists, Playlists, Albums, and Singles.
+pub fn responsive_grid_columns(
+    window_width: f32,
+    sidebar_width: f32,
+    card_width: f32,
+    spacing: f32,
+) -> usize {
+    let available = (window_width - sidebar_width - 116.0).max(card_width);
+    let cols = ((available + spacing) / (card_width + spacing)).floor() as usize;
+    cols.clamp(2, 9)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responsive_helpers_scale_cleanly_across_breakpoints() {
+        assert_eq!(responsive_sidebar_width(820.0), 192.0);
+        assert_eq!(responsive_sidebar_width(1280.0), 224.0);
+
+        assert!(!show_track_album_column(860.0));
+        assert!(show_track_album_column(1024.0));
+        assert!(!show_track_source_column(700.0));
+        assert!(show_track_source_column(820.0));
+
+        assert_eq!(responsive_grid_columns(820.0, 192.0, 136.0, 10.0), 3);
+        assert_eq!(responsive_grid_columns(1180.0, 224.0, 136.0, 10.0), 5);
+        assert!(responsive_grid_columns(1920.0, 224.0, 136.0, 10.0) >= 8);
+    }
 }

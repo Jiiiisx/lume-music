@@ -68,6 +68,7 @@ impl Track {
 pub enum PlaylistOrigin {
     SpotifySynced,
     SpotifyImported { source_url: String },
+    YouTubeImported { source_url: String },
     LocalCustom,
 }
 
@@ -76,9 +77,108 @@ impl PlaylistOrigin {
     pub fn is_editable(&self) -> bool {
         match self {
             Self::SpotifySynced => false,
-            Self::SpotifyImported { .. } | Self::LocalCustom => true,
+            Self::SpotifyImported { .. }
+            | Self::YouTubeImported { .. }
+            | Self::LocalCustom => true,
         }
     }
+}
+
+/// Remote catalog provider identity for artists, albums, and remote playlists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CatalogSource {
+    Spotify,
+    YouTubeMusic,
+}
+
+impl CatalogSource {
+    pub fn short_badge(self) -> &'static str {
+        match self {
+            Self::Spotify => "SP",
+            Self::YouTubeMusic => "YTM",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Spotify => "Spotify",
+            Self::YouTubeMusic => "YouTube Music",
+        }
+    }
+}
+
+/// Lightweight artist card returned by search or artist-related sections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistSummary {
+    pub id: String,
+    pub source: CatalogSource,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub subtitle: Option<String>,
+}
+
+/// Lightweight album/single/EP card shown on an artist profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumSummary {
+    pub id: String,
+    pub source: CatalogSource,
+    pub title: String,
+    pub artist_name: String,
+    pub year: Option<String>,
+    pub album_type: Option<String>,
+    pub cover_url: Option<String>,
+}
+
+/// Lightweight remote playlist card returned by search or artist profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePlaylistSummary {
+    pub id: String,
+    pub source: CatalogSource,
+    pub name: String,
+    pub owner: Option<String>,
+    pub track_count: Option<usize>,
+    pub cover_url: Option<String>,
+}
+
+/// Full artist profile view payload containing popular songs, albums, singles, and playlists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistProfile {
+    pub id: String,
+    pub source: CatalogSource,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub description: Option<String>,
+    pub subscriber_label: Option<String>,
+    pub top_tracks: Vec<Track>,
+    pub albums: Vec<AlbumSummary>,
+    pub singles: Vec<AlbumSummary>,
+    pub playlists: Vec<RemotePlaylistSummary>,
+}
+
+/// Full album detail view payload containing ordered playable tracks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumDetail {
+    pub id: String,
+    pub source: CatalogSource,
+    pub title: String,
+    pub artist_name: String,
+    pub artist_id: Option<String>,
+    pub year: Option<String>,
+    pub cover_url: Option<String>,
+    pub tracks: Vec<Track>,
+}
+
+/// Full remote playlist preview payload before optional save/import into local library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePlaylistDetail {
+    pub id: String,
+    pub source: CatalogSource,
+    pub name: String,
+    pub owner: Option<String>,
+    pub cover_url: Option<String>,
+    pub source_url: String,
+    pub tracks: Vec<Track>,
+    pub is_truncated_embed: bool,
 }
 
 /// A playlist entry in the user's library.
@@ -242,6 +342,10 @@ mod tests {
         assert!(!PlaylistOrigin::SpotifySynced.is_editable());
         assert!(PlaylistOrigin::SpotifyImported {
             source_url: "https://open.spotify.com/playlist/1".into()
+        }
+        .is_editable());
+        assert!(PlaylistOrigin::YouTubeImported {
+            source_url: "https://music.youtube.com/playlist?list=PL123".into()
         }
         .is_editable());
         assert!(PlaylistOrigin::LocalCustom.is_editable());

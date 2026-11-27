@@ -622,6 +622,49 @@ pub fn seek_slider_style(
     }
 }
 
+pub fn artist_link_button_style(
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let text_color = match status {
+            button::Status::Hovered | button::Status::Pressed => accent.light,
+            _ => TEXT_SECONDARY,
+        };
+        button::Style {
+            background: None,
+            text_color,
+            border: border::Border::default(),
+            shadow: Shadow::default(),
+            snap: false,
+        }
+    }
+}
+
+pub fn track_row_surface_style(
+    active: bool,
+    accent: AccentTheme,
+) -> impl Fn(&iced::Theme) -> container::Style {
+    move |_theme| container::Style {
+        text_color: Some(TEXT_PRIMARY),
+        background: if active {
+            Some(Background::Color(accent.soft_bg))
+        } else {
+            None
+        },
+        border: border::Border {
+            color: if active {
+                accent.border
+            } else {
+                Color::TRANSPARENT
+            },
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
 pub fn cover_art_widget<'a, Message: 'a>(
     handle: Option<&image::Handle>,
     size: f32,

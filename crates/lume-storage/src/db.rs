@@ -4,11 +4,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lume_core::{LyricsData, LyricsLine, Playlist, PlaylistOrigin, QueueSnapshot, Track, TrackSource};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::StorageError;
 
 pub const NEGATIVE_LYRICS_TTL_S: i64 = 86_400;
+/// Persistent weekly TTL (7 days) for Home trending charts so cold starts make zero chart API
+/// calls until a full week has elapsed (or the user manually clicks Refresh).
+pub const WEEKLY_CHARTS_TTL_S: i64 = 7 * 24 * 60 * 60;
+
+/// Cached Home chart snapshot persisted in SQLite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedChart {
+    pub tracks: Vec<Track>,
+    pub updated_at: i64,
+    pub is_fresh: bool,
+}
 
 /// Result of querying `lyrics_cache`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +54,16 @@ pub struct PendingMutation {
     pub action: String,
     pub spotify_track_id: String,
     pub created_at: i64,
+}
+
+/// Locally cached audio file downloaded for offline / driving playback (primarily on mobile).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfflineTrackRecord {
+    pub track_uid: String,
+    pub file_path: String,
+    pub file_size_bytes: u64,
+    pub mime_type: String,
+    pub downloaded_at: i64,
 }
 
 /// Thread-local / owned SQLite persistence layer for Lume Music.
@@ -89,6 +111,9 @@ fn parse_playlist_origin(origin: &str, source_url: Option<String>) -> PlaylistOr
     match origin {
         "spotify_synced" => PlaylistOrigin::SpotifySynced,
         "spotify_imported" => PlaylistOrigin::SpotifyImported {
+            source_url: source_url.unwrap_or_default(),
+        },
+        "youtube_imported" => PlaylistOrigin::YouTubeImported {
             source_url: source_url.unwrap_or_default(),
         },
         _ => PlaylistOrigin::LocalCustom,
@@ -684,6 +709,73 @@ impl Database {
         })
     }
 
+    pub fn upsert_imported_ytm_playlist(
+        &self,
+        name: &str,
+        source_url: &str,
+        tracks: &[Track],
+    ) -> Result<(Playlist, bool), StorageError> {
+        let trimmed_name = name.trim();
+        let final_name = if trimmed_name.is_empty() {
+            "Imported YouTube Playlist"
+        } else {
+            trimmed_name
+        };
+        for track in tracks {
+            self.upsert_track(track, None)?;
+        }
+
+        let existing_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM playlists WHERE origin = 'youtube_imported' AND source_url = ?1",
+                [source_url],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let updated_existing = existing_id.is_some();
+        let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = now_epoch_s();
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO playlists (id, name, origin, source_url, is_editable, created_at, updated_at)
+            VALUES (?1, ?2, 'youtube_imported', ?3, 1, ?4, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source_url = excluded.source_url,
+                origin = 'youtube_imported',
+                is_editable = 1,
+                updated_at = excluded.updated_at
+            "#,
+            params![id, final_name, source_url, now],
+        )?;
+        tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", [&id])?;
+        for (pos, track) in tracks.iter().enumerate() {
+            tx.execute(
+                r#"
+                INSERT INTO playlist_tracks (playlist_id, track_uid, position, added_at)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![id, track.uid, pos as i64, now],
+            )?;
+        }
+        tx.commit()?;
+
+        Ok((
+            Playlist {
+                id,
+                name: final_name.to_string(),
+                origin: PlaylistOrigin::YouTubeImported {
+                    source_url: source_url.to_string(),
+                },
+                track_count: tracks.len(),
+            },
+            updated_existing,
+        ))
+    }
+
     pub fn prune_stale_synced_spotify_playlists(
         &self,
         keep_ids: &HashSet<String>,
@@ -1068,6 +1160,168 @@ impl Database {
         }
         Ok(out)
     }
+
+    pub fn get_cached_chart(
+        &self,
+        chart_key: &str,
+        ttl_s: i64,
+    ) -> Result<Option<CachedChart>, StorageError> {
+        let row: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT tracks_json, updated_at FROM charts_cache WHERE chart_key = ?1",
+                [chart_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((tracks_json, updated_at)) = row else {
+            return Ok(None);
+        };
+        let tracks: Vec<Track> = serde_json::from_str(&tracks_json)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let age_s = now_epoch_s().saturating_sub(updated_at);
+        Ok(Some(CachedChart {
+            tracks,
+            updated_at,
+            is_fresh: age_s < ttl_s,
+        }))
+    }
+
+    pub fn put_cached_chart(&self, chart_key: &str, tracks: &[Track]) -> Result<(), StorageError> {
+        let tracks_json = serde_json::to_string(tracks)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let now = now_epoch_s();
+        self.conn.execute(
+            r#"
+            INSERT INTO charts_cache (chart_key, tracks_json, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(chart_key) DO UPDATE SET
+                tracks_json = excluded.tracks_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![chart_key, tracks_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Updates cached chart track metadata (e.g. enriched Spotify artwork URLs) without extending
+    /// the original weekly expiration timestamp.
+    pub fn update_cached_chart_tracks(
+        &self,
+        chart_key: &str,
+        tracks: &[Track],
+    ) -> Result<(), StorageError> {
+        let tracks_json = serde_json::to_string(tracks)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.conn.execute(
+            "UPDATE charts_cache SET tracks_json = ?2 WHERE chart_key = ?1",
+            params![chart_key, tracks_json],
+        )?;
+        Ok(())
+    }
+
+    /// Registers or updates an offline-downloaded audio file for `track`.
+    pub fn upsert_offline_track(
+        &self,
+        track: &Track,
+        file_path: &str,
+        file_size_bytes: u64,
+        mime_type: &str,
+    ) -> Result<OfflineTrackRecord, StorageError> {
+        self.upsert_track(track, None)?;
+        let now = now_epoch_s();
+        self.conn.execute(
+            r#"
+            INSERT INTO offline_tracks (
+                track_uid, file_path, file_size_bytes, mime_type, downloaded_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(track_uid) DO UPDATE SET
+                file_path = excluded.file_path,
+                file_size_bytes = excluded.file_size_bytes,
+                mime_type = excluded.mime_type,
+                downloaded_at = excluded.downloaded_at
+            "#,
+            params![
+                track.uid,
+                file_path,
+                file_size_bytes as i64,
+                mime_type,
+                now
+            ],
+        )?;
+        Ok(OfflineTrackRecord {
+            track_uid: track.uid.clone(),
+            file_path: file_path.to_string(),
+            file_size_bytes,
+            mime_type: mime_type.to_string(),
+            downloaded_at: now,
+        })
+    }
+
+    pub fn get_offline_track(
+        &self,
+        track_uid: &str,
+    ) -> Result<Option<OfflineTrackRecord>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT track_uid, file_path, file_size_bytes, mime_type, downloaded_at \
+                 FROM offline_tracks WHERE track_uid = ?1",
+                params![track_uid],
+                |row| {
+                    Ok(OfflineTrackRecord {
+                        track_uid: row.get(0)?,
+                        file_path: row.get(1)?,
+                        file_size_bytes: row.get::<_, i64>(2)?.max(0) as u64,
+                        mime_type: row.get(3)?,
+                        downloaded_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_offline_tracks(&self) -> Result<Vec<(Track, OfflineTrackRecord)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.uid, t.source_type, t.source_id, t.title, t.artists_json, t.album, \
+                    t.duration_ms, t.artwork_ref, t.is_liked, \
+                    o.track_uid, o.file_path, o.file_size_bytes, o.mime_type, o.downloaded_at \
+             FROM offline_tracks o \
+             JOIN tracks t ON t.uid = o.track_uid \
+             ORDER BY o.downloaded_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let track = row_to_track(row)?;
+            let record = OfflineTrackRecord {
+                track_uid: row.get(9)?,
+                file_path: row.get(10)?,
+                file_size_bytes: row.get::<_, i64>(11)?.max(0) as u64,
+                mime_type: row.get(12)?,
+                downloaded_at: row.get(13)?,
+            };
+            Ok((track, record))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_offline_track(&self, track_uid: &str) -> Result<Option<String>, StorageError> {
+        let existing = self.get_offline_track(track_uid)?;
+        self.conn.execute(
+            "DELETE FROM offline_tracks WHERE track_uid = ?1",
+            params![track_uid],
+        )?;
+        Ok(existing.map(|r| r.file_path))
+    }
+
+    pub fn offline_storage_total_bytes(&self) -> Result<u64, StorageError> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(file_size_bytes), 0) FROM offline_tracks",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total.max(0) as u64)
+    }
 }
 
 #[cfg(test)]
@@ -1337,6 +1591,35 @@ mod tests {
     }
 
     #[test]
+    fn imported_ytm_playlist_is_editable_and_idempotent_by_source_url() {
+        let db = Database::open_in_memory().unwrap();
+        let y1 = track_ytm("vid_a", "Song A");
+        let y2 = track_ytm("vid_b", "Song B");
+        let url = "https://music.youtube.com/playlist?list=PL_TEST_1";
+
+        let (pl1, updated1) = db
+            .upsert_imported_ytm_playlist("Chill Mix", url, std::slice::from_ref(&y1))
+            .unwrap();
+        assert!(!updated1);
+        assert!(pl1.origin.is_editable());
+        assert_eq!(pl1.track_count, 1);
+
+        let (pl2, updated2) = db
+            .upsert_imported_ytm_playlist("Chill Mix", url, &[y1.clone(), y2.clone()])
+            .unwrap();
+        assert!(updated2);
+        assert_eq!(pl1.id, pl2.id);
+        assert_eq!(pl2.track_count, 2);
+
+        let listed = db.list_playlists().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(matches!(
+            listed[0].origin,
+            PlaylistOrigin::YouTubeImported { .. }
+        ));
+    }
+
+    #[test]
     fn sync_spotify_liked_tracks_reconciles_spotify_while_keeping_local_favorites() {
         let db = Database::open_in_memory().unwrap();
         let sp_old = track_sp("sp_old", "Old Fav", true);
@@ -1396,5 +1679,65 @@ mod tests {
         let recent = db.list_recent_tracks(10).unwrap();
         let uids: Vec<&str> = recent.iter().map(|t| t.uid.as_str()).collect();
         assert_eq!(uids, vec![a.uid.as_str(), c.uid.as_str(), b.uid.as_str()]);
+    }
+
+    #[test]
+    fn charts_cache_persists_weekly_ttl_and_preserves_timestamp_on_artwork_update() {
+        let db = Database::open_in_memory().unwrap();
+        let mut a = track_sp("sp_c1", "Chart One", false);
+        let b = track_ytm("yt_c2", "Chart Two");
+        db.put_cached_chart("spotify:id", &[a.clone(), b.clone()])
+            .unwrap();
+
+        let fresh = db
+            .get_cached_chart("spotify:id", WEEKLY_CHARTS_TTL_S)
+            .unwrap()
+            .unwrap();
+        assert!(fresh.is_fresh);
+        assert_eq!(fresh.tracks.len(), 2);
+        assert_eq!(fresh.tracks[0].title, "Chart One");
+
+        // Zero TTL classifies the entry as stale while still returning cached tracks for fallback.
+        let stale = db.get_cached_chart("spotify:id", 0).unwrap().unwrap();
+        assert!(!stale.is_fresh);
+        assert_eq!(stale.tracks.len(), 2);
+
+        // Enriched artwork update preserves the original weekly `updated_at` timestamp.
+        a.artwork_ref = Some("https://i.scdn.co/image/enriched".into());
+        db.update_cached_chart_tracks("spotify:id", &[a, b]).unwrap();
+        let updated = db
+            .get_cached_chart("spotify:id", WEEKLY_CHARTS_TTL_S)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.updated_at, fresh.updated_at);
+        assert_eq!(
+            updated.tracks[0].artwork_ref.as_deref(),
+            Some("https://i.scdn.co/image/enriched")
+        );
+    }
+
+    #[test]
+    fn offline_tracks_round_trip_and_storage_accounting() {
+        let db = Database::open_in_memory().unwrap();
+        let track = track_ytm("vid_off_1", "Driving Anthem");
+
+        let rec = db
+            .upsert_offline_track(&track, "/offline/ytm_vid_off_1.m4a", 4_200_000, "audio/mp4")
+            .unwrap();
+        assert_eq!(rec.track_uid, track.uid);
+        assert_eq!(rec.file_size_bytes, 4_200_000);
+
+        let fetched = db.get_offline_track(&track.uid).unwrap().unwrap();
+        assert_eq!(fetched.file_path, "/offline/ytm_vid_off_1.m4a");
+        assert_eq!(db.offline_storage_total_bytes().unwrap(), 4_200_000);
+
+        let listed = db.list_offline_tracks().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0.title, "Driving Anthem");
+
+        let deleted_path = db.delete_offline_track(&track.uid).unwrap();
+        assert_eq!(deleted_path.as_deref(), Some("/offline/ytm_vid_off_1.m4a"));
+        assert!(db.get_offline_track(&track.uid).unwrap().is_none());
+        assert_eq!(db.offline_storage_total_bytes().unwrap(), 0);
     }
 }

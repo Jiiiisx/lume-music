@@ -5,16 +5,26 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use lume_core::{
-    CoreError, MusicProvider, PlaybackSourceUsed, Playlist, ResolvedStream, Track, TrackSource,
+    AlbumDetail, AlbumSummary, ArtistProfile, ArtistSummary, CatalogSource, CoreError,
+    MusicProvider, PlaybackSourceUsed, Playlist, RemotePlaylistDetail, RemotePlaylistSummary,
+    ResolvedStream, Track, TrackSource,
 };
 use rustypipe::client::{ClientType, RustyPipe};
-use rustypipe::model::{AudioCodec, AudioFormat, AudioStream, AudioTrackType, Thumbnail, TrackItem};
+use rustypipe::model::{
+    AlbumItem, AlbumType, ArtistItem, AudioCodec, AudioFormat, AudioStream, AudioTrackType,
+    MusicItem, MusicPlaylistItem, Thumbnail, TrackItem,
+};
 use tokio::sync::RwLock;
 
 const VISITOR_DATA_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const STREAM_CACHE_DEFAULT_TTL: Duration = Duration::from_secs(25 * 60);
 const STREAM_CACHE_MAX_TTL: Duration = Duration::from_secs(30 * 60);
 const STREAM_CACHE_MAX_ENTRIES: usize = 256;
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const SEARCH_CACHE_MAX_ENTRIES: usize = 64;
+const CATALOG_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const CATALOG_CACHE_MAX_ENTRIES: usize = 32;
+const CHARTS_CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 const INNERTUBE_PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 const YOUTUBE_SW_JS_DATA_URL: &str = "https://www.youtube.com/sw.js_data";
 const VISIONOS_USER_AGENT: &str =
@@ -109,6 +119,105 @@ pub fn select_best_thumbnail(thumbnails: &[Thumbnail]) -> Option<String> {
         .map(|t| upgrade_ytm_cover_url(&t.url))
 }
 
+/// Aggregated YouTube Music catalog search result (songs/videos, artists, and playlists).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct YtmCatalogSearchResult {
+    pub tracks: Vec<Track>,
+    pub artists: Vec<ArtistSummary>,
+    pub playlists: Vec<RemotePlaylistSummary>,
+}
+
+/// Canonical YouTube Music playlist URL used as the stable dedup key in SQLite.
+pub fn canonical_ytm_playlist_url(playlist_id: &str) -> String {
+    format!("https://music.youtube.com/playlist?list={}", playlist_id.trim())
+}
+
+fn format_subscriber_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M subscribers", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K subscribers", count as f64 / 1_000.0)
+    } else {
+        format!("{count} subscribers")
+    }
+}
+
+fn map_ytm_artist_item(item: ArtistItem) -> Option<ArtistSummary> {
+    let id = item.id.trim().to_string();
+    let name = item.name.trim().to_string();
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(ArtistSummary {
+        id,
+        source: CatalogSource::YouTubeMusic,
+        name,
+        avatar_url: select_best_thumbnail(&item.avatar),
+        subtitle: item.subscriber_count.map(format_subscriber_count),
+    })
+}
+
+fn map_ytm_album_item(item: AlbumItem, fallback_artist: &str) -> Option<AlbumSummary> {
+    let id = item.id.trim().to_string();
+    let title = item.name.trim().to_string();
+    if id.is_empty() || title.is_empty() {
+        return None;
+    }
+    let artist_name = {
+        let joined = item
+            .artists
+            .into_iter()
+            .map(|a| a.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if joined.is_empty() {
+            fallback_artist.to_string()
+        } else {
+            joined
+        }
+    };
+    let album_type = match item.album_type {
+        AlbumType::Album => "Album",
+        AlbumType::Ep => "EP",
+        AlbumType::Single => "Single",
+        _ => "Release",
+    };
+    Some(AlbumSummary {
+        id,
+        source: CatalogSource::YouTubeMusic,
+        title,
+        artist_name,
+        year: item.year.map(|y| y.to_string()),
+        album_type: Some(album_type.to_string()),
+        cover_url: select_best_thumbnail(&item.cover),
+    })
+}
+
+fn map_ytm_playlist_item(item: MusicPlaylistItem) -> Option<RemotePlaylistSummary> {
+    if item.is_podcast {
+        return None;
+    }
+    let id = item.id.trim().to_string();
+    let name = item.name.trim().to_string();
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    let owner = item
+        .channel
+        .map(|c| c.name.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| item.from_ytm.then(|| "YouTube Music".to_string()));
+    Some(RemotePlaylistSummary {
+        id,
+        source: CatalogSource::YouTubeMusic,
+        name,
+        owner,
+        track_count: item.track_count.map(|c| c as usize),
+        cover_url: select_best_thumbnail(&item.thumbnail),
+    })
+}
+
 /// Map a RustyPipe YouTube Music `TrackItem` into our core `Track`.
 pub fn map_track_item(item: TrackItem) -> Track {
     let source = TrackSource::YouTubeMusic {
@@ -147,6 +256,15 @@ pub fn map_track_item(item: TrackItem) -> Track {
 
 /// Locate a usable `yt-dlp` binary, checking the user-configured path first, then `PATH`,
 /// then standard Windows `WinGet\Links` so newly installed `yt-dlp` works without a reboot.
+/// Always returns `None` on iOS because the iOS sandbox forbids spawning external binaries.
+#[cfg(target_os = "ios")]
+pub fn detect_yt_dlp_binary(_configured: Option<&Path>) -> Option<PathBuf> {
+    None
+}
+
+/// Locate a usable `yt-dlp` binary, checking the user-configured path first, then `PATH`,
+/// then standard Windows `WinGet\Links` so newly installed `yt-dlp` works without a reboot.
+#[cfg(not(target_os = "ios"))]
 pub fn detect_yt_dlp_binary(configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(cfg) = configured {
         if cfg.is_file() {
@@ -358,8 +476,109 @@ struct CachedStreamUrl {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CachedValue<T> {
+    value: T,
+    expires_at: Instant,
+}
+
+#[derive(Debug)]
+struct TtlCache<T> {
+    entries: Mutex<HashMap<String, CachedValue<T>>>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+impl<T: Clone> TtlCache<T> {
+    fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            ttl,
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<T> {
+        let now = Instant::now();
+        let mut map = self.entries.lock().ok()?;
+        if let Some(entry) = map.get(key) {
+            if entry.expires_at > now {
+                return Some(entry.value.clone());
+            }
+        }
+        map.remove(key);
+        None
+    }
+
+    fn put(&self, key: String, value: T) {
+        let now = Instant::now();
+        let expires_at = now + self.ttl;
+        if let Ok(mut map) = self.entries.lock() {
+            if map.len() >= self.max_entries && !map.contains_key(&key) {
+                map.retain(|_, v| v.expires_at > now);
+                if map.len() >= self.max_entries {
+                    if let Some(oldest) = map
+                        .iter()
+                        .min_by_key(|(_, v)| v.expires_at)
+                        .map(|(k, _)| k.clone())
+                    {
+                        map.remove(&oldest);
+                    }
+                }
+            }
+            map.insert(key, CachedValue { value, expires_at });
+        }
+    }
+}
+
+fn partition_music_search_main_items(
+    items: impl IntoIterator<Item = MusicItem>,
+    track_limit: usize,
+    artist_limit: usize,
+    playlist_limit: usize,
+) -> YtmCatalogSearchResult {
+    let mut tracks = Vec::with_capacity(track_limit);
+    let mut artists = Vec::with_capacity(artist_limit);
+    let mut playlists = Vec::with_capacity(playlist_limit);
+    let mut seen_tracks = std::collections::HashSet::with_capacity(track_limit);
+    let mut seen_artists = std::collections::HashSet::with_capacity(artist_limit);
+    let mut seen_playlists = std::collections::HashSet::with_capacity(playlist_limit);
+
+    for item in items {
+        match item {
+            MusicItem::Track(t) if tracks.len() < track_limit => {
+                let mapped = map_track_item(t);
+                if seen_tracks.insert(mapped.uid.clone()) {
+                    tracks.push(mapped);
+                }
+            }
+            MusicItem::Artist(a) if artists.len() < artist_limit => {
+                if let Some(mapped) = map_ytm_artist_item(a) {
+                    if seen_artists.insert(mapped.id.clone()) {
+                        artists.push(mapped);
+                    }
+                }
+            }
+            MusicItem::Playlist(p) if playlists.len() < playlist_limit => {
+                if let Some(mapped) = map_ytm_playlist_item(p) {
+                    if seen_playlists.insert(mapped.id.clone()) {
+                        playlists.push(mapped);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    YtmCatalogSearchResult {
+        tracks,
+        artists,
+        playlists,
+    }
+}
+
 /// Anonymous YouTube Music catalog & stream provider powered by direct InnerTube (`VISIONOS`),
-/// `rustypipe`, and `yt-dlp` fallback, with session `visitorData` and stream URL caching.
+/// `rustypipe`, and `yt-dlp` fallback, with session `visitorData`, stream URL, and catalog TTL caching.
 #[derive(Clone)]
 pub struct YouTubeMusicProvider {
     client: RustyPipe,
@@ -368,6 +587,11 @@ pub struct YouTubeMusicProvider {
     yt_dlp_resolved: Option<PathBuf>,
     visitor_data: Arc<RwLock<Option<CachedVisitorData>>>,
     stream_cache: Arc<Mutex<HashMap<String, CachedStreamUrl>>>,
+    search_cache: Arc<TtlCache<YtmCatalogSearchResult>>,
+    artist_cache: Arc<TtlCache<ArtistProfile>>,
+    album_cache: Arc<TtlCache<AlbumDetail>>,
+    playlist_cache: Arc<TtlCache<RemotePlaylistDetail>>,
+    charts_cache: Arc<TtlCache<Vec<Track>>>,
 }
 
 impl YouTubeMusicProvider {
@@ -396,6 +620,11 @@ impl YouTubeMusicProvider {
             yt_dlp_resolved,
             visitor_data: Arc::new(RwLock::new(None)),
             stream_cache: Arc::new(Mutex::new(HashMap::new())),
+            search_cache: Arc::new(TtlCache::new(SEARCH_CACHE_TTL, SEARCH_CACHE_MAX_ENTRIES)),
+            artist_cache: Arc::new(TtlCache::new(CATALOG_CACHE_TTL, CATALOG_CACHE_MAX_ENTRIES)),
+            album_cache: Arc::new(TtlCache::new(CATALOG_CACHE_TTL, CATALOG_CACHE_MAX_ENTRIES)),
+            playlist_cache: Arc::new(TtlCache::new(SEARCH_CACHE_TTL, CATALOG_CACHE_MAX_ENTRIES)),
+            charts_cache: Arc::new(TtlCache::new(CHARTS_CACHE_TTL, 4)),
         })
     }
 
@@ -409,6 +638,13 @@ impl YouTubeMusicProvider {
     pub fn invalidate_stream_cache(&self, video_id: &str) {
         if let Ok(mut cache) = self.stream_cache.lock() {
             cache.remove(video_id.trim());
+        }
+    }
+
+    /// Clears the in-memory Home charts cache so a manual Refresh fetches fresh tracks immediately.
+    pub fn invalidate_charts_cache(&self) {
+        if let Ok(mut map) = self.charts_cache.entries.lock() {
+            map.clear();
         }
     }
 
@@ -655,6 +891,15 @@ impl YouTubeMusicProvider {
     }
 
     /// Fallback stream resolver invoking `yt-dlp -f ... -g --no-playlist <url>`.
+    #[cfg(target_os = "ios")]
+    pub async fn resolve_via_yt_dlp(&self, _video_id: &str) -> Result<String, CoreError> {
+        Err(CoreError::ProviderUnavailable(
+            "yt-dlp fallback is unavailable on iOS".into(),
+        ))
+    }
+
+    /// Fallback stream resolver invoking `yt-dlp -f ... -g --no-playlist <url>`.
+    #[cfg(not(target_os = "ios"))]
     pub async fn resolve_via_yt_dlp(&self, video_id: &str) -> Result<String, CoreError> {
         let Some(binary) = detect_yt_dlp_binary(self.yt_dlp_path.as_deref()) else {
             return Err(CoreError::ProviderUnavailable(
@@ -842,9 +1087,340 @@ impl YouTubeMusicProvider {
         Ok(merged)
     }
 
+    /// Searches YouTube Music artists anonymously via `rustypipe`.
+    pub async fn search_artists(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ArtistSummary>, CoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let res = self
+            .client
+            .query()
+            .music_search_artists(trimmed)
+            .await
+            .map_err(|e| CoreError::Network(format!("YouTube Music artist search failed: {e}")))?;
+
+        Ok(res
+            .items
+            .items
+            .into_iter()
+            .filter_map(map_ytm_artist_item)
+            .take(limit)
+            .collect())
+    }
+
+    /// Searches YouTube Music playlists, preferring a single official-playlist call and only
+    /// querying community playlists if the official page doesn't fill `limit`.
+    pub async fn search_playlists(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RemotePlaylistSummary>, CoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::with_capacity(limit);
+        let mut seen = std::collections::HashSet::with_capacity(limit);
+        let mut first_err: Option<CoreError> = None;
+
+        match self.client.query().music_search_playlists(trimmed, false).await {
+            Ok(page) => {
+                for item in page.items.items.into_iter().filter_map(map_ytm_playlist_item) {
+                    if seen.insert(item.id.clone()) {
+                        out.push(item);
+                        if out.len() >= limit {
+                            return Ok(out);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                first_err = Some(CoreError::Network(format!(
+                    "YouTube Music playlist search failed: {e}"
+                )));
+            }
+        }
+
+        if out.len() < limit {
+            match self.client.query().music_search_playlists(trimmed, true).await {
+                Ok(page) => {
+                    for item in page.items.items.into_iter().filter_map(map_ytm_playlist_item) {
+                        if seen.insert(item.id.clone()) {
+                            out.push(item);
+                            if out.len() >= limit {
+                                return Ok(out);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(CoreError::Network(format!(
+                            "YouTube Music playlist search failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if out.is_empty() {
+            if let Some(err) = first_err {
+                return Err(err);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Searches YouTube Music songs/videos, artists, and playlists in a **single** InnerTube
+    /// `music_search_main` request (with 10-minute in-memory TTL caching), cutting search API
+    /// volume by ~80% compared to firing 5 separate endpoint calls per query.
+    pub async fn search_catalog_full(
+        &self,
+        query: &str,
+        song_limit: usize,
+        video_limit: usize,
+        artist_limit: usize,
+        playlist_limit: usize,
+    ) -> Result<YtmCatalogSearchResult, CoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(YtmCatalogSearchResult::default());
+        }
+
+        let cache_key = trimmed.to_ascii_lowercase();
+        if let Some(cached) = self.search_cache.get(&cache_key) {
+            return Ok(cached);
+        }
+
+        let track_limit = song_limit.saturating_add(video_limit).max(1);
+        let main_res = self.client.query().music_search_main(trimmed).await;
+
+        let mut catalog = match main_res {
+            Ok(page) => partition_music_search_main_items(
+                page.items.items,
+                track_limit,
+                artist_limit,
+                playlist_limit,
+            ),
+            Err(main_err) => {
+                // Single graceful fallback to track search if main browse layout failed.
+                let tracks = self
+                    .search(trimmed, track_limit)
+                    .await
+                    .map_err(|_| {
+                        CoreError::Network(format!("YouTube Music search failed: {main_err}"))
+                    })?;
+                YtmCatalogSearchResult {
+                    tracks,
+                    artists: Vec::new(),
+                    playlists: Vec::new(),
+                }
+            }
+        };
+
+        if catalog.tracks.is_empty() && song_limit > 0 {
+            if let Ok(tracks) = self.search(trimmed, song_limit).await {
+                catalog.tracks = tracks;
+            }
+        }
+
+        if !catalog.tracks.is_empty()
+            || !catalog.artists.is_empty()
+            || !catalog.playlists.is_empty()
+        {
+            self.search_cache.put(cache_key, catalog.clone());
+        }
+
+        Ok(catalog)
+    }
+
+    /// Fetches a complete YouTube Music artist profile (header, top songs, albums, singles, playlists),
+    /// served from a 15-minute in-memory TTL cache when revisited.
+    pub async fn get_artist_profile(&self, artist_id: &str) -> Result<ArtistProfile, CoreError> {
+        let trimmed = artist_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidInput("empty YouTube Music artist ID".into()));
+        }
+        if let Some(cached) = self.artist_cache.get(trimmed) {
+            return Ok(cached);
+        }
+        let raw = self
+            .client
+            .query()
+            .music_artist(trimmed, true)
+            .await
+            .map_err(|e| CoreError::Network(format!("YouTube Music artist load failed: {e}")))?;
+
+        let name = raw.name.trim().to_string();
+        let avatar_url = select_best_thumbnail(&raw.header_image);
+        let subscriber_label = raw.subscriber_count.map(format_subscriber_count);
+        let top_tracks: Vec<Track> = raw.tracks.into_iter().map(map_track_item).collect();
+
+        let mut albums = Vec::new();
+        let mut singles = Vec::new();
+        for item in raw.albums {
+            let is_single = matches!(item.album_type, AlbumType::Single | AlbumType::Ep);
+            if let Some(summary) = map_ytm_album_item(item, &name) {
+                if is_single {
+                    singles.push(summary);
+                } else {
+                    albums.push(summary);
+                }
+            }
+        }
+
+        let playlists: Vec<RemotePlaylistSummary> = raw
+            .playlists
+            .into_iter()
+            .filter_map(map_ytm_playlist_item)
+            .collect();
+
+        let profile = ArtistProfile {
+            id: raw.id,
+            source: CatalogSource::YouTubeMusic,
+            name,
+            avatar_url,
+            description: raw.description,
+            subscriber_label,
+            top_tracks,
+            albums,
+            singles,
+            playlists,
+        };
+        self.artist_cache.put(trimmed.to_string(), profile.clone());
+        Ok(profile)
+    }
+
+    /// Fetches a YouTube Music album and its full tracklist (cached for 15 minutes).
+    pub async fn get_album_detail(&self, album_id: &str) -> Result<AlbumDetail, CoreError> {
+        let trimmed = album_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidInput("empty YouTube Music album ID".into()));
+        }
+        if let Some(cached) = self.album_cache.get(trimmed) {
+            return Ok(cached);
+        }
+        let raw = self
+            .client
+            .query()
+            .music_album(trimmed)
+            .await
+            .map_err(|e| CoreError::Network(format!("YouTube Music album load failed: {e}")))?;
+
+        let title = raw.name.trim().to_string();
+        let cover_url = select_best_thumbnail(&raw.cover);
+        let artist_id = raw
+            .artist_id
+            .clone()
+            .or_else(|| raw.artists.first().and_then(|a| a.id.clone()));
+        let artist_name = raw
+            .artists
+            .iter()
+            .map(|a| a.name.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let tracks: Vec<Track> = raw
+            .tracks
+            .into_iter()
+            .map(|item| {
+                let mut t = map_track_item(item);
+                if t.album.is_none() && !title.is_empty() {
+                    t.album = Some(title.clone());
+                }
+                if t.artwork_ref.is_none() {
+                    t.artwork_ref = cover_url.clone();
+                }
+                if t.artists.len() == 1
+                    && t.artists[0] == "Unknown Artist"
+                    && !artist_name.is_empty()
+                {
+                    t.artists = vec![artist_name.clone()];
+                }
+                t
+            })
+            .collect();
+
+        let detail = AlbumDetail {
+            id: raw.id,
+            source: CatalogSource::YouTubeMusic,
+            title,
+            artist_name,
+            artist_id,
+            year: raw.year.map(|y| y.to_string()),
+            cover_url,
+            tracks,
+        };
+        self.album_cache.put(trimmed.to_string(), detail.clone());
+        Ok(detail)
+    }
+
+    /// Fetches a YouTube Music playlist preview and its tracks (cached for 10 minutes).
+    pub async fn get_playlist_detail(
+        &self,
+        playlist_id: &str,
+    ) -> Result<RemotePlaylistDetail, CoreError> {
+        let trimmed = playlist_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidInput("empty YouTube Music playlist ID".into()));
+        }
+        if let Some(cached) = self.playlist_cache.get(trimmed) {
+            return Ok(cached);
+        }
+        let raw = self
+            .client
+            .query()
+            .music_playlist(trimmed)
+            .await
+            .map_err(|e| CoreError::Network(format!("YouTube Music playlist load failed: {e}")))?;
+
+        let id = if raw.id.trim().is_empty() {
+            trimmed.to_string()
+        } else {
+            raw.id
+        };
+        let name = if raw.name.trim().is_empty() {
+            "YouTube Music Playlist".to_string()
+        } else {
+            raw.name
+        };
+        let owner = raw
+            .channel
+            .map(|c| c.name.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| raw.from_ytm.then(|| "YouTube Music".to_string()));
+        let cover_url = select_best_thumbnail(&raw.thumbnail);
+        let tracks: Vec<Track> = raw
+            .tracks
+            .items
+            .into_iter()
+            .take(200)
+            .map(map_track_item)
+            .collect();
+
+        let detail = RemotePlaylistDetail {
+            source_url: canonical_ytm_playlist_url(&id),
+            id,
+            source: CatalogSource::YouTubeMusic,
+            name,
+            owner,
+            cover_url,
+            tracks,
+            is_truncated_embed: false,
+        };
+        self.playlist_cache.put(trimmed.to_string(), detail.clone());
+        Ok(detail)
+    }
+
     /// Fetches trending / top chart tracks from YouTube Music for Indonesia (`Country::Id`) or
-    /// Global (`Country::Zz`), falling back gracefully to a curated regional chart search if the
-    /// charts endpoint returns no items.
+    /// Global (`Country::Zz`), cached for 20 minutes to avoid repeated chart polls.
     pub async fn fetch_charts(
         &self,
         indonesia: bool,
@@ -852,6 +1428,11 @@ impl YouTubeMusicProvider {
     ) -> Result<Vec<Track>, CoreError> {
         if limit == 0 {
             return Ok(Vec::new());
+        }
+
+        let cache_key = if indonesia { "id" } else { "global" };
+        if let Some(cached) = self.charts_cache.get(cache_key) {
+            return Ok(cached.into_iter().take(limit).collect());
         }
 
         let country = if indonesia {
@@ -869,6 +1450,7 @@ impl YouTubeMusicProvider {
                 if seen.insert(t.uid.clone()) {
                     tracks.push(t);
                     if tracks.len() >= limit {
+                        self.charts_cache.put(cache_key.to_string(), tracks.clone());
                         return Ok(tracks);
                     }
                 }
@@ -876,6 +1458,7 @@ impl YouTubeMusicProvider {
         }
 
         if !tracks.is_empty() {
+            self.charts_cache.put(cache_key.to_string(), tracks.clone());
             return Ok(tracks);
         }
 
@@ -885,7 +1468,11 @@ impl YouTubeMusicProvider {
         } else {
             "top global hits songs"
         };
-        self.search(fallback_query, limit).await
+        let fallback = self.search(fallback_query, limit).await?;
+        if !fallback.is_empty() {
+            self.charts_cache.put(cache_key.to_string(), fallback.clone());
+        }
+        Ok(fallback)
     }
 }
 
@@ -1195,6 +1782,59 @@ mod tests {
         assert!(provider.get_cached_stream_url("abc123").is_none());
     }
 
+    #[test]
+    fn maps_ytm_artist_album_and_playlist_summaries() {
+        let artist_item: ArtistItem = serde_json::from_value(serde_json::json!({
+            "id": "UC_ART_1",
+            "name": "Hindia",
+            "avatar": [{"url": "https://lh3.googleusercontent.com/a=w60-h60-l90-rj", "width": 60, "height": 60}],
+            "subscriber_count": 1_250_000
+        }))
+        .unwrap();
+        let artist = map_ytm_artist_item(artist_item).unwrap();
+        assert_eq!(artist.id, "UC_ART_1");
+        assert_eq!(artist.source, CatalogSource::YouTubeMusic);
+        assert_eq!(artist.subtitle.as_deref(), Some("1.2M subscribers"));
+        assert_eq!(
+            artist.avatar_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/a=w544-h544-l90-rj")
+        );
+
+        let album_item: AlbumItem = serde_json::from_value(serde_json::json!({
+            "id": "MPREb_123",
+            "name": "Lagipula Hidup Akan Berakhir",
+            "cover": [{"url": "https://lh3.googleusercontent.com/c=w120-h120-l90-rj", "width": 120, "height": 120}],
+            "artists": [{"id": "UC_ART_1", "name": "Hindia"}],
+            "artist_id": "UC_ART_1",
+            "album_type": "album",
+            "year": 2023,
+            "by_va": false
+        }))
+        .unwrap();
+        let album = map_ytm_album_item(album_item, "Fallback").unwrap();
+        assert_eq!(album.title, "Lagipula Hidup Akan Berakhir");
+        assert_eq!(album.year.as_deref(), Some("2023"));
+        assert_eq!(album.album_type.as_deref(), Some("Album"));
+
+        let playlist_item: MusicPlaylistItem = serde_json::from_value(serde_json::json!({
+            "id": "RDCLAK5uy_123",
+            "name": "Indo Indie Chill",
+            "thumbnail": [{"url": "https://lh3.googleusercontent.com/p=w120-h120-l90-rj", "width": 120, "height": 120}],
+            "channel": null,
+            "track_count": 42,
+            "from_ytm": true,
+            "is_podcast": false
+        }))
+        .unwrap();
+        let pl = map_ytm_playlist_item(playlist_item).unwrap();
+        assert_eq!(pl.owner.as_deref(), Some("YouTube Music"));
+        assert_eq!(pl.track_count, Some(42));
+        assert_eq!(
+            canonical_ytm_playlist_url(&pl.id),
+            "https://music.youtube.com/playlist?list=RDCLAK5uy_123"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "live network latency check"]
     async fn live_visionos_resolve_latency() {
@@ -1259,5 +1899,27 @@ mod tests {
         assert!(!ytm_gl.is_empty());
         assert!(!sp_id.is_empty());
         assert!(!sp_gl.is_empty());
+    }
+
+    #[test]
+    fn ttl_cache_stores_evicts_capacity_and_expires() {
+        let cache = TtlCache::new(Duration::from_secs(60), 2);
+        cache.put("k1".into(), 10usize);
+        cache.put("k2".into(), 20usize);
+        assert_eq!(cache.get("k1"), Some(10));
+        assert_eq!(cache.get("k2"), Some(20));
+
+        // Adding a 3rd entry evicts one entry so capacity stays <= 2.
+        cache.put("k3".into(), 30usize);
+        assert_eq!(cache.get("k3"), Some(30));
+        let remaining = ["k1", "k2", "k3"]
+            .into_iter()
+            .filter(|k| cache.get(k).is_some())
+            .count();
+        assert_eq!(remaining, 2);
+
+        let instant_expire = TtlCache::new(Duration::from_nanos(0), 4);
+        instant_expire.put("stale".into(), 99usize);
+        assert_eq!(instant_expire.get("stale"), None);
     }
 }

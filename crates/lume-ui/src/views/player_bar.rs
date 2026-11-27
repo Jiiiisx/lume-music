@@ -7,12 +7,12 @@ use lume_core::{PlaybackStatus, Playlist, RepeatMode, Track, TrackSource};
 use crate::theme::{AccentTheme, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD};
 use crate::views::{Message, NowPlayingInfo, ViewMode};
 use crate::widgets::{
-    cover_art_widget, floating_dock_style, ghost_button_style, glass_button_style,
-    glass_elevated_style, hidden_scrollbar, icon_heart, icon_lyrics, icon_more, icon_next,
-    icon_pause, icon_play, icon_playlist, icon_plus, icon_prev, icon_queue, icon_refresh,
-    icon_repeat, icon_shuffle, icon_volume, play_circle_button_style, seek_slider_style,
-    thin_scrollable_style, GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE, ICON_LIGHT, ICON_MUTED,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    artist_link_button_style, cover_art_widget, floating_dock_style, ghost_button_style,
+    glass_button_style, glass_elevated_style, hidden_scrollbar, icon_artist, icon_heart,
+    icon_lyrics, icon_more, icon_next, icon_pause, icon_play, icon_playlist, icon_plus, icon_prev,
+    icon_queue, icon_refresh, icon_repeat, icon_shuffle, icon_volume, play_circle_button_style,
+    seek_slider_style, thin_scrollable_style, GLASS_SUBTLE_BORDER, ICON_HEART_ACTIVE, ICON_LIGHT,
+    ICON_MUTED, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 fn format_mm_ss(ms: u64) -> String {
@@ -34,8 +34,11 @@ pub fn view_player_bar<'a>(
     art_handles: &'a HashMap<String, image::Handle>,
     queue_open: bool,
     player_menu_open: bool,
+    window_width: f32,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
+    let compact = window_width < 980.0;
+    let ultra_compact = window_width < 860.0;
     let track = info.track;
     let art = active_cover.or_else(|| {
         track
@@ -53,36 +56,62 @@ pub fn view_player_bar<'a>(
         info.source_used.map(|s| s.badge_label()).unwrap_or("Idle")
     };
 
-    let title_display = truncate_single_line(title, 26);
-    let artist_display = truncate_single_line(&artist, 28);
+    let max_title_chars = ((window_width / 38.0) as usize).clamp(15, 44);
+    let max_artist_chars = ((window_width / 35.0) as usize).clamp(16, 48);
+    let title_display = truncate_single_line(title, max_title_chars);
+    let artist_display = truncate_single_line(&artist, max_artist_chars);
+
+    let artist_el: Element<'a, Message> = if let Some(t) = track {
+        let primary_artist = t
+            .artists
+            .first()
+            .cloned()
+            .unwrap_or_else(|| t.artist_display());
+        button(
+            text(artist_display)
+                .size(11)
+                .wrapping(text::Wrapping::None),
+        )
+        .padding([0, 0])
+        .style(artist_link_button_style(accent))
+        .on_press(Message::OpenArtistByName {
+            name: primary_artist,
+            source_hint: t.source.clone(),
+        })
+        .into()
+    } else {
+        text(artist_display)
+            .size(11)
+            .color(TEXT_SECONDARY)
+            .wrapping(text::Wrapping::None)
+            .into()
+    };
 
     let track_click_area = container(
-        mouse_area(
-            row![
-                cover_art_widget(art, 48.0, 10.0),
-                container(
-                    column![
+        row![
+            mouse_area(cover_art_widget(art, 48.0, 10.0))
+                .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
+            container(
+                column![
+                    mouse_area(
                         text(title_display)
                             .size(13)
                             .font(FONT_SEMIBOLD)
                             .color(TEXT_PRIMARY)
                             .wrapping(text::Wrapping::None),
-                        text(artist_display)
-                            .size(11)
-                            .color(TEXT_SECONDARY)
-                            .wrapping(text::Wrapping::None),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .clip(true),
-            ]
-            .spacing(12)
+                    )
+                    .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
+                    artist_el,
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+            )
             .width(Length::Fill)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
+            .clip(true),
+        ]
+        .spacing(12)
+        .width(Length::Fill)
+        .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .clip(true);
@@ -234,55 +263,71 @@ pub fn view_player_bar<'a>(
     .align_x(Alignment::Center)
     .width(Length::FillPortion(2));
 
-    let right_controls = row![
-        container(text(badge).size(10).font(FONT_SEMIBOLD).color(accent.light))
-            .padding([3, 9])
-            .style(move |_| container::Style {
-                background: Some(Background::Color(accent.soft_bg)),
-                border: iced::border::Border {
-                    color: accent.border,
-                    width: 1.0,
-                    radius: 10.0.into(),
+    let mut right_controls = row![].spacing(if compact { 6 } else { 8 }).align_y(Alignment::Center);
+    if !ultra_compact {
+        right_controls = right_controls.push(
+            container(text(badge).size(10).font(FONT_SEMIBOLD).color(accent.light))
+                .padding([3, 9])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(accent.soft_bg)),
+                    border: iced::border::Border {
+                        color: accent.border,
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    let lyrics_btn_content: Element<'a, Message> = if compact {
+        icon_lyrics(14.0, ICON_LIGHT)
+    } else {
+        row![
+            icon_lyrics(13.0, ICON_LIGHT),
+            text("Lyrics").size(12).font(FONT_MEDIUM),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    right_controls = right_controls
+        .push(
+            button(lyrics_btn_content)
+                .padding(if compact { [7, 9] } else { [6, 11] })
+                .style(glass_button_style(false, accent))
+                .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
+        )
+        .push(
+            button(icon_queue(
+                14.0,
+                if queue_open {
+                    accent.on_primary
+                } else {
+                    ICON_LIGHT
                 },
-                ..Default::default()
-            }),
-        button(
-            row![
-                icon_lyrics(13.0, ICON_LIGHT),
-                text("Lyrics").size(12).font(FONT_MEDIUM)
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
+            ))
+            .padding([7, 9])
+            .style(glass_button_style(queue_open, accent))
+            .on_press(Message::ToggleQueueDrawer),
         )
-        .padding([6, 11])
-        .style(glass_button_style(false, accent))
-        .on_press(Message::SetViewMode(ViewMode::NowPlayingLyrics)),
-        button(icon_queue(
-            14.0,
-            if queue_open {
-                accent.on_primary
-            } else {
-                ICON_LIGHT
-            }
-        ))
-        .padding([7, 9])
-        .style(glass_button_style(queue_open, accent))
-        .on_press(Message::ToggleQueueDrawer),
-        button(icon_volume(info.muted, 15.0, ICON_LIGHT))
-            .padding([7, 7])
-            .style(ghost_button_style)
-            .on_press(Message::ToggleMute),
-        slider(
-            0.0..=1.0,
-            if info.muted { 0.0 } else { info.volume },
-            Message::SetVolume
+        .push(
+            button(icon_volume(info.muted, 15.0, ICON_LIGHT))
+                .padding([7, 7])
+                .style(ghost_button_style)
+                .on_press(Message::ToggleMute),
         )
-        .step(0.02_f32)
-        .style(seek_slider_style(accent))
-        .width(Length::Fixed(84.0)),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+        .push(
+            slider(
+                0.0..=1.0,
+                if info.muted { 0.0 } else { info.volume },
+                Message::SetVolume,
+            )
+            .step(0.02_f32)
+            .style(seek_slider_style(accent))
+            .width(Length::Fixed(if compact { 62.0 } else { 84.0 })),
+        );
 
     container(
         container(
@@ -348,6 +393,28 @@ pub fn view_player_menu_popover<'a>(
         .padding([7, 10])
         .style(ghost_button_style)
         .on_press(Message::PlayNext(track.clone())),
+        button(
+            row![
+                icon_artist(13.0, ICON_LIGHT),
+                text("Go to Artist")
+                    .size(12)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_PRIMARY),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(ghost_button_style)
+        .on_press(Message::OpenArtistByName {
+            name: track
+                .artists
+                .first()
+                .cloned()
+                .unwrap_or_else(|| track.artist_display()),
+            source_hint: track.source.clone(),
+        }),
         button(
             row![
                 icon_queue(13.0, ICON_LIGHT),

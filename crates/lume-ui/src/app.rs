@@ -8,21 +8,22 @@ use iced::widget::{container, image, mouse_area, operation, row, shader, stack};
 use iced::{window, Background, Color, Element, Length, Subscription, Task, Theme};
 use lume_audio::{AudioCommand, AudioEngineHandle, AudioEvent};
 use lume_core::{
-    LyricsData, MusicProvider, PlaybackSourceUsed, PlaybackStatus, Playlist, QueueActionResult,
-    QueueEngine, ResolvedStream, Track, TrackSource,
+    AlbumDetail, AlbumSummary, ArtistProfile, ArtistSummary, CatalogSource, LyricsData,
+    MusicProvider, PlaybackSourceUsed, PlaybackStatus, Playlist, QueueActionResult, QueueEngine,
+    RemotePlaylistDetail, RemotePlaylistSummary, ResolvedStream, Track, TrackSource,
 };
 use lume_providers::{
-    canonical_playlist_url, detect_yt_dlp_binary, ensure_fresh_token, fetch_spotify_chart_tracks,
-    fetch_spotify_track_oembed_cover, find_sidecar_lrc, find_sidecar_ttml,
-    import_spotify_playlist_url, login_spotify_playback, login_spotify_web_api,
-    needs_spotify_album_artwork, parse_exportify_csv, parse_lrc, parse_ttml, read_embedded_lyrics,
-    resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient, LyricsPlusClient,
-    SpotifyAccountTier, SpotifyApiError, SpotifyUserProfile, SpotifyWebClient,
-    YouTubeMusicProvider, SPOTIFY_PLAYBACK_CLIENT_ID,
+    canonical_playlist_url, detect_yt_dlp_binary, ensure_fresh_token, fetch_spotify_album_embed,
+    fetch_spotify_artist_embed, fetch_spotify_chart_tracks, fetch_spotify_track_oembed_cover,
+    find_sidecar_lrc, find_sidecar_ttml, import_spotify_playlist_url, login_spotify_playback,
+    login_spotify_web_api, needs_spotify_album_artwork, parse_exportify_csv, parse_lrc, parse_ttml,
+    read_embedded_lyrics, resolve_spotify_to_ytm_video_id, LocalProvider, LrclibClient,
+    LyricsPlusClient, SpotifyAccountTier, SpotifyApiError, SpotifyCatalogSearchResult,
+    SpotifyUserProfile, SpotifyWebClient, YouTubeMusicProvider, SPOTIFY_PLAYBACK_CLIENT_ID,
 };
 use lume_storage::{
     AppConfig, ArtCache, Database, GlassmorphismMode, LyricsCacheLookup, SpotifyTokenBundle,
-    TokenStore,
+    TokenStore, WEEKLY_CHARTS_TTL_S,
 };
 use tokio::sync::mpsc::{unbounded_channel, Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -45,18 +46,18 @@ use crate::views::queue_drawer::view_queue_drawer;
 use crate::views::settings::view_settings;
 use crate::views::titlebar::view_titlebar;
 use crate::views::{
-    ActiveNav, ChartRegion, Message, NowPlayingInfo, PlaylistSort, SmtcAction, SourceFilter,
-    SpotifySearchError, SpotifySettingsProps, SpotifySyncReport, ViewMode,
+    ActiveNav, ChartRegion, Message, NowPlayingInfo, PlaylistSort, SearchTab, SmtcAction,
+    SourceFilter, SpotifySearchError, SpotifySettingsProps, SpotifySyncReport, ViewMode,
 };
 
 /// Bounded in-memory Browse thumbnail cache (`800 × 96×96×4 ≈ 28.8 MiB` max RAM),
 /// large enough to hold 1,000+ songs across playlists without LRU eviction flicker.
 const MAX_IN_MEM_ART_HANDLES: usize = 800;
 const THUMBNAIL_SIZE_PX: u32 = 96;
-/// Max concurrent remote artwork HTTP downloads to avoid CDN timeouts / connection drops.
-const MAX_CONCURRENT_ART_DOWNLOADS: usize = 12;
+/// Max concurrent remote artwork HTTP downloads to stay polite on CDN rate limits.
+const MAX_CONCURRENT_ART_DOWNLOADS: usize = 6;
 /// Max concurrent Spotify oEmbed enrichment requests to stay below rate limits.
-const OEMBED_ENRICH_CONCURRENCY: usize = 6;
+const OEMBED_ENRICH_CONCURRENCY: usize = 4;
 /// Maximum decoded dimension for the single active cinema cover (`512×512×4 = 1 MiB` max RAM).
 const MAX_ACTIVE_COVER_PX: u32 = 512;
 const MAX_REMOTE_ART_BYTES: usize = 10 * 1024 * 1024;
@@ -64,6 +65,74 @@ const PALETTE_TRANSITION_SECS: f32 = 0.6;
 const LRCLIB_BASE_URL: &str = "https://lrclib.net";
 const TOAST_SHORT_DURATION_MS: u64 = 3_200;
 const TOAST_LONG_DURATION_MS: u64 = 5_000;
+/// Live search waits 650 ms after typing pauses and requires 3+ chars (Enter still searches
+/// immediately for any query) to avoid bursting partial-word API calls on every keystroke.
+const SEARCH_DEBOUNCE_MS: u64 = 650;
+const SEARCH_MIN_LIVE_CHARS: usize = 3;
+/// Wait until the current track has played for at least 15 s (or <= 25 s remain) before
+/// prefetching the next track's stream so rapid track skipping fires zero wasted API calls.
+const PREFETCH_MIN_PLAYED_MS: u64 = 15_000;
+const PREFETCH_REMAINING_WINDOW_MS: u64 = 25_000;
+const SPOTIFY_SEARCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const SPOTIFY_SEARCH_CACHE_MAX_ENTRIES: usize = 48;
+const MAX_NAV_HISTORY: usize = 30;
+
+pub fn push_nav_history(history: &mut Vec<ActiveNav>, current: ActiveNav, next: &ActiveNav) {
+    if &current == next {
+        return;
+    }
+    if history.last() != Some(&current) {
+        history.push(current);
+        if history.len() > MAX_NAV_HISTORY {
+            let overflow = history.len() - MAX_NAV_HISTORY;
+            history.drain(0..overflow);
+        }
+    }
+}
+
+pub fn pick_best_artist_match(
+    query_name: &str,
+    candidates: &[ArtistSummary],
+) -> Option<ArtistSummary> {
+    let q = query_name.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return candidates.first().cloned();
+    }
+    if let Some(exact) = candidates
+        .iter()
+        .find(|a| a.name.trim().to_ascii_lowercase() == q)
+    {
+        return Some(exact.clone());
+    }
+    if let Some(prefix) = candidates
+        .iter()
+        .find(|a| a.name.trim().to_ascii_lowercase().starts_with(&q))
+    {
+        return Some(prefix.clone());
+    }
+    if let Some(contains) = candidates
+        .iter()
+        .find(|a| a.name.trim().to_ascii_lowercase().contains(&q))
+    {
+        return Some(contains.clone());
+    }
+    candidates.first().cloned()
+}
+
+fn format_followers_label(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M followers", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K followers", count as f64 / 1_000.0)
+    } else {
+        format!("{count} followers")
+    }
+}
+
+fn chart_cache_key(provider: &str, region: ChartRegion) -> String {
+    let suffix = if region.is_indonesia() { "id" } else { "global" };
+    format!("{provider}:{suffix}")
+}
 
 fn toast_auto_dismiss_duration(text: &str) -> Duration {
     if text.chars().count() > 65 {
@@ -130,14 +199,17 @@ pub fn is_likely_offline_error(err: &str) -> bool {
         || lower.contains("offline")
 }
 
-/// Formats an actionable, non-blocking toast when YouTube Music playback fails (e.g. HTTP 403
-/// PO-token rejection or missing `yt-dlp` binary).
+/// Formats an actionable, non-blocking toast when YouTube Music playback fails (e.g. IP-level
+/// anti-bot check, HTTP 403 PO-token rejection, or missing `yt-dlp` binary).
 pub fn format_ytm_stream_error_toast(err: &str, yt_dlp_available: bool) -> String {
     if is_likely_offline_error(err) {
         return "Offline — cannot stream remote track right now. Local files remain playable."
             .to_string();
     }
     let lower = err.to_ascii_lowercase();
+    if lower.contains("sign in to confirm") || lower.contains("not a bot") {
+        return "YouTube temporarily flagged this network IP ('Sign in to confirm you're not a bot'). Try restarting your router, switching networks/hotspot, disabling VPN, or using Spotify Premium in Settings.".to_string();
+    }
     let is_403_or_bot = lower.contains("403")
         || lower.contains("po token")
         || lower.contains("po-token")
@@ -386,9 +458,11 @@ pub struct LumeApp {
 
     view_mode: ViewMode,
     nav: ActiveNav,
+    nav_history: Vec<ActiveNav>,
     queue_open: bool,
 
     search_query: String,
+    search_tab: SearchTab,
     source_filter: SourceFilter,
     playlist_sorts: HashMap<String, PlaylistSort>,
     playlists: Vec<Playlist>,
@@ -406,12 +480,36 @@ pub struct LumeApp {
     search_results: Vec<Track>,
     spotify_search_results: Vec<Track>,
     ytm_search_results: Vec<Track>,
+    spotify_search_artists: Vec<ArtistSummary>,
+    spotify_search_playlists: Vec<RemotePlaylistSummary>,
+    ytm_search_artists: Vec<ArtistSummary>,
+    ytm_search_playlists: Vec<RemotePlaylistSummary>,
     searching_spotify: bool,
     searching_ytm: bool,
     resolving_stream: bool,
     search_request_id: u64,
+    search_debounce_seq: u64,
+    last_remote_search_query: String,
+    spotify_search_cache: HashMap<String, (Instant, SpotifyCatalogSearchResult)>,
     play_request_id: u64,
+    prefetched_for_play_id: u64,
     yt_dlp_detected: Option<PathBuf>,
+
+    active_artist_profile: Option<ArtistProfile>,
+    loading_artist: bool,
+    artist_error: Option<String>,
+    artist_tracks_expanded: bool,
+    artist_request_id: u64,
+    active_album_detail: Option<AlbumDetail>,
+    loading_album: bool,
+    album_error: Option<String>,
+    album_request_id: u64,
+    active_remote_playlist: Option<RemotePlaylistDetail>,
+    loading_remote_playlist: bool,
+    remote_playlist_error: Option<String>,
+    saving_remote_playlist: bool,
+    remote_playlist_request_id: u64,
+    artist_name_cache: HashMap<String, ArtistSummary>,
 
     spotify_client_id_input: String,
     spotify_profile: Option<SpotifyUserProfile>,
@@ -560,8 +658,10 @@ impl LumeApp {
             window_height: 760.0,
             view_mode: ViewMode::Browse,
             nav: ActiveNav::Home,
+            nav_history: Vec::new(),
             queue_open: false,
             search_query: String::new(),
+            search_tab: SearchTab::All,
             source_filter: SourceFilter::All,
             playlist_sorts,
             playlists,
@@ -579,12 +679,35 @@ impl LumeApp {
             search_results: Vec::new(),
             spotify_search_results: Vec::new(),
             ytm_search_results: Vec::new(),
+            spotify_search_artists: Vec::new(),
+            spotify_search_playlists: Vec::new(),
+            ytm_search_artists: Vec::new(),
+            ytm_search_playlists: Vec::new(),
             searching_spotify: false,
             searching_ytm: false,
             resolving_stream: false,
             search_request_id: 0,
+            search_debounce_seq: 0,
+            last_remote_search_query: String::new(),
+            spotify_search_cache: HashMap::new(),
             play_request_id: 0,
+            prefetched_for_play_id: 0,
             yt_dlp_detected,
+            active_artist_profile: None,
+            loading_artist: false,
+            artist_error: None,
+            artist_tracks_expanded: false,
+            artist_request_id: 0,
+            active_album_detail: None,
+            loading_album: false,
+            album_error: None,
+            album_request_id: 0,
+            active_remote_playlist: None,
+            loading_remote_playlist: false,
+            remote_playlist_error: None,
+            saving_remote_playlist: false,
+            remote_playlist_request_id: 0,
+            artist_name_cache: HashMap::new(),
             spotify_client_id_input,
             spotify_profile: None,
             spotify_lapsed: false,
@@ -902,6 +1025,7 @@ impl LumeApp {
             Message::SelectNav(nav) => {
                 self.open_track_menu_uid = None;
                 self.player_menu_open = false;
+                self.nav_history.clear();
                 self.nav = nav.clone();
                 if matches!(self.nav, ActiveNav::Home) {
                     if let Ok(db) = self.db.lock() {
@@ -940,6 +1064,70 @@ impl LumeApp {
                     self.yt_dlp_detected = detect_yt_dlp_binary(self.config.yt_dlp_path.as_deref());
                 }
             }
+            Message::NavigateBack => {
+                self.open_track_menu_uid = None;
+                self.player_menu_open = false;
+                if let Some(prev) = self.nav_history.pop() {
+                    self.nav = prev.clone();
+                    match prev {
+                        ActiveNav::ArtistProfile { source, id, name } => {
+                            let needs_reload = self
+                                .active_artist_profile
+                                .as_ref()
+                                .map(|p| p.id != id || p.source != source)
+                                .unwrap_or(true);
+                            if needs_reload {
+                                return self.start_loading_artist(ArtistSummary {
+                                    id,
+                                    source,
+                                    name,
+                                    avatar_url: None,
+                                    subtitle: None,
+                                });
+                            }
+                        }
+                        ActiveNav::AlbumDetail { source, id, title } => {
+                            let needs_reload = self
+                                .active_album_detail
+                                .as_ref()
+                                .map(|a| a.id != id || a.source != source)
+                                .unwrap_or(true);
+                            if needs_reload {
+                                return self.start_loading_album(AlbumSummary {
+                                    id,
+                                    source,
+                                    title,
+                                    artist_name: String::new(),
+                                    year: None,
+                                    album_type: None,
+                                    cover_url: None,
+                                });
+                            }
+                        }
+                        ActiveNav::RemotePlaylist { source, id, name } => {
+                            let needs_reload = self
+                                .active_remote_playlist
+                                .as_ref()
+                                .map(|p| p.id != id || p.source != source)
+                                .unwrap_or(true);
+                            if needs_reload {
+                                return self.start_loading_remote_playlist(RemotePlaylistSummary {
+                                    id,
+                                    source,
+                                    name,
+                                    owner: None,
+                                    track_count: None,
+                                    cover_url: None,
+                                });
+                            }
+                        }
+                        ActiveNav::Search => self.refresh_search_results(),
+                        _ => {}
+                    }
+                } else {
+                    self.nav = ActiveNav::Search;
+                }
+            }
             Message::SelectHomeRegion(region) => {
                 if self.home_region != region {
                     self.home_region = region;
@@ -973,6 +1161,14 @@ impl LumeApp {
                                 t.is_liked = true;
                             }
                         }
+                        if !tracks.is_empty() {
+                            if let Ok(db) = self.db.lock() {
+                                let _ = db.put_cached_chart(
+                                    &chart_cache_key("spotify", region),
+                                    &tracks,
+                                );
+                            }
+                        }
                         let keys = self.missing_art_keys(&tracks);
                         let snapshot = tracks.clone();
                         self.home_spotify_charts.insert(region, tracks);
@@ -982,7 +1178,9 @@ impl LumeApp {
                         ]);
                     }
                     Err(err) => {
-                        if region == self.home_region {
+                        if region == self.home_region
+                            && !self.home_spotify_charts.contains_key(&region)
+                        {
                             self.status_toast = Some(if is_likely_offline_error(&err) {
                                 "Offline — showing cached local library.".to_string()
                             } else {
@@ -1008,12 +1206,22 @@ impl LumeApp {
                                 t.is_liked = true;
                             }
                         }
+                        if !tracks.is_empty() {
+                            if let Ok(db) = self.db.lock() {
+                                let _ = db.put_cached_chart(
+                                    &chart_cache_key("ytm", region),
+                                    &tracks,
+                                );
+                            }
+                        }
                         let keys = self.missing_art_keys(&tracks);
                         self.home_ytm_charts.insert(region, tracks);
                         return self.preload_thumbnails_task(keys);
                     }
                     Err(err) => {
-                        if region == self.home_region {
+                        if region == self.home_region
+                            && !self.home_ytm_charts.contains_key(&region)
+                        {
                             self.status_toast = Some(if is_likely_offline_error(&err) {
                                 "Offline — showing cached local library.".to_string()
                             } else {
@@ -1472,40 +1680,84 @@ impl LumeApp {
             }
             Message::SearchInputChanged(val) => {
                 self.search_query = val;
-                if self.search_query.trim().is_empty() {
+                self.search_debounce_seq = self.search_debounce_seq.wrapping_add(1);
+                let trimmed = self.search_query.trim().to_string();
+                if trimmed.is_empty() {
+                    self.search_request_id = self.search_request_id.wrapping_add(1);
+                    self.last_remote_search_query.clear();
                     self.spotify_search_results.clear();
                     self.ytm_search_results.clear();
+                    self.spotify_search_artists.clear();
+                    self.spotify_search_playlists.clear();
+                    self.ytm_search_artists.clear();
+                    self.ytm_search_playlists.clear();
                     self.searching_spotify = false;
                     self.searching_ytm = false;
+                    self.refresh_search_results();
+                    return Task::none();
                 }
+
                 self.refresh_search_results();
-                if !self.search_query.trim().is_empty()
-                    && matches!(
-                        self.nav,
-                        ActiveNav::Home | ActiveNav::LocalFiles | ActiveNav::LikedSongs
-                    )
-                {
+                if !matches!(self.nav, ActiveNav::Search) {
                     self.nav = ActiveNav::Search;
                 }
+
+                if trimmed.chars().count() >= SEARCH_MIN_LIVE_CHARS
+                    && !trimmed.eq_ignore_ascii_case(&self.last_remote_search_query)
+                {
+                    let seq = self.search_debounce_seq;
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
+                            (seq, trimmed)
+                        },
+                        |(seq, query)| Message::SearchDebounceFired { seq, query },
+                    );
+                }
+            }
+            Message::SearchDebounceFired { seq, query } => {
+                if seq != self.search_debounce_seq {
+                    return Task::none();
+                }
+                let current = self.search_query.trim();
+                if current.is_empty()
+                    || current != query
+                    || current.eq_ignore_ascii_case(&self.last_remote_search_query)
+                {
+                    return Task::none();
+                }
+                self.last_remote_search_query = query.clone();
+                return self.trigger_remote_search_tasks(query);
             }
             Message::SearchSubmitted => {
+                self.search_debounce_seq = self.search_debounce_seq.wrapping_add(1);
                 self.nav = ActiveNav::Search;
                 self.refresh_search_results();
                 let query = self.search_query.trim().to_string();
                 if !query.is_empty() {
+                    self.last_remote_search_query = query.clone();
                     return self.trigger_remote_search_tasks(query);
                 }
+            }
+            Message::SearchTabChanged(tab) => {
+                self.search_tab = tab;
             }
             Message::SourceFilterChanged(filter) => {
                 self.source_filter = filter;
                 let query = self.search_query.trim().to_string();
                 if matches!(self.nav, ActiveNav::Search) && !query.is_empty() {
-                    let need_ytm = matches!(filter, SourceFilter::YouTubeMusic | SourceFilter::All)
+                    let spotify_ok = self.can_query_spotify_web_api();
+                    let need_ytm = (matches!(filter, SourceFilter::YouTubeMusic | SourceFilter::All)
+                        || (filter == SourceFilter::Spotify && !spotify_ok))
                         && self.ytm_search_results.is_empty()
+                        && self.ytm_search_artists.is_empty()
+                        && self.ytm_search_playlists.is_empty()
                         && !self.searching_ytm;
                     let need_spotify = matches!(filter, SourceFilter::Spotify | SourceFilter::All)
-                        && self.can_query_spotify_web_api()
+                        && spotify_ok
                         && self.spotify_search_results.is_empty()
+                        && self.spotify_search_artists.is_empty()
+                        && self.spotify_search_playlists.is_empty()
                         && !self.searching_spotify;
                     if need_ytm || need_spotify {
                         return self.trigger_remote_search_tasks(query);
@@ -1518,19 +1770,24 @@ impl LumeApp {
                 }
                 self.searching_ytm = false;
                 match result {
-                    Ok(mut tracks) => {
-                        let liked_uids: HashSet<String> = self
-                            .liked_tracks
-                            .iter()
-                            .map(|t| t.uid.clone())
-                            .collect();
-                        for t in &mut tracks {
-                            if liked_uids.contains(&t.uid) {
-                                t.is_liked = true;
-                            }
-                        }
-                        let keys = self.missing_art_keys(&tracks);
-                        self.ytm_search_results = tracks;
+                    Ok(mut catalog) => {
+                        self.apply_liked_flags(&mut catalog.tracks);
+                        let mut keys = self.missing_art_keys(&catalog.tracks);
+                        keys.extend(self.missing_art_urls(
+                            catalog
+                                .artists
+                                .iter()
+                                .filter_map(|a| a.avatar_url.as_deref())
+                                .chain(
+                                    catalog
+                                        .playlists
+                                        .iter()
+                                        .filter_map(|p| p.cover_url.as_deref()),
+                                ),
+                        ));
+                        self.ytm_search_results = catalog.tracks;
+                        self.ytm_search_artists = catalog.artists;
+                        self.ytm_search_playlists = catalog.playlists;
                         self.refresh_search_results();
                         return self.preload_thumbnails_task(keys);
                     }
@@ -1553,33 +1810,370 @@ impl LumeApp {
                 }
                 self.searching_spotify = false;
                 match result {
-                    Ok(mut tracks) => {
-                        let liked_uids: HashSet<String> = self
-                            .liked_tracks
-                            .iter()
-                            .map(|t| t.uid.clone())
-                            .collect();
-                        for t in &mut tracks {
-                            if liked_uids.contains(&t.uid) {
-                                t.is_liked = true;
+                    Ok(mut catalog) => {
+                        let cache_key = self.search_query.trim().to_ascii_lowercase();
+                        if !cache_key.is_empty()
+                            && (!catalog.tracks.is_empty()
+                                || !catalog.artists.is_empty()
+                                || !catalog.playlists.is_empty())
+                        {
+                            let now = Instant::now();
+                            if self.spotify_search_cache.len() >= SPOTIFY_SEARCH_CACHE_MAX_ENTRIES {
+                                self.spotify_search_cache
+                                    .retain(|_, (exp, _)| *exp > now);
+                                if self.spotify_search_cache.len()
+                                    >= SPOTIFY_SEARCH_CACHE_MAX_ENTRIES
+                                {
+                                    if let Some(oldest) = self
+                                        .spotify_search_cache
+                                        .iter()
+                                        .min_by_key(|(_, (exp, _))| *exp)
+                                        .map(|(k, _)| k.clone())
+                                    {
+                                        self.spotify_search_cache.remove(&oldest);
+                                    }
+                                }
                             }
+                            self.spotify_search_cache.insert(
+                                cache_key,
+                                (now + SPOTIFY_SEARCH_CACHE_TTL, catalog.clone()),
+                            );
                         }
-                        let keys = self.missing_art_keys(&tracks);
-                        self.spotify_search_results = tracks;
+                        self.apply_liked_flags(&mut catalog.tracks);
+                        let mut keys = self.missing_art_keys(&catalog.tracks);
+                        keys.extend(self.missing_art_urls(
+                            catalog
+                                .artists
+                                .iter()
+                                .filter_map(|a| a.avatar_url.as_deref())
+                                .chain(
+                                    catalog
+                                        .playlists
+                                        .iter()
+                                        .filter_map(|p| p.cover_url.as_deref()),
+                                ),
+                        ));
+                        self.spotify_search_results = catalog.tracks;
+                        self.spotify_search_artists = catalog.artists;
+                        self.spotify_search_playlists = catalog.playlists;
                         self.refresh_search_results();
                         return self.preload_thumbnails_task(keys);
                     }
                     Err(SpotifySearchError::LapsedOrForbidden) => {
                         self.spotify_lapsed = true;
                         self.spotify_search_results.clear();
+                        self.spotify_search_artists.clear();
+                        self.spotify_search_playlists.clear();
                         self.refresh_search_results();
                         self.status_toast = Some(
-                            "Spotify Web API unavailable (Premium lapsed/403) — showing Local + YouTube Music."
+                            "Spotify Web API unavailable (Premium lapsed/403) — falling back to YouTube Music."
                                 .to_string(),
                         );
+                        // If user had filtered exclusively to Spotify, automatically query YTM fallback.
+                        let query = self.search_query.trim().to_string();
+                        if self.source_filter == SourceFilter::Spotify
+                            && !query.is_empty()
+                            && self.ytm_search_results.is_empty()
+                            && !self.searching_ytm
+                        {
+                            self.searching_ytm = true;
+                            return self.spawn_ytm_search_task(query, request_id);
+                        }
                     }
                     Err(SpotifySearchError::Other(err)) => {
                         self.status_toast = Some(format!("Spotify search failed: {err}"));
+                    }
+                }
+            }
+            Message::OpenArtist(summary) => {
+                self.open_track_menu_uid = None;
+                self.player_menu_open = false;
+                self.view_mode = ViewMode::Browse;
+                let next = ActiveNav::ArtistProfile {
+                    source: summary.source,
+                    id: summary.id.clone(),
+                    name: summary.name.clone(),
+                };
+                push_nav_history(&mut self.nav_history, self.nav.clone(), &next);
+                self.nav = next;
+                return self.start_loading_artist(summary);
+            }
+            Message::OpenArtistByName { name, source_hint } => {
+                let clean_name = name.trim().to_string();
+                if clean_name.is_empty() || clean_name.eq_ignore_ascii_case("unknown artist") {
+                    return Task::none();
+                }
+                self.open_track_menu_uid = None;
+                self.player_menu_open = false;
+                self.view_mode = ViewMode::Browse;
+
+                let cache_key = clean_name.to_ascii_lowercase();
+                if let Some(cached) = self.artist_name_cache.get(&cache_key).cloned() {
+                    let usable = cached.source == CatalogSource::YouTubeMusic
+                        || self.can_query_spotify_web_api();
+                    if usable {
+                        let next = ActiveNav::ArtistProfile {
+                            source: cached.source,
+                            id: cached.id.clone(),
+                            name: cached.name.clone(),
+                        };
+                        push_nav_history(&mut self.nav_history, self.nav.clone(), &next);
+                        self.nav = next;
+                        return self.start_loading_artist(cached);
+                    }
+                }
+
+                let prefer_spotify = matches!(source_hint, TrackSource::Spotify { .. })
+                    && self.can_query_spotify_web_api();
+                let next_source = if prefer_spotify {
+                    CatalogSource::Spotify
+                } else {
+                    CatalogSource::YouTubeMusic
+                };
+                let next = ActiveNav::ArtistProfile {
+                    source: next_source,
+                    id: format!("lookup:{cache_key}"),
+                    name: clean_name.clone(),
+                };
+                push_nav_history(&mut self.nav_history, self.nav.clone(), &next);
+                self.nav = next;
+                self.active_artist_profile = None;
+                self.artist_error = None;
+                self.artist_tracks_expanded = false;
+                self.loading_artist = true;
+                self.artist_request_id = self.artist_request_id.wrapping_add(1);
+                return self.spawn_load_artist_by_name_task(
+                    self.artist_request_id,
+                    clean_name,
+                    prefer_spotify,
+                );
+            }
+            Message::ToggleExpandArtistTracks => {
+                self.artist_tracks_expanded = !self.artist_tracks_expanded;
+            }
+            Message::ArtistProfileLoaded {
+                request_id,
+                result,
+                refreshed_token,
+                fallback_notice,
+                spotify_lapsed,
+            } => {
+                if let Some(tok) = refreshed_token {
+                    self.tokens.web_api = Some(tok);
+                    let _ = self.token_store.save(&self.tokens);
+                }
+                if spotify_lapsed {
+                    self.spotify_lapsed = true;
+                }
+                if request_id != self.artist_request_id {
+                    return Task::none();
+                }
+                self.loading_artist = false;
+                if let Some(notice) = fallback_notice {
+                    self.status_toast = Some(notice);
+                }
+                match result {
+                    Ok(mut profile) => {
+                        self.apply_liked_flags(&mut profile.top_tracks);
+                        self.artist_name_cache.insert(
+                            profile.name.trim().to_ascii_lowercase(),
+                            ArtistSummary {
+                                id: profile.id.clone(),
+                                source: profile.source,
+                                name: profile.name.clone(),
+                                avatar_url: profile.avatar_url.clone(),
+                                subtitle: profile.subscriber_label.clone(),
+                            },
+                        );
+                        if matches!(self.nav, ActiveNav::ArtistProfile { .. }) {
+                            self.nav = ActiveNav::ArtistProfile {
+                                source: profile.source,
+                                id: profile.id.clone(),
+                                name: profile.name.clone(),
+                            };
+                        }
+                        let mut keys = self.missing_art_keys(&profile.top_tracks);
+                        keys.extend(self.missing_art_urls(
+                            profile
+                                .avatar_url
+                                .as_deref()
+                                .into_iter()
+                                .chain(profile.albums.iter().filter_map(|a| a.cover_url.as_deref()))
+                                .chain(profile.singles.iter().filter_map(|a| a.cover_url.as_deref()))
+                                .chain(
+                                    profile
+                                        .playlists
+                                        .iter()
+                                        .filter_map(|p| p.cover_url.as_deref()),
+                                ),
+                        ));
+                        let enrich_snapshot = profile.top_tracks.clone();
+                        self.active_artist_profile = Some(profile);
+                        self.artist_error = None;
+                        return Task::batch([
+                            self.preload_thumbnails_task(keys),
+                            self.spawn_spotify_artwork_enrichment_task(&enrich_snapshot),
+                        ]);
+                    }
+                    Err(err) => {
+                        self.artist_error = Some(err);
+                    }
+                }
+            }
+            Message::OpenAlbum(summary) => {
+                self.open_track_menu_uid = None;
+                self.player_menu_open = false;
+                let next = ActiveNav::AlbumDetail {
+                    source: summary.source,
+                    id: summary.id.clone(),
+                    title: summary.title.clone(),
+                };
+                push_nav_history(&mut self.nav_history, self.nav.clone(), &next);
+                self.nav = next;
+                return self.start_loading_album(summary);
+            }
+            Message::AlbumDetailLoaded {
+                request_id,
+                result,
+                refreshed_token,
+                spotify_lapsed,
+            } => {
+                if let Some(tok) = refreshed_token {
+                    self.tokens.web_api = Some(tok);
+                    let _ = self.token_store.save(&self.tokens);
+                }
+                if spotify_lapsed {
+                    self.spotify_lapsed = true;
+                }
+                if request_id != self.album_request_id {
+                    return Task::none();
+                }
+                self.loading_album = false;
+                match result {
+                    Ok(mut detail) => {
+                        self.apply_liked_flags(&mut detail.tracks);
+                        let mut keys = self.missing_art_keys(&detail.tracks);
+                        keys.extend(self.missing_art_urls(detail.cover_url.as_deref().into_iter()));
+                        self.active_album_detail = Some(detail);
+                        self.album_error = None;
+                        return self.preload_thumbnails_task(keys);
+                    }
+                    Err(err) => {
+                        self.album_error = Some(err);
+                    }
+                }
+            }
+            Message::OpenRemotePlaylist(summary) => {
+                self.open_track_menu_uid = None;
+                self.player_menu_open = false;
+                let next = ActiveNav::RemotePlaylist {
+                    source: summary.source,
+                    id: summary.id.clone(),
+                    name: summary.name.clone(),
+                };
+                push_nav_history(&mut self.nav_history, self.nav.clone(), &next);
+                self.nav = next;
+                return self.start_loading_remote_playlist(summary);
+            }
+            Message::RemotePlaylistLoaded {
+                request_id,
+                result,
+                refreshed_token,
+                spotify_lapsed,
+            } => {
+                if let Some(tok) = refreshed_token {
+                    self.tokens.web_api = Some(tok);
+                    let _ = self.token_store.save(&self.tokens);
+                }
+                if spotify_lapsed {
+                    self.spotify_lapsed = true;
+                }
+                if request_id != self.remote_playlist_request_id {
+                    return Task::none();
+                }
+                self.loading_remote_playlist = false;
+                match result {
+                    Ok(mut detail) => {
+                        self.apply_liked_flags(&mut detail.tracks);
+                        let mut keys = self.missing_art_keys(&detail.tracks);
+                        keys.extend(self.missing_art_urls(detail.cover_url.as_deref().into_iter()));
+                        let enrich_snapshot = detail.tracks.clone();
+                        self.active_remote_playlist = Some(detail);
+                        self.remote_playlist_error = None;
+                        return Task::batch([
+                            self.preload_thumbnails_task(keys),
+                            self.spawn_spotify_artwork_enrichment_task(&enrich_snapshot),
+                        ]);
+                    }
+                    Err(err) => {
+                        self.remote_playlist_error = Some(err);
+                    }
+                }
+            }
+            Message::SaveRemotePlaylistToLibrary => {
+                let Some(detail) = self.active_remote_playlist.clone() else {
+                    return Task::none();
+                };
+                if self.saving_remote_playlist || detail.tracks.is_empty() {
+                    return Task::none();
+                }
+                self.saving_remote_playlist = true;
+                let db_path = self.db_path.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+                            match detail.source {
+                                CatalogSource::Spotify => {
+                                    let existed = db.list_playlists().ok().is_some_and(|pls| {
+                                        pls.iter().any(|p| {
+                                            matches!(
+                                                &p.origin,
+                                                lume_core::PlaylistOrigin::SpotifyImported {
+                                                    source_url
+                                                } if source_url == &detail.source_url
+                                            )
+                                        })
+                                    });
+                                    let pl = db
+                                        .upsert_imported_spotify_playlist(
+                                            &detail.name,
+                                            &detail.source_url,
+                                            &detail.tracks,
+                                        )
+                                        .map_err(|e| e.to_string())?;
+                                    Ok((pl, existed))
+                                }
+                                CatalogSource::YouTubeMusic => db
+                                    .upsert_imported_ytm_playlist(
+                                        &detail.name,
+                                        &detail.source_url,
+                                        &detail.tracks,
+                                    )
+                                    .map_err(|e| e.to_string()),
+                            }
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::RemotePlaylistSaved,
+                );
+            }
+            Message::RemotePlaylistSaved(res) => {
+                self.saving_remote_playlist = false;
+                match res {
+                    Ok((pl, updated)) => {
+                        if let Ok(db) = self.db.lock() {
+                            self.playlists = db.list_playlists().unwrap_or_default();
+                        }
+                        let verb = if updated { "Updated" } else { "Saved" };
+                        self.status_toast = Some(format!(
+                            "{verb} \"{}\" ({} songs) in your playlists.",
+                            pl.name, pl.track_count
+                        ));
+                    }
+                    Err(err) => {
+                        self.status_toast = Some(format!("Failed to save playlist: {err}"));
                     }
                 }
             }
@@ -1603,7 +2197,6 @@ impl LumeApp {
                     return self.start_playing_track(track);
                 }
                 self.status_toast = Some(format!("Playing \"{title}\" next"));
-                return self.spawn_prefetch_next_track_task(track);
             }
             Message::AddToQueue(track) => {
                 self.open_track_menu_uid = None;
@@ -1652,6 +2245,27 @@ impl LumeApp {
                 }
                 for list in self.home_ytm_charts.values_mut() {
                     for t in list {
+                        if t.uid == track.uid {
+                            t.is_liked = next_liked;
+                        }
+                    }
+                }
+                if let Some(profile) = &mut self.active_artist_profile {
+                    for t in &mut profile.top_tracks {
+                        if t.uid == track.uid {
+                            t.is_liked = next_liked;
+                        }
+                    }
+                }
+                if let Some(album) = &mut self.active_album_detail {
+                    for t in &mut album.tracks {
+                        if t.uid == track.uid {
+                            t.is_liked = next_liked;
+                        }
+                    }
+                }
+                if let Some(pl) = &mut self.active_remote_playlist {
+                    for t in &mut pl.tracks {
                         if t.uid == track.uid {
                             t.is_liked = next_liked;
                         }
@@ -1998,6 +2612,22 @@ impl LumeApp {
                         }
                     }
                 }
+                if let Some(profile) = &mut self.active_artist_profile {
+                    for t in &mut profile.top_tracks {
+                        if let Some(url) = updated_map.get(&t.uid) {
+                            t.artwork_ref = Some(url.clone());
+                            new_keys.push(url.clone());
+                        }
+                    }
+                }
+                if let Some(pl) = &mut self.active_remote_playlist {
+                    for t in &mut pl.tracks {
+                        if let Some(url) = updated_map.get(&t.uid) {
+                            t.artwork_ref = Some(url.clone());
+                            new_keys.push(url.clone());
+                        }
+                    }
+                }
                 for t in &mut self.spotify_search_results {
                     if let Some(url) = updated_map.get(&t.uid) {
                         t.artwork_ref = Some(url.clone());
@@ -2009,11 +2639,29 @@ impl LumeApp {
                         new_keys.push(url.clone());
                     }
                 }
-                for list in self.home_spotify_charts.values_mut() {
+                let mut enriched_chart_regions = Vec::new();
+                for (&region, list) in self.home_spotify_charts.iter_mut() {
+                    let mut changed = false;
                     for t in list {
                         if let Some(url) = updated_map.get(&t.uid) {
                             t.artwork_ref = Some(url.clone());
                             new_keys.push(url.clone());
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        enriched_chart_regions.push(region);
+                    }
+                }
+                if !enriched_chart_regions.is_empty() {
+                    if let Ok(db) = self.db.lock() {
+                        for region in enriched_chart_regions {
+                            if let Some(tracks) = self.home_spotify_charts.get(&region) {
+                                let _ = db.update_cached_chart_tracks(
+                                    &chart_cache_key("spotify", region),
+                                    tracks,
+                                );
+                            }
                         }
                     }
                 }
@@ -2422,11 +3070,44 @@ impl LumeApp {
                     position_ms,
                     duration_ms,
                 } => {
-                    self.position_ms = position_ms;
-                    self.last_audio_pos_ms = position_ms;
+                    // Monotonic clock smoothing: avoid tiny 10-80ms backward snaps between
+                    // 100ms audio engine ticks and 60 FPS UI interpolation so Bloom lyric
+                    // sweeps never micro-stutter, while still honoring genuine seeks/drifts.
+                    let smoothed = if self.status == PlaybackStatus::Playing
+                        && position_ms < self.position_ms
+                        && self.position_ms.saturating_sub(position_ms) <= 90
+                    {
+                        self.position_ms
+                    } else {
+                        position_ms
+                    };
+                    self.position_ms = smoothed;
+                    self.last_audio_pos_ms = smoothed;
                     self.last_audio_pos_at = Instant::now();
                     if duration_ms > 0 {
                         self.duration_ms = duration_ms;
+                    }
+                    // Deferred next-track prefetch: only pre-resolve once the current song has
+                    // actually played for >= 15 s (or <= 25 s remain), avoiding wasted YouTube
+                    // API requests when rapidly skipping through a playlist.
+                    if self.status == PlaybackStatus::Playing
+                        && self.play_request_id > 0
+                        && self.prefetched_for_play_id != self.play_request_id
+                        && (self.position_ms >= PREFETCH_MIN_PLAYED_MS
+                            || (self.duration_ms > 10_000
+                                && self.duration_ms.saturating_sub(self.position_ms)
+                                    <= PREFETCH_REMAINING_WINDOW_MS))
+                    {
+                        self.prefetched_for_play_id = self.play_request_id;
+                        if let Some(next_track) = self.queue.peek_next().cloned() {
+                            if self
+                                .queue
+                                .current()
+                                .is_none_or(|cur| cur.uid != next_track.uid)
+                            {
+                                return self.spawn_prefetch_next_track_task(next_track);
+                            }
+                        }
                     }
                 }
                 AudioEvent::TrackEnded { .. } => match self.queue.next() {
@@ -2573,6 +3254,7 @@ impl LumeApp {
                     lyrics_loading: self.lyrics_loading,
                     lyrics_mode: self.config.lyrics_visual_mode,
                     active_scale: self.lyrics_spring.active_scale(),
+                    visual_active_idx: self.lyrics_spring.visual_active_idx(),
                     window_width: self.window_width,
                     window_height: self.window_height,
                     active_cover,
@@ -2627,6 +3309,7 @@ impl LumeApp {
                     &self.search_query,
                     self.source_filter,
                     self.queue_open,
+                    self.window_width,
                     accent,
                 );
 
@@ -2641,7 +3324,13 @@ impl LumeApp {
                 let center_content: Element<'_, Message> = if matches!(self.nav, ActiveNav::Settings)
                 {
                     row![
-                        view_sidebar(&self.nav, &self.playlists, connection_status, accent),
+                        view_sidebar(
+                            &self.nav,
+                            &self.playlists,
+                            connection_status,
+                            self.window_width,
+                            accent,
+                        ),
                         view_settings(
                             &self.config,
                             self.scanning_folders,
@@ -2695,14 +3384,46 @@ impl LumeApp {
                         .get(&self.home_region)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
+                    let remote_playlist_is_saved = self
+                        .active_remote_playlist
+                        .as_ref()
+                        .is_some_and(|rp| {
+                            self.playlists.iter().any(|p| match &p.origin {
+                                lume_core::PlaylistOrigin::SpotifyImported { source_url }
+                                | lume_core::PlaylistOrigin::YouTubeImported { source_url } => {
+                                    source_url == &rp.source_url
+                                }
+                                _ => false,
+                            })
+                        });
                     view_browse(BrowseViewProps {
                         nav: &self.nav,
+                        window_width: self.window_width,
+                        can_go_back: !self.nav_history.is_empty(),
                         search_query: &self.search_query,
+                        search_tab: self.search_tab,
                         source_filter: self.source_filter,
+                        spotify_web_api_active: self.can_query_spotify_web_api(),
                         playlist_sort,
                         searching_remote: self.searching_ytm || self.searching_spotify,
                         playlists: &self.playlists,
                         visible_tracks,
+                        spotify_search_artists: &self.spotify_search_artists,
+                        spotify_search_playlists: &self.spotify_search_playlists,
+                        ytm_search_artists: &self.ytm_search_artists,
+                        ytm_search_playlists: &self.ytm_search_playlists,
+                        active_artist_profile: self.active_artist_profile.as_ref(),
+                        loading_artist: self.loading_artist,
+                        artist_error: self.artist_error.as_deref(),
+                        artist_tracks_expanded: self.artist_tracks_expanded,
+                        active_album_detail: self.active_album_detail.as_ref(),
+                        loading_album: self.loading_album,
+                        album_error: self.album_error.as_deref(),
+                        active_remote_playlist: self.active_remote_playlist.as_ref(),
+                        loading_remote_playlist: self.loading_remote_playlist,
+                        remote_playlist_error: self.remote_playlist_error.as_deref(),
+                        saving_remote_playlist: self.saving_remote_playlist,
+                        remote_playlist_is_saved,
                         recent_tracks: &self.recent_tracks,
                         home_region: self.home_region,
                         home_spotify_trending,
@@ -2735,6 +3456,7 @@ impl LumeApp {
                     &self.art_handles,
                     self.queue_open,
                     self.player_menu_open,
+                    self.window_width,
                     accent,
                 );
 
@@ -2766,6 +3488,7 @@ impl LumeApp {
                             &active_list,
                             self.queue.current_pos(),
                             &self.art_handles,
+                            self.window_width,
                             accent,
                         )))
                         .width(Length::Fill)
@@ -2911,8 +3634,80 @@ impl LumeApp {
             ActiveNav::LikedSongs => &self.liked_tracks,
             ActiveNav::LocalFiles => &self.local_tracks,
             ActiveNav::Playlist(_) => &self.playlist_tracks,
+            ActiveNav::ArtistProfile { .. } => self
+                .active_artist_profile
+                .as_ref()
+                .map(|p| p.top_tracks.as_slice())
+                .unwrap_or(&[]),
+            ActiveNav::AlbumDetail { .. } => self
+                .active_album_detail
+                .as_ref()
+                .map(|a| a.tracks.as_slice())
+                .unwrap_or(&[]),
+            ActiveNav::RemotePlaylist { .. } => self
+                .active_remote_playlist
+                .as_ref()
+                .map(|p| p.tracks.as_slice())
+                .unwrap_or(&[]),
             ActiveNav::Settings => &self.local_tracks,
         }
+    }
+
+    fn apply_liked_flags(&self, tracks: &mut [Track]) {
+        let liked_uids: HashSet<&str> = self
+            .liked_tracks
+            .iter()
+            .map(|t| t.uid.as_str())
+            .collect();
+        for t in tracks {
+            if liked_uids.contains(t.uid.as_str()) {
+                t.is_liked = true;
+            }
+        }
+    }
+
+    fn missing_art_urls<'a>(&self, urls: impl Iterator<Item = &'a str>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for url in urls {
+            let trimmed = url.trim();
+            if !trimmed.is_empty()
+                && !self.art_handles.contains_key(trimmed)
+                && seen.insert(trimmed.to_string())
+            {
+                out.push(trimmed.to_string());
+                if out.len() >= MAX_IN_MEM_ART_HANDLES {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn start_loading_artist(&mut self, summary: ArtistSummary) -> Task<Message> {
+        self.active_artist_profile = None;
+        self.artist_error = None;
+        self.artist_tracks_expanded = false;
+        self.loading_artist = true;
+        self.artist_request_id = self.artist_request_id.wrapping_add(1);
+        self.spawn_load_artist_task(self.artist_request_id, summary)
+    }
+
+    fn start_loading_album(&mut self, summary: AlbumSummary) -> Task<Message> {
+        self.active_album_detail = None;
+        self.album_error = None;
+        self.loading_album = true;
+        self.album_request_id = self.album_request_id.wrapping_add(1);
+        self.spawn_load_album_task(self.album_request_id, summary)
+    }
+
+    fn start_loading_remote_playlist(&mut self, summary: RemotePlaylistSummary) -> Task<Message> {
+        self.active_remote_playlist = None;
+        self.remote_playlist_error = None;
+        self.saving_remote_playlist = false;
+        self.loading_remote_playlist = true;
+        self.remote_playlist_request_id = self.remote_playlist_request_id.wrapping_add(1);
+        self.spawn_load_remote_playlist_task(self.remote_playlist_request_id, summary)
     }
 
     fn spotify_account_tier(&self) -> SpotifyAccountTier {
@@ -2936,20 +3731,41 @@ impl LumeApp {
         self.search_request_id = self.search_request_id.wrapping_add(1);
         let req_id = self.search_request_id;
         let mut tasks = Vec::new();
+        let spotify_ok = self.can_query_spotify_web_api();
 
-        if matches!(
-            self.source_filter,
-            SourceFilter::All | SourceFilter::YouTubeMusic
-        ) {
-            self.searching_ytm = true;
-            tasks.push(self.spawn_ytm_search_task(query.clone(), req_id));
+        if matches!(self.source_filter, SourceFilter::All | SourceFilter::Spotify) && spotify_ok {
+            let cache_key = query.trim().to_ascii_lowercase();
+            let cached_spotify = self
+                .spotify_search_cache
+                .get(&cache_key)
+                .filter(|(exp, _)| *exp > Instant::now())
+                .map(|(_, c)| c.clone());
+            if let Some(mut catalog) = cached_spotify {
+                self.searching_spotify = false;
+                self.apply_liked_flags(&mut catalog.tracks);
+                self.spotify_search_results = catalog.tracks;
+                self.spotify_search_artists = catalog.artists;
+                self.spotify_search_playlists = catalog.playlists;
+                self.refresh_search_results();
+            } else {
+                self.searching_spotify = true;
+                tasks.push(self.spawn_spotify_search_task(query.clone(), req_id));
+            }
         }
 
-        if matches!(self.source_filter, SourceFilter::All | SourceFilter::Spotify)
-            && self.can_query_spotify_web_api()
-        {
-            self.searching_spotify = true;
-            tasks.push(self.spawn_spotify_search_task(query, req_id));
+        let need_ytm = matches!(
+            self.source_filter,
+            SourceFilter::All | SourceFilter::YouTubeMusic
+        ) || (self.source_filter == SourceFilter::Spotify && !spotify_ok);
+        if need_ytm {
+            if self.source_filter == SourceFilter::Spotify && !spotify_ok {
+                self.status_toast = Some(
+                    "Spotify Web API is not active — showing YouTube Music results instead."
+                        .to_string(),
+                );
+            }
+            self.searching_ytm = true;
+            tasks.push(self.spawn_ytm_search_task(query, req_id));
         }
 
         if tasks.is_empty() {
@@ -3114,12 +3930,6 @@ impl LumeApp {
                         false,
                     ));
                 }
-            }
-        }
-
-        if let Some(next_track) = self.queue.peek_next().cloned() {
-            if next_track.uid != track.uid {
-                tasks.push(self.spawn_prefetch_next_track_task(next_track));
             }
         }
 
@@ -3389,7 +4199,7 @@ impl LumeApp {
             async move {
                 let provider = ytm_res?;
                 provider
-                    .search_catalog(&query, 14, 6)
+                    .search_catalog_full(&query, 14, 6, 8, 8)
                     .await
                     .map_err(|e| e.to_string())
             },
@@ -3401,8 +4211,35 @@ impl LumeApp {
         let mut tasks = Vec::new();
         let indonesia = region.is_indonesia();
 
-        if force || !self.home_spotify_charts.contains_key(&region) {
-            self.home_loading_spotify = true;
+        // Spotify weekly charts: serve directly from SQLite cache for 7 days (0 network calls).
+        let mut need_spotify_fetch = force;
+        if !force && !self.home_spotify_charts.contains_key(&region) {
+            let cached = self
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| {
+                    db.get_cached_chart(&chart_cache_key("spotify", region), WEEKLY_CHARTS_TTL_S)
+                        .ok()
+                        .flatten()
+                })
+                .filter(|c| !c.tracks.is_empty());
+
+            if let Some(mut entry) = cached {
+                self.apply_liked_flags(&mut entry.tracks);
+                let keys = self.missing_art_keys(&entry.tracks);
+                let snapshot = entry.tracks.clone();
+                self.home_spotify_charts.insert(region, entry.tracks);
+                tasks.push(self.preload_thumbnails_task(keys));
+                tasks.push(self.spawn_spotify_artwork_enrichment_task(&snapshot));
+                need_spotify_fetch = !entry.is_fresh;
+            } else {
+                need_spotify_fetch = true;
+            }
+        }
+
+        if need_spotify_fetch {
+            self.home_loading_spotify = !self.home_spotify_charts.contains_key(&region) || force;
             tasks.push(Task::perform(
                 async move {
                     fetch_spotify_chart_tracks(indonesia, 25)
@@ -3415,12 +4252,40 @@ impl LumeApp {
             self.home_loading_spotify = false;
         }
 
-        if force || !self.home_ytm_charts.contains_key(&region) {
-            self.home_loading_ytm = true;
+        // YouTube Music weekly charts: serve directly from SQLite cache for 7 days (0 network calls).
+        let mut need_ytm_fetch = force;
+        if !force && !self.home_ytm_charts.contains_key(&region) {
+            let cached = self
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| {
+                    db.get_cached_chart(&chart_cache_key("ytm", region), WEEKLY_CHARTS_TTL_S)
+                        .ok()
+                        .flatten()
+                })
+                .filter(|c| !c.tracks.is_empty());
+
+            if let Some(mut entry) = cached {
+                self.apply_liked_flags(&mut entry.tracks);
+                let keys = self.missing_art_keys(&entry.tracks);
+                self.home_ytm_charts.insert(region, entry.tracks);
+                tasks.push(self.preload_thumbnails_task(keys));
+                need_ytm_fetch = !entry.is_fresh;
+            } else {
+                need_ytm_fetch = true;
+            }
+        }
+
+        if need_ytm_fetch {
+            self.home_loading_ytm = !self.home_ytm_charts.contains_key(&region) || force;
             let ytm_res = self.get_ytm_provider();
             tasks.push(Task::perform(
                 async move {
                     let provider = ytm_res?;
+                    if force {
+                        provider.invalidate_charts_cache();
+                    }
                     provider
                         .fetch_charts(indonesia, 25)
                         .await
@@ -3545,12 +4410,12 @@ impl LumeApp {
                     }
                 };
                 let client = SpotifyWebClient::new();
-                let res = client.search_tracks(&tok.access_token, &query, 20).await;
+                let res = client.search_catalog(&tok.access_token, &query, 10).await;
                 let refreshed_token = refreshed.then_some(tok);
                 match res {
-                    Ok(tracks) => Message::SpotifySearchFinished {
+                    Ok(catalog) => Message::SpotifySearchFinished {
                         request_id,
-                        result: Ok(tracks),
+                        result: Ok(catalog),
                         refreshed_token,
                     },
                     Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
@@ -3564,6 +4429,436 @@ impl LumeApp {
                         result: Err(SpotifySearchError::Other(err.to_string())),
                         refreshed_token,
                     },
+                }
+            },
+            |msg| msg,
+        )
+    }
+
+    fn spawn_load_artist_task(&self, request_id: u64, summary: ArtistSummary) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        let can_spotify = self.can_query_spotify_web_api();
+        let ytm_res = self.get_ytm_provider();
+
+        Task::perform(
+            async move {
+                if summary.source == CatalogSource::YouTubeMusic {
+                    let res = async {
+                        let ytm = ytm_res?;
+                        ytm.get_artist_profile(&summary.id)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                    .await;
+                    return Message::ArtistProfileLoaded {
+                        request_id,
+                        result: res,
+                        refreshed_token: None,
+                        fallback_notice: None,
+                        spotify_lapsed: false,
+                    };
+                }
+
+                // Spotify-first: load Web API artist + albums concurrently with Embed top tracks
+                // (Feb 2026 Dev Mode removed `/v1/artists/{id}/top-tracks`).
+                let mut refreshed_token = None;
+                let mut spotify_lapsed = false;
+
+                if can_spotify {
+                    if let Some(t) = tok {
+                        if let Ok((fresh_tok, refreshed)) =
+                            ensure_fresh_token(&client_id, t).await
+                        {
+                            let access = fresh_tok.access_token.clone();
+                            if refreshed {
+                                refreshed_token = Some(fresh_tok);
+                            }
+                            let client = SpotifyWebClient::new();
+                            let (meta_res, albums_res, embed_res) = tokio::join!(
+                                client.get_artist(&access, &summary.id),
+                                client.get_artist_albums(&access, &summary.id, 3),
+                                fetch_spotify_artist_embed(&summary.id)
+                            );
+
+                            let lapsed_err = matches!(
+                                &meta_res,
+                                Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
+                                    | Err(SpotifyApiError::Unauthorized)
+                            ) || matches!(
+                                &albums_res,
+                                Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
+                                    | Err(SpotifyApiError::Unauthorized)
+                            );
+
+                            if lapsed_err {
+                                spotify_lapsed = true;
+                            } else if meta_res.is_ok() || albums_res.is_ok() || embed_res.is_ok() {
+                                let meta = meta_res.ok();
+                                let (albums, singles) = albums_res.unwrap_or_default();
+                                let embed = embed_res.ok();
+                                let name = meta
+                                    .as_ref()
+                                    .map(|m| m.name.clone())
+                                    .or_else(|| embed.as_ref().map(|e| e.name.clone()))
+                                    .unwrap_or_else(|| summary.name.clone());
+                                let avatar_url = meta
+                                    .as_ref()
+                                    .and_then(|m| m.avatar_url.clone())
+                                    .or_else(|| embed.as_ref().and_then(|e| e.avatar_url.clone()))
+                                    .or_else(|| summary.avatar_url.clone());
+                                let subscriber_label = meta
+                                    .as_ref()
+                                    .and_then(|m| m.followers.map(format_followers_label))
+                                    .or_else(|| {
+                                        meta.as_ref()
+                                            .filter(|m| !m.genres.is_empty())
+                                            .map(|m| m.genres.iter().take(3).cloned().collect::<Vec<_>>().join(" • "))
+                                    });
+                                let top_tracks =
+                                    embed.map(|e| e.top_tracks).unwrap_or_default();
+
+                                if !top_tracks.is_empty()
+                                    || !albums.is_empty()
+                                    || !singles.is_empty()
+                                {
+                                    return Message::ArtistProfileLoaded {
+                                        request_id,
+                                        result: Ok(ArtistProfile {
+                                            id: summary.id,
+                                            source: CatalogSource::Spotify,
+                                            name,
+                                            avatar_url,
+                                            description: None,
+                                            subscriber_label,
+                                            top_tracks,
+                                            albums,
+                                            singles,
+                                            playlists: Vec::new(),
+                                        }),
+                                        refreshed_token,
+                                        fallback_notice: None,
+                                        spotify_lapsed: false,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Automatic fallback to YouTube Music artist profile by artist name.
+                let fallback_res = async {
+                    let ytm = ytm_res?;
+                    let found = ytm
+                        .search_artists(&summary.name, 6)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let best = pick_best_artist_match(&summary.name, &found).ok_or_else(|| {
+                        format!("Could not find artist \"{}\" on YouTube Music.", summary.name)
+                    })?;
+                    ytm.get_artist_profile(&best.id)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+
+                let notice = fallback_res.is_ok().then(|| {
+                    format!(
+                        "Loaded \"{}\" profile from YouTube Music (Spotify API unavailable).",
+                        summary.name
+                    )
+                });
+                Message::ArtistProfileLoaded {
+                    request_id,
+                    result: fallback_res,
+                    refreshed_token,
+                    fallback_notice: notice,
+                    spotify_lapsed,
+                }
+            },
+            |msg| msg,
+        )
+    }
+
+    fn spawn_load_artist_by_name_task(
+        &self,
+        request_id: u64,
+        artist_name: String,
+        prefer_spotify: bool,
+    ) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        let ytm_res = self.get_ytm_provider();
+
+        Task::perform(
+            async move {
+                let mut refreshed_token = None;
+                let mut spotify_lapsed = false;
+
+                if prefer_spotify {
+                    if let Some(t) = tok {
+                        if let Ok((fresh_tok, refreshed)) =
+                            ensure_fresh_token(&client_id, t).await
+                        {
+                            let access = fresh_tok.access_token.clone();
+                            if refreshed {
+                                refreshed_token = Some(fresh_tok);
+                            }
+                            let client = SpotifyWebClient::new();
+                            match client.search_artists(&access, &artist_name, 6).await {
+                                Ok(candidates) => {
+                                    if let Some(best) =
+                                        pick_best_artist_match(&artist_name, &candidates)
+                                    {
+                                        let (meta_res, albums_res, embed_res) = tokio::join!(
+                                            client.get_artist(&access, &best.id),
+                                            client.get_artist_albums(&access, &best.id, 3),
+                                            fetch_spotify_artist_embed(&best.id)
+                                        );
+                                        let meta = meta_res.ok();
+                                        let (albums, singles) = albums_res.unwrap_or_default();
+                                        let embed = embed_res.ok();
+                                        let top_tracks =
+                                            embed.as_ref().map(|e| e.top_tracks.clone()).unwrap_or_default();
+                                        if !top_tracks.is_empty()
+                                            || !albums.is_empty()
+                                            || !singles.is_empty()
+                                        {
+                                            let avatar_url = meta
+                                                .as_ref()
+                                                .and_then(|m| m.avatar_url.clone())
+                                                .or_else(|| embed.and_then(|e| e.avatar_url))
+                                                .or(best.avatar_url);
+                                            let subscriber_label = meta
+                                                .as_ref()
+                                                .and_then(|m| m.followers.map(format_followers_label))
+                                                .or(best.subtitle);
+                                            return Message::ArtistProfileLoaded {
+                                                request_id,
+                                                result: Ok(ArtistProfile {
+                                                    id: best.id,
+                                                    source: CatalogSource::Spotify,
+                                                    name: meta.map(|m| m.name).unwrap_or(best.name),
+                                                    avatar_url,
+                                                    description: None,
+                                                    subscriber_label,
+                                                    top_tracks,
+                                                    albums,
+                                                    singles,
+                                                    playlists: Vec::new(),
+                                                }),
+                                                refreshed_token,
+                                                fallback_notice: None,
+                                                spotify_lapsed: false,
+                                            };
+                                        }
+                                    }
+                                }
+                                Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
+                                | Err(SpotifyApiError::Unauthorized) => {
+                                    spotify_lapsed = true;
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+
+                let ytm_result = async {
+                    let ytm = ytm_res?;
+                    let candidates = ytm
+                        .search_artists(&artist_name, 6)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let best = pick_best_artist_match(&artist_name, &candidates).ok_or_else(|| {
+                        format!("Artist \"{artist_name}\" was not found on YouTube Music.")
+                    })?;
+                    ytm.get_artist_profile(&best.id)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+
+                Message::ArtistProfileLoaded {
+                    request_id,
+                    result: ytm_result,
+                    refreshed_token,
+                    fallback_notice: None,
+                    spotify_lapsed,
+                }
+            },
+            |msg| msg,
+        )
+    }
+
+    fn spawn_load_album_task(&self, request_id: u64, summary: AlbumSummary) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        let can_spotify = self.can_query_spotify_web_api();
+        let ytm_res = self.get_ytm_provider();
+
+        Task::perform(
+            async move {
+                if summary.source == CatalogSource::YouTubeMusic {
+                    let res = async {
+                        let ytm = ytm_res?;
+                        ytm.get_album_detail(&summary.id)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                    .await;
+                    return Message::AlbumDetailLoaded {
+                        request_id,
+                        result: res,
+                        refreshed_token: None,
+                        spotify_lapsed: false,
+                    };
+                }
+
+                let mut refreshed_token = None;
+                let mut spotify_lapsed = false;
+
+                if can_spotify {
+                    if let Some(t) = tok {
+                        if let Ok((fresh_tok, refreshed)) =
+                            ensure_fresh_token(&client_id, t).await
+                        {
+                            let access = fresh_tok.access_token.clone();
+                            if refreshed {
+                                refreshed_token = Some(fresh_tok);
+                            }
+                            let client = SpotifyWebClient::new();
+                            match client.get_album_detail(&access, &summary.id).await {
+                                Ok(detail) if !detail.tracks.is_empty() => {
+                                    return Message::AlbumDetailLoaded {
+                                        request_id,
+                                        result: Ok(detail),
+                                        refreshed_token,
+                                        spotify_lapsed: false,
+                                    };
+                                }
+                                Err(SpotifyApiError::PremiumRequiredOrForbidden(_))
+                                | Err(SpotifyApiError::Unauthorized) => {
+                                    spotify_lapsed = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to Spotify public album embed page (no auth needed).
+                let embed_res = fetch_spotify_album_embed(&summary.id)
+                    .await
+                    .map_err(|e| e.to_string());
+                Message::AlbumDetailLoaded {
+                    request_id,
+                    result: embed_res,
+                    refreshed_token,
+                    spotify_lapsed,
+                }
+            },
+            |msg| msg,
+        )
+    }
+
+    fn spawn_load_remote_playlist_task(
+        &self,
+        request_id: u64,
+        summary: RemotePlaylistSummary,
+    ) -> Task<Message> {
+        let client_id = self.config.spotify_client_id.clone().unwrap_or_default();
+        let tok = self.tokens.web_api.clone();
+        let can_spotify = self.can_query_spotify_web_api();
+        let ytm_res = self.get_ytm_provider();
+
+        Task::perform(
+            async move {
+                if summary.source == CatalogSource::YouTubeMusic {
+                    let res = async {
+                        let ytm = ytm_res?;
+                        ytm.get_playlist_detail(&summary.id)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                    .await;
+                    return Message::RemotePlaylistLoaded {
+                        request_id,
+                        result: res,
+                        refreshed_token: None,
+                        spotify_lapsed: false,
+                    };
+                }
+
+                let mut refreshed_token = None;
+                let mut spotify_lapsed = false;
+
+                // Try Spotify Web API first (returns unlimited tracks for user-owned/collab playlists).
+                if can_spotify {
+                    if let Some(t) = tok {
+                        if let Ok((fresh_tok, refreshed)) =
+                            ensure_fresh_token(&client_id, t).await
+                        {
+                            let access = fresh_tok.access_token.clone();
+                            if refreshed {
+                                refreshed_token = Some(fresh_tok);
+                            }
+                            let client = SpotifyWebClient::new();
+                            match client.get_playlist_detail(&access, &summary.id).await {
+                                Ok(mut detail) if !detail.tracks.is_empty() => {
+                                    if detail.cover_url.is_none() {
+                                        detail.cover_url = summary.cover_url.clone();
+                                    }
+                                    if detail.owner.is_none() {
+                                        detail.owner = summary.owner.clone();
+                                    }
+                                    return Message::RemotePlaylistLoaded {
+                                        request_id,
+                                        result: Ok(detail),
+                                        refreshed_token,
+                                        spotify_lapsed: false,
+                                    };
+                                }
+                                Err(SpotifyApiError::Unauthorized) => {
+                                    spotify_lapsed = true;
+                                }
+                                // Note: 403 or empty items on third-party public playlists is expected
+                                // under Feb 2026 Dev Mode -> fall through cleanly to embed parser
+                                // without flagging the whole session as lapsed.
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to Spotify public embed parser (works for editorial & third-party public playlists, up to 100 tracks).
+                let url = canonical_playlist_url(&summary.id);
+                let res = import_spotify_playlist_url(&url)
+                    .await
+                    .map(|imp| {
+                        let is_truncated = imp.tracks.len() >= 100;
+                        RemotePlaylistDetail {
+                            id: imp.spotify_id,
+                            source: CatalogSource::Spotify,
+                            name: if imp.name.trim().is_empty() {
+                                summary.name.clone()
+                            } else {
+                                imp.name
+                            },
+                            owner: summary.owner.clone(),
+                            cover_url: imp.cover_url.or(summary.cover_url.clone()),
+                            source_url: imp.source_url,
+                            tracks: imp.tracks,
+                            is_truncated_embed: is_truncated,
+                        }
+                    })
+                    .map_err(|e| e.to_string());
+
+                Message::RemotePlaylistLoaded {
+                    request_id,
+                    result: res,
+                    refreshed_token,
+                    spotify_lapsed,
                 }
             },
             |msg| msg,
@@ -4062,6 +5357,11 @@ mod tests {
         assert!(no_ytdlp.contains("winget install yt-dlp.yt-dlp"));
         let with_ytdlp = format_ytm_stream_error_toast("HTTP 403 Forbidden", true);
         assert!(with_ytdlp.contains("yt-dlp -U"));
+        let bot_check = format_ytm_stream_error_toast(
+            "yt-dlp stream failed (exit code: 1): ERROR: [youtube] abc: Sign in to confirm you're not a bot.",
+            true,
+        );
+        assert!(bot_check.contains("temporarily flagged this network IP"));
         let offline = format_ytm_stream_error_toast("dns error: no such host", false);
         assert!(offline.contains("Offline"));
     }
@@ -4188,5 +5488,52 @@ mod tests {
             format_connection_status_pill(true, true, SpotifyAccountTier::Premium, false, true),
             "Spotify • YTM Fallback"
         );
+    }
+
+    #[test]
+    fn nav_history_pushes_deduplicates_and_caps_cleanly() {
+        let mut hist = Vec::new();
+        push_nav_history(&mut hist, ActiveNav::Search, &ActiveNav::Search);
+        assert!(hist.is_empty(), "same nav should not be pushed");
+
+        let artist_nav = ActiveNav::ArtistProfile {
+            source: CatalogSource::YouTubeMusic,
+            id: "UC1".into(),
+            name: "Hindia".into(),
+        };
+        push_nav_history(&mut hist, ActiveNav::Search, &artist_nav);
+        assert_eq!(hist, vec![ActiveNav::Search]);
+
+        // Cap check.
+        for i in 0..40 {
+            push_nav_history(
+                &mut hist,
+                ActiveNav::Playlist(format!("pl_{i}")),
+                &ActiveNav::Playlist(format!("pl_{}", i + 1)),
+            );
+        }
+        assert_eq!(hist.len(), MAX_NAV_HISTORY);
+    }
+
+    #[test]
+    fn pick_best_artist_match_prefers_exact_then_prefix_then_first() {
+        let mk = |id: &str, name: &str| ArtistSummary {
+            id: id.into(),
+            source: CatalogSource::YouTubeMusic,
+            name: name.into(),
+            avatar_url: None,
+            subtitle: None,
+        };
+        let list = vec![
+            mk("1", "Hindia Official Fan"),
+            mk("2", "Hindia"),
+            mk("3", "The Hindia"),
+        ];
+        assert_eq!(pick_best_artist_match("hindia", &list).unwrap().id, "2");
+        assert_eq!(
+            pick_best_artist_match("hindia official", &list).unwrap().id,
+            "1"
+        );
+        assert_eq!(pick_best_artist_match("unrelated", &list).unwrap().id, "1");
     }
 }

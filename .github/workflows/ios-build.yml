@@ -1,0 +1,134 @@
+name: iOS Build (Lume Music)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_profile:
+        description: "Build profile: development (Expo Dev Client for Wi-Fi Fast Refresh) or release (Standalone offline .ipa)"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - development
+
+jobs:
+  build-ios-ipa:
+    name: Build Unsigned iOS IPA (${{ inputs.build_profile || 'release' }})
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain (iOS arm64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build lume-ffi static library for iOS (aarch64-apple-ios)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.1"
+        run: |
+          cargo build -p lume-ffi --release --target aarch64-apple-ios
+
+      - name: Generate UniFFI Swift bindings & package LumeFfi.xcframework
+        run: |
+          rm -rf mobile/modules/lume-core/ios/Generated mobile/modules/lume-core/ios/Frameworks /tmp/lume_ffi_headers
+          mkdir -p mobile/modules/lume-core/ios/Generated mobile/modules/lume-core/ios/Frameworks /tmp/lume_ffi_headers
+
+          cargo run -p lume-ffi --features bindgen-cli --bin uniffi-bindgen -- generate \
+            --library target/aarch64-apple-ios/release/liblume_ffi.a \
+            --language swift \
+            --out-dir /tmp/lume_ffi_out
+
+          cp /tmp/lume_ffi_out/lume_ffi.swift mobile/modules/lume-core/ios/Generated/lume_ffi.swift
+          cp /tmp/lume_ffi_out/lume_ffiFFI.h /tmp/lume_ffi_headers/lume_ffiFFI.h
+          cp /tmp/lume_ffi_out/lume_ffiFFI.modulemap /tmp/lume_ffi_headers/module.modulemap
+
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/liblume_ffi.a \
+            -headers /tmp/lume_ffi_headers \
+            -output mobile/modules/lume-core/ios/Frameworks/LumeFfi.xcframework
+
+          ls -la mobile/modules/lume-core/ios/Generated
+          ls -la mobile/modules/lume-core/ios/Frameworks/LumeFfi.xcframework
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install mobile dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Run Expo Prebuild for iOS
+        working-directory: mobile
+        run: npx expo prebuild --platform ios --clean --no-install
+
+      - name: Install CocoaPods dependencies
+        working-directory: mobile/ios
+        run: pod install --repo-update
+
+      - name: Build unsigned iOS app bundle (.app)
+        working-directory: mobile/ios
+        env:
+          BUILD_PROFILE: ${{ inputs.build_profile || 'release' }}
+        run: |
+          WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -n 1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          if [ "$BUILD_PROFILE" = "development" ]; then
+            CONFIG="Debug"
+          else
+            CONFIG="Release"
+          fi
+          echo "Building workspace=$WORKSPACE scheme=$SCHEME configuration=$CONFIG"
+
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -sdk iphoneos \
+            -arch arm64 \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Package unsigned .ipa for AltServer / SideStore
+        working-directory: mobile/ios
+        env:
+          BUILD_PROFILE: ${{ inputs.build_profile || 'release' }}
+        run: |
+          if [ "$BUILD_PROFILE" = "development" ]; then
+            CONFIG="Debug"
+          else
+            CONFIG="Release"
+          fi
+          APP_PATH=$(find "build/Build/Products/${CONFIG}-iphoneos" -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: Built .app bundle not found!"
+            exit 1
+          fi
+          echo "Packaging $APP_PATH into LumeMusic-${BUILD_PROFILE}.ipa"
+          rm -rf Payload "LumeMusic-${BUILD_PROFILE}.ipa"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry "LumeMusic-${BUILD_PROFILE}.ipa" Payload
+          ls -lh "LumeMusic-${BUILD_PROFILE}.ipa"
+
+      - name: Upload LumeMusic IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumeMusic-iOS-${{ inputs.build_profile || 'release' }}
+          path: mobile/ios/LumeMusic-*.ipa
+          retention-days: 30

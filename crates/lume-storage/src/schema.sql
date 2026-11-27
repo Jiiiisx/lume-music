@@ -89,3 +89,18 @@ CREATE TABLE IF NOT EXISTS play_history (
 
 CREATE INDEX IF NOT EXISTS idx_play_history_recent
     ON play_history(played_at DESC);
+
+CREATE TABLE IF NOT EXISTS charts_cache (
+    chart_key TEXT PRIMARY KEY,
+    tracks_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS offline_tracks (
+    track_uid TEXT PRIMARY KEY,
+    file_path TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    mime_type TEXT NOT NULL,
+    downloaded_at INTEGER NOT NULL,
+    FOREIGN KEY (track_uid) REFERENCES tracks(uid) ON DELETE CASCADE
+);

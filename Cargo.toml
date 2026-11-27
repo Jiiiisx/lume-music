@@ -6,6 +6,14 @@ members = [
     "crates/lume-providers",
     "crates/lume-audio",
     "crates/lume-ui",
+    "crates/lume-ffi",
+]
+default-members = [
+    "crates/lume-core",
+    "crates/lume-storage",
+    "crates/lume-providers",
+    "crates/lume-audio",
+    "crates/lume-ui",
 ]
 
 [workspace.package]

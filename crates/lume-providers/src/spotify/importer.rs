@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use lume_core::{CoreError, Track, TrackSource};
+use lume_core::{AlbumDetail, CatalogSource, CoreError, Track, TrackSource};
 use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
@@ -95,6 +95,15 @@ pub struct ImportedSpotifyPlaylist {
     pub name: String,
     pub cover_url: Option<String>,
     pub tracks: Vec<Track>,
+}
+
+/// Parsed public Spotify artist embed payload (circumvents Feb 2026 Dev Mode `/top-tracks` block).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotifyArtistEmbedData {
+    pub artist_id: String,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub top_tracks: Vec<Track>,
 }
 
 /// Extracts a Spotify playlist ID from `https://open.spotify.com/playlist/{id}` or `spotify:playlist:{id}`.
@@ -293,6 +302,228 @@ pub fn parse_spotify_embed_html(
         source_url: canonical_playlist_url(playlist_id),
         name,
         cover_url: playlist_cover,
+        tracks,
+    })
+}
+
+async fn fetch_spotify_embed_html(embed_url: &str, kind: &str, id: &str) -> Result<String, CoreError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| CoreError::Network(e.to_string()))?;
+
+    let resp = client
+        .get(embed_url)
+        .send()
+        .await
+        .map_err(|e| CoreError::Network(format!("failed to fetch Spotify {kind} embed page: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(CoreError::ProviderUnavailable(format!(
+            "Spotify returned HTTP {} for {kind} {id}.",
+            resp.status()
+        )));
+    }
+
+    resp.text()
+        .await
+        .map_err(|e| CoreError::Network(format!("failed to read Spotify {kind} embed HTML: {e}")))
+}
+
+fn parse_embed_tracks(
+    track_list: &[Value],
+    fallback_artist: Option<&str>,
+    default_album: Option<&str>,
+    default_album_cover: Option<&str>,
+) -> Vec<Track> {
+    let mut tracks = Vec::with_capacity(track_list.len());
+    for item in track_list {
+        let Some(track_id) = extract_track_id(item) else {
+            continue;
+        };
+        let title = item
+            .get("title")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Unknown Title")
+            .to_string();
+
+        let subtitle = item
+            .get("subtitle")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut artists: Vec<String> = subtitle
+            .split(',')
+            .map(|s| s.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}'))
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if artists.is_empty() {
+            if let Some(fb) = fallback_artist.map(str::trim).filter(|s| !s.is_empty()) {
+                artists.push(fb.to_string());
+            } else {
+                artists.push("Unknown Artist".to_string());
+            }
+        }
+
+        let duration_ms = item
+            .get("duration")
+            .or_else(|| item.get("duration_ms"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
+        let artwork_ref = extract_best_image_url(item)
+            .map(|u| upgrade_spotify_album_art_url(&u))
+            .or_else(|| default_album_cover.map(upgrade_spotify_album_art_url));
+
+        let source = TrackSource::Spotify { id: track_id };
+        tracks.push(Track {
+            uid: source.canonical_uid(),
+            source,
+            title,
+            artists,
+            album: default_album.map(ToString::to_string),
+            duration_ms,
+            artwork_ref,
+            is_liked: false,
+        });
+    }
+    tracks
+}
+
+/// Fetches a Spotify artist's public embed page (`open.spotify.com/embed/artist/{id}`)
+/// to retrieve top tracks without requiring the removed Feb 2026 `/top-tracks` Dev Mode endpoint.
+pub async fn fetch_spotify_artist_embed(artist_id: &str) -> Result<SpotifyArtistEmbedData, CoreError> {
+    let id = artist_id.trim();
+    if !is_valid_spotify_id(id) {
+        return Err(CoreError::InvalidInput("Invalid Spotify artist ID.".into()));
+    }
+    let url = format!("https://open.spotify.com/embed/artist/{id}");
+    let html = fetch_spotify_embed_html(&url, "artist", id).await?;
+    parse_spotify_artist_embed_html(&html, id)
+}
+
+/// Parses Spotify artist embed HTML (`__NEXT_DATA__` or `initial-state`) into top tracks and metadata.
+pub fn parse_spotify_artist_embed_html(
+    html: &str,
+    artist_id: &str,
+) -> Result<SpotifyArtistEmbedData, CoreError> {
+    let json_val = extract_next_data_json(html)
+        .or_else(|| extract_initial_state_json(html))
+        .ok_or_else(|| {
+            CoreError::ProviderUnavailable(
+                "Could not locate artist data in Spotify embed page.".into(),
+            )
+        })?;
+    let entity = find_entity_object(&json_val).ok_or_else(|| {
+        CoreError::ProviderUnavailable("Spotify artist embed JSON missing entity.".into())
+    })?;
+
+    let name = entity
+        .get("name")
+        .or_else(|| entity.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Artist")
+        .to_string();
+    let avatar_url = extract_best_image_url(entity);
+    let track_list = entity
+        .get("trackList")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let top_tracks = parse_embed_tracks(track_list, Some(&name), None, None);
+
+    Ok(SpotifyArtistEmbedData {
+        artist_id: artist_id.to_string(),
+        name,
+        avatar_url,
+        top_tracks,
+    })
+}
+
+/// Fetches a Spotify album's public embed page (`open.spotify.com/embed/album/{id}`)
+/// as a no-auth fallback when Web API is unavailable or lapsed.
+pub async fn fetch_spotify_album_embed(album_id: &str) -> Result<AlbumDetail, CoreError> {
+    let id = album_id.trim();
+    if !is_valid_spotify_id(id) {
+        return Err(CoreError::InvalidInput("Invalid Spotify album ID.".into()));
+    }
+    let url = format!("https://open.spotify.com/embed/album/{id}");
+    let html = fetch_spotify_embed_html(&url, "album", id).await?;
+    parse_spotify_album_embed_html(&html, id)
+}
+
+/// Parses Spotify album embed HTML (`__NEXT_DATA__` or `initial-state`) into an `AlbumDetail`.
+pub fn parse_spotify_album_embed_html(
+    html: &str,
+    album_id: &str,
+) -> Result<AlbumDetail, CoreError> {
+    let json_val = extract_next_data_json(html)
+        .or_else(|| extract_initial_state_json(html))
+        .ok_or_else(|| {
+            CoreError::ProviderUnavailable(
+                "Could not locate album data in Spotify embed page.".into(),
+            )
+        })?;
+    let entity = find_entity_object(&json_val).ok_or_else(|| {
+        CoreError::ProviderUnavailable("Spotify album embed JSON missing entity.".into())
+    })?;
+
+    let title = entity
+        .get("name")
+        .or_else(|| entity.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Album")
+        .to_string();
+    let artist_name = entity
+        .get("subtitle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Unknown Artist")
+        .to_string();
+    let year = entity
+        .pointer("/releaseDate/isoString")
+        .or_else(|| entity.get("releaseDate"))
+        .and_then(Value::as_str)
+        .and_then(|d| d.split('-').next())
+        .filter(|y| y.len() == 4)
+        .map(ToString::to_string);
+    let cover_url = extract_best_image_url(entity).map(|u| upgrade_spotify_album_art_url(&u));
+    let track_list = entity
+        .get("trackList")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CoreError::ProviderUnavailable("Spotify album embed has no tracks.".into())
+        })?;
+    let tracks = parse_embed_tracks(
+        track_list,
+        Some(&artist_name),
+        Some(&title),
+        cover_url.as_deref(),
+    );
+
+    if tracks.is_empty() {
+        return Err(CoreError::ProviderUnavailable(
+            "No playable Spotify tracks found in that album.".into(),
+        ));
+    }
+
+    Ok(AlbumDetail {
+        id: album_id.to_string(),
+        source: CatalogSource::Spotify,
+        title,
+        artist_name,
+        artist_id: None,
+        year,
+        cover_url,
         tracks,
     })
 }
@@ -692,5 +923,45 @@ spotify:local:::skip:123,\"Local Skip\",\"Nobody\",\"None\",1000,\n";
             imported.tracks[1].artwork_ref.as_deref(),
             Some("https://image-cdn-ak.spotifycdn.com/image/ab67616d0000b273abc123")
         );
+    }
+
+    #[test]
+    fn parses_spotify_artist_and_album_embed_html() {
+        let artist_html = r#"<!doctype html><html><body><script id="__NEXT_DATA__" type="application/json">{
+            "props":{"pageProps":{"state":{"data":{"entity":{
+                "name":"Phoebe Bridgers",
+                "visualIdentity":{"image":[{"url":"https://i.scdn.co/artist640.jpg","maxWidth":640}]},
+                "trackList":[
+                    {"uri":"spotify:track:6Uwi2Qk3H7fM4b4W4ExrAp","title":"Scott Street","subtitle":"Phoebe Bridgers","duration":305000}
+                ]
+            }}}}}
+        }</script></body></html>"#;
+
+        let artist = parse_spotify_artist_embed_html(artist_html, "1r1uxoy19fzMxunt3ONAkG").unwrap();
+        assert_eq!(artist.name, "Phoebe Bridgers");
+        assert_eq!(artist.avatar_url.as_deref(), Some("https://i.scdn.co/artist640.jpg"));
+        assert_eq!(artist.top_tracks.len(), 1);
+        assert_eq!(artist.top_tracks[0].title, "Scott Street");
+
+        let album_html = r#"<!doctype html><html><body><script id="__NEXT_DATA__" type="application/json">{
+            "props":{"pageProps":{"state":{"data":{"entity":{
+                "name":"Punisher",
+                "subtitle":"Phoebe Bridgers",
+                "releaseDate":{"isoString":"2020-06-18T00:00:00Z"},
+                "visualIdentity":{"image":[{"url":"https://i.scdn.co/ab67616d00001e02xyz","maxWidth":300}]},
+                "trackList":[
+                    {"uri":"spotify:track:3xKsf9qdS1CyvXSMEid6g8","title":"Kyoto","subtitle":"Phoebe Bridgers","duration":184000}
+                ]
+            }}}}}
+        }</script></body></html>"#;
+
+        let album = parse_spotify_album_embed_html(album_html, "6Pp6qQkArDdioMUnfM6n5d").unwrap();
+        assert_eq!(album.title, "Punisher");
+        assert_eq!(album.artist_name, "Phoebe Bridgers");
+        assert_eq!(album.year.as_deref(), Some("2020"));
+        assert_eq!(album.cover_url.as_deref(), Some("https://i.scdn.co/ab67616d0000b273xyz"));
+        assert_eq!(album.tracks.len(), 1);
+        assert_eq!(album.tracks[0].album.as_deref(), Some("Punisher"));
+        assert_eq!(album.tracks[0].artwork_ref.as_deref(), Some("https://i.scdn.co/ab67616d0000b273xyz"));
     }
 }

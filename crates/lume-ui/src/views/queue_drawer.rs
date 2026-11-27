@@ -314,8 +314,10 @@ pub fn view_queue_drawer<'a>(
     queue_tracks: &[&'a Track],
     current_pos: Option<usize>,
     art_handles: &'a HashMap<String, image::Handle>,
+    window_width: f32,
     accent: AccentTheme,
 ) -> Element<'a, Message> {
+    let drawer_width = (window_width * 0.34).clamp(296.0, 380.0);
     let total_len = queue_tracks.len();
     let current_item = current_pos.and_then(|pos| queue_tracks.get(pos).map(|&t| (pos, t)));
     let upcoming: Vec<(usize, &'a Track)> = match current_pos {
@@ -509,7 +511,7 @@ pub fn view_queue_drawer<'a>(
         ]
         .spacing(12)
         .padding(16)
-        .width(Length::Fixed(376.0))
+        .width(Length::Fixed(drawer_width))
         .height(Length::Fill),
     )
     .height(Length::Fill)
