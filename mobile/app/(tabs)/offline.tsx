@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
+import { BatchDownloadBanner } from '../../src/components/BatchDownloadBanner';
 import { TrackRow } from '../../src/components/TrackRow';
 import { usePlayer } from '../../src/context/PlayerContext';
 import { LumeTheme } from '../../src/theme';
@@ -54,6 +55,8 @@ export default function OfflineScreen() {
             </Pressable>
           )}
         </View>
+
+        <BatchDownloadBanner />
 
         <FlatList
           data={offlineEntries}

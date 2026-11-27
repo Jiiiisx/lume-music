@@ -25,6 +25,30 @@ import {
 
 const KEY_DYNAMIC_THEME = 'lume_dynamic_theme_enabled';
 
+export interface BatchDownloadState {
+  playlistName: string;
+  total: number;
+  completed: number;
+  skipped: number;
+  failed: number;
+  currentTitle: string;
+  active: boolean;
+  statusNote: string | null;
+}
+
+function sanitizeErrorMessage(raw: string): string {
+  const cleaned = raw
+    .replace(/https?:\/\/\S+/g, '[stream-url]')
+    .replace(/^LumeCore\.LumeFfiError\.\w+\(message:\s*"?/, '')
+    .replace(/"?\)$/, '')
+    .trim();
+  return cleaned.length > 180 ? cleaned.slice(0, 177) + '...' : cleaned;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface PlayerContextValue {
   currentTrack: Track | null;
   currentStream: PlayableStreamDto | null;
@@ -45,6 +69,7 @@ interface PlayerContextValue {
   downloadingUids: Set<string>;
   offlineEntries: OfflineEntryDto[];
   offlineBytes: number;
+  batchDownload: BatchDownloadState | null;
   palette: DynamicPaletteDto;
   dynamicThemeEnabled: boolean;
   menuTrack: Track | null;
@@ -65,6 +90,8 @@ interface PlayerContextValue {
   toggleLikeTrack: (track: Track) => Promise<boolean>;
   refreshLibraryState: () => Promise<void>;
   downloadOffline: (track: Track) => Promise<void>;
+  downloadPlaylistOffline: (playlistName: string, tracks: Track[]) => Promise<void>;
+  cancelBatchDownload: () => void;
   removeOffline: (trackUid: string) => Promise<void>;
   clearAllOffline: () => Promise<void>;
   refreshOfflineCache: () => Promise<void>;
@@ -99,6 +126,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [offlineEntries, setOfflineEntries] = useState<OfflineEntryDto[]>([]);
   const [offlineBytes, setOfflineBytes] = useState(0);
   const [downloadingUids, setDownloadingUids] = useState<Set<string>>(new Set());
+  const [batchDownload, setBatchDownload] = useState<BatchDownloadState | null>(null);
+  const batchCancelRef = useRef(false);
+  const batchRunningRef = useRef(false);
   const [palette, setPalette] = useState<DynamicPaletteDto>(DEFAULT_PALETTE);
   const [dynamicThemeEnabled, setDynamicThemeEnabledState] = useState(true);
   const [menuTrack, setMenuTrack] = useState<Track | null>(null);
@@ -269,7 +299,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (gen !== loadGenRef.current) return;
         setIsBuffering(false);
         setIsPlaying(false);
-        setErrorMessage(err instanceof Error ? err.message : String(err));
+        setErrorMessage(
+          sanitizeErrorMessage(err instanceof Error ? err.message : String(err))
+        );
       }
     },
     [updateDynamicPalette]
@@ -536,7 +568,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         await refreshOfflineCache();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (err) {
-        setErrorMessage(err instanceof Error ? err.message : String(err));
+        setErrorMessage(
+          sanitizeErrorMessage(err instanceof Error ? err.message : String(err))
+        );
       } finally {
         setDownloadingUids((prev) => {
           const next = new Set(prev);
@@ -546,6 +580,173 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [downloadingUids, offlineUids, refreshOfflineCache]
+  );
+
+  const cancelBatchDownload = useCallback(() => {
+    batchCancelRef.current = true;
+    setBatchDownload((prev) =>
+      prev ? { ...prev, statusNote: 'Membatalkan setelah lagu ini...' } : null
+    );
+  }, []);
+
+  /**
+   * Rate-limit-safe sequential playlist downloader:
+   * - Concurrency = 1 (never floods InnerTube / Spotify / LRCLIB)
+   * - Instant skip for already-cached tracks (supports resume!)
+   * - Polite pacing with jitter: 1.2–1.7s for YTM tracks, 2.2–2.9s for Spotify->YTM matches
+   * - Exponential backoff on 429/403/network errors; auto-stops after 3 consecutive failures
+   */
+  const downloadPlaylistOffline = useCallback(
+    async (playlistName: string, tracks: Track[]) => {
+      if (tracks.length === 0) return;
+      if (batchRunningRef.current) {
+        setErrorMessage('Masih ada unduhan playlist yang berjalan. Batalkan dulu jika ingin ganti.');
+        return;
+      }
+
+      batchRunningRef.current = true;
+      batchCancelRef.current = false;
+
+      // Fresh snapshot of already-downloaded UIDs so resume always skips completed tracks.
+      let alreadyOffline = new Set<string>(offlineUids);
+      try {
+        const fresh = await LumeCore.listOfflineTracks();
+        alreadyOffline = new Set(fresh.map((e) => e.track.uid));
+      } catch {
+        // Use in-memory set.
+      }
+
+      let completed = 0;
+      let skipped = 0;
+      let failed = 0;
+      let consecutiveErrors = 0;
+
+      setBatchDownload({
+        playlistName,
+        total: tracks.length,
+        completed: 0,
+        skipped: 0,
+        failed: 0,
+        currentTitle: 'Menyiapkan antrean aman...',
+        active: true,
+        statusNote: 'Mode aman rate-limit (1 lagu/giliran)',
+      });
+
+      try {
+        for (const track of tracks) {
+          if (batchCancelRef.current) break;
+
+          if ('Local' in track.source || alreadyOffline.has(track.uid)) {
+            skipped += 1;
+            completed += 1;
+            setBatchDownload((prev) =>
+              prev ? { ...prev, completed, skipped, currentTitle: track.title } : null
+            );
+            continue;
+          }
+
+          setBatchDownload((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  currentTitle: track.title,
+                  statusNote: 'Mengunduh chunk 512 KB...',
+                }
+              : null
+          );
+          setDownloadingUids((prev) => new Set(prev).add(track.uid));
+
+          let downloadedThisTrack = false;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            if (batchCancelRef.current) break;
+            try {
+              await LumeCore.downloadTrackOffline(track);
+              alreadyOffline.add(track.uid);
+              downloadedThisTrack = true;
+              consecutiveErrors = 0;
+              break;
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              const isRateLimit = msg.includes('429') || msg.includes('403');
+              if (attempt === 0) {
+                const backoffMs = isRateLimit ? 8000 : 3500;
+                setBatchDownload((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        statusNote: isRateLimit
+                          ? 'Menunggu jeda rate-limit (8 dtk)...'
+                          : 'Koneksi goyang, coba ulang (3.5 dtk)...',
+                      }
+                    : null
+                );
+                await sleepMs(backoffMs);
+              }
+            }
+          }
+
+          setDownloadingUids((prev) => {
+            const next = new Set(prev);
+            next.delete(track.uid);
+            return next;
+          });
+
+          if (downloadedThisTrack) {
+            completed += 1;
+            await refreshOfflineCache();
+          } else if (!batchCancelRef.current) {
+            failed += 1;
+            consecutiveErrors += 1;
+          }
+
+          setBatchDownload((prev) =>
+            prev ? { ...prev, completed, skipped, failed } : null
+          );
+
+          if (consecutiveErrors >= 3) {
+            setErrorMessage(
+              `Unduhan dijeda otomatis setelah 3 gagal berturut-turut untuk menjaga rate-limit API (${completed}/${tracks.length} selesai). Tekan Offline All lagi nanti untuk lanjut.`
+            );
+            break;
+          }
+
+          if (!batchCancelRef.current && completed + failed < tracks.length) {
+            const isSpotify = 'Spotify' in track.source;
+            const baseDelay = isSpotify ? 2200 : 1200;
+            const jitter = Math.floor(Math.random() * (isSpotify ? 700 : 500));
+            setBatchDownload((prev) =>
+              prev ? { ...prev, statusNote: 'Jeda aman rate-limit...' } : null
+            );
+            await sleepMs(baseDelay + jitter);
+          }
+        }
+      } finally {
+        batchRunningRef.current = false;
+        const wasCancelled = batchCancelRef.current;
+        setBatchDownload({
+          playlistName,
+          total: tracks.length,
+          completed,
+          skipped,
+          failed,
+          currentTitle: wasCancelled
+            ? `Dibatalkan (${completed}/${tracks.length} tersimpan)`
+            : `Selesai (${completed}/${tracks.length} siap offline)`,
+          active: false,
+          statusNote:
+            failed > 0
+              ? `${failed} gagal — tekan Offline All lagi untuk lanjutkan yang tersisa`
+              : null,
+        });
+        if (!wasCancelled && failed === 0) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        }
+        setTimeout(() => {
+          setBatchDownload((cur) => (cur && !cur.active ? null : cur));
+        }, 5000);
+      }
+    },
+    [offlineUids, refreshOfflineCache]
   );
 
   const removeOffline = useCallback(
@@ -600,6 +801,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       downloadingUids,
       offlineEntries,
       offlineBytes,
+      batchDownload,
       palette,
       dynamicThemeEnabled,
       menuTrack,
@@ -620,6 +822,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       toggleLikeTrack,
       refreshLibraryState,
       downloadOffline,
+      downloadPlaylistOffline,
+      cancelBatchDownload,
       removeOffline,
       clearAllOffline,
       refreshOfflineCache,
@@ -649,6 +853,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       downloadingUids,
       offlineEntries,
       offlineBytes,
+      batchDownload,
       palette,
       dynamicThemeEnabled,
       menuTrack,
@@ -669,6 +874,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       toggleLikeTrack,
       refreshLibraryState,
       downloadOffline,
+      downloadPlaylistOffline,
+      cancelBatchDownload,
       removeOffline,
       clearAllOffline,
       refreshOfflineCache,

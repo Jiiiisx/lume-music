@@ -28,6 +28,7 @@ export default function AlbumScreen() {
     downloadingUids,
     playTrack,
     downloadOffline,
+    downloadPlaylistOffline,
     toggleLikeTrack,
   } = usePlayer();
 
@@ -74,13 +75,25 @@ export default function AlbumScreen() {
                 {album.year ? ` • ${album.year}` : ''} • {album.tracks.length} lagu
               </Text>
               {album.tracks.length > 0 && (
-                <Pressable
-                  onPress={() => void playTrack(album.tracks[0], album.tracks)}
-                  style={[styles.playBtn, { backgroundColor: palette.accent }]}
-                >
-                  <Ionicons name="play" size={18} color="#0A0C12" />
-                  <Text style={styles.playBtnText}>Putar Album</Text>
-                </Pressable>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 6 }}>
+                  <Pressable
+                    onPress={() => void playTrack(album.tracks[0], album.tracks)}
+                    style={[styles.playBtn, { backgroundColor: palette.accent, marginTop: 0 }]}
+                  >
+                    <Ionicons name="play" size={18} color="#0A0C12" />
+                    <Text style={styles.playBtnText}>Putar Album</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void downloadPlaylistOffline(album.title, album.tracks)}
+                    style={[
+                      styles.playBtn,
+                      { backgroundColor: 'rgba(255,255,255,0.14)', marginTop: 0 },
+                    ]}
+                  >
+                    <Ionicons name="cloud-download-outline" size={18} color="#FFFFFF" />
+                    <Text style={[styles.playBtnText, { color: '#FFFFFF' }]}>Offline All</Text>
+                  </Pressable>
+                </View>
               )}
             </View>
 

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -287,6 +288,187 @@ fn strip_file_scheme(uri_or_path: &str) -> PathBuf {
     }
 }
 
+const OFFLINE_RANGE_CHUNK_BYTES: u64 = 512 * 1024;
+const VISIONOS_STREAM_UA: &str =
+    "com.google.ios.youtube/0.1 (RealityDevice14,1; U; CPU OS 17_0 like Mac OS X; en_US)";
+
+fn parse_content_range_total(header_val: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    let text = header_val?.to_str().ok()?;
+    let total_str = text.rsplit('/').next()?;
+    total_str.trim().parse::<u64>().ok()
+}
+
+fn parse_url_clen(url: &str) -> Option<u64> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    for (k, v) in parsed.query_pairs() {
+        if k == "clen" {
+            if let Ok(n) = v.parse::<u64>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct DownloadedChunk {
+    bytes: Vec<u8>,
+    status: u16,
+    total_bytes: Option<u64>,
+    content_type: Option<String>,
+}
+
+/// Downloads an audio stream to `tmp_path` using 512 KiB HTTP `Range` chunks with per-chunk retry.
+///
+/// YouTube `googlevideo.com` throttles plain un-ranged `GET` requests (~35 KiB/s) and frequently
+/// resets long-lived connections mid-body; chunked `Range: bytes=start-end` streams at full CDN
+/// speed (5–10 MiB/s) with constant low RAM usage on iOS.
+async fn download_url_chunked_to_file(
+    http: &reqwest::Client,
+    url: &str,
+    tmp_path: &Path,
+) -> Result<(u64, String), LumeFfiError> {
+    let mut file = std::fs::File::create(tmp_path)
+        .map_err(|e| LumeFfiError::storage(format!("unable to create offline temp file: {e}")))?;
+
+    let mut offset: u64 = 0;
+    let mut total_bytes: Option<u64> = parse_url_clen(url);
+    let mut mime_type = "audio/mp4".to_string();
+
+    loop {
+        if let Some(total) = total_bytes {
+            if offset >= total {
+                break;
+            }
+        }
+
+        let end = match total_bytes {
+            Some(total) => (offset + OFFLINE_RANGE_CHUNK_BYTES - 1).min(total - 1),
+            None => offset + OFFLINE_RANGE_CHUNK_BYTES - 1,
+        };
+        let range_header = format!("bytes={offset}-{end}");
+
+        let mut last_err = String::new();
+        let mut chunk_ok: Option<DownloadedChunk> = None;
+
+        for attempt in 0..3_u32 {
+            let req = http
+                .get(url)
+                .header(reqwest::header::USER_AGENT, VISIONOS_STREAM_UA)
+                .header(reqwest::header::RANGE, &range_header);
+
+            match tokio::time::timeout(Duration::from_secs(20), req.send()).await {
+                Ok(Ok(resp)) => {
+                    let status = resp.status().as_u16();
+                    if status == 416 {
+                        chunk_ok = Some(DownloadedChunk {
+                            bytes: Vec::new(),
+                            status: 416,
+                            total_bytes,
+                            content_type: None,
+                        });
+                        break;
+                    }
+                    if status == 403 || status == 429 {
+                        last_err = format!("YouTube CDN returned HTTP {status} (rate limit / expired URL)");
+                        tokio::time::sleep(Duration::from_millis(600 * (attempt as u64 + 1))).await;
+                        continue;
+                    }
+                    if !(200..300).contains(&status) {
+                        last_err = format!("Audio server returned HTTP {status}");
+                        tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
+                        continue;
+                    }
+
+                    let parsed_total = parse_content_range_total(
+                        resp.headers().get(reqwest::header::CONTENT_RANGE),
+                    )
+                    .or_else(|| if status == 200 { resp.content_length() } else { None });
+                    let ct = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.split(';').next())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    match tokio::time::timeout(Duration::from_secs(20), resp.bytes()).await {
+                        Ok(Ok(bytes)) => {
+                            chunk_ok = Some(DownloadedChunk {
+                                bytes: bytes.to_vec(),
+                                status,
+                                total_bytes: parsed_total,
+                                content_type: ct,
+                            });
+                            break;
+                        }
+                        Ok(Err(_)) => {
+                            last_err = "Connection interrupted while downloading audio chunk".into();
+                        }
+                        Err(_) => {
+                            last_err = "Audio chunk download timed out".into();
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    last_err = "Network error contacting audio server".into();
+                }
+                Err(_) => {
+                    last_err = "Connection timed out contacting audio server".into();
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
+        }
+
+        let Some(DownloadedChunk {
+            bytes,
+            status,
+            total_bytes: resp_total,
+            content_type: ct,
+        }) = chunk_ok
+        else {
+            let _ = std::fs::remove_file(tmp_path);
+            return Err(LumeFfiError::network(last_err));
+        };
+
+        if let Some(m) = ct {
+            mime_type = m;
+        }
+        if let Some(t) = resp_total {
+            total_bytes = Some(t);
+        }
+
+        if status == 416 || bytes.is_empty() {
+            break;
+        }
+
+        file.write_all(&bytes)
+            .map_err(|e| LumeFfiError::storage(format!("writing offline audio failed: {e}")))?;
+        offset = offset.saturating_add(bytes.len() as u64);
+
+        // If the server ignored Range and returned the full body in HTTP 200, we're done.
+        if status == 200 {
+            break;
+        }
+        if total_bytes.is_none() && (bytes.len() as u64) < OFFLINE_RANGE_CHUNK_BYTES {
+            break;
+        }
+    }
+
+    file.flush()
+        .map_err(|e| LumeFfiError::storage(format!("flushing offline audio failed: {e}")))?;
+    drop(file);
+
+    if offset == 0 {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(LumeFfiError::network("Downloaded audio stream was empty"));
+    }
+
+    Ok((offset, mime_type))
+}
+
 impl LumeMobileCore {
     async fn resolve_remote_http_stream(
         &self,
@@ -376,7 +558,7 @@ impl LumeMobileCore {
         let lyrics = ChainedLyricsProvider::new("https://lrclib.net".to_string());
 
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| LumeFfiError::internal(format!("failed to build HTTP client: {e}")))?;
 
@@ -495,46 +677,19 @@ impl LumeMobileCore {
         let tmp_path = target_path.with_extension("m4a.tmp");
 
         let (bytes_written, mime_type) = self.runtime.block_on(async {
-            let resp = self
-                .http
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| LumeFfiError::network(format!("offline download failed: {e}")))?;
-
-            if !resp.status().is_success() {
-                return Err(LumeFfiError::network(format!(
-                    "offline download returned HTTP {}",
-                    resp.status()
-                )));
+            let res = download_url_chunked_to_file(&self.http, &url, &tmp_path).await;
+            match res {
+                Ok(ok) => {
+                    std::fs::rename(&tmp_path, &target_path).map_err(|e| {
+                        LumeFfiError::storage(format!("finalizing offline file failed: {e}"))
+                    })?;
+                    Ok(ok)
+                }
+                Err(err) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    Err(err)
+                }
             }
-
-            let mime = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("audio/mp4")
-                .split(';')
-                .next()
-                .unwrap_or("audio/mp4")
-                .trim()
-                .to_string();
-
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| LumeFfiError::network(format!("reading audio stream failed: {e}")))?;
-            if bytes.is_empty() {
-                return Err(LumeFfiError::network("downloaded audio stream was empty"));
-            }
-
-            std::fs::write(&tmp_path, &bytes)
-                .map_err(|e| LumeFfiError::storage(format!("writing offline file failed: {e}")))?;
-            std::fs::rename(&tmp_path, &target_path).map_err(|e| {
-                LumeFfiError::storage(format!("finalizing offline file failed: {e}"))
-            })?;
-
-            Ok::<(u64, String), LumeFfiError>((bytes.len() as u64, mime))
         })?;
 
         let record = {
@@ -1339,5 +1494,65 @@ mod tests {
         let pal = extract_palette_from_bytes(png_bytes.get_ref());
         assert!(pal.bg_top.starts_with('#'));
         assert!(pal.accent.starts_with('#'));
+    }
+
+    #[test]
+    fn chunked_range_downloader_reassembles_multi_chunk_http_206_payload() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let payload: Vec<u8> = (0..(OFFLINE_RANGE_CHUNK_BYTES as usize + 12_345))
+                .map(|i| (i % 251) as u8)
+                .collect();
+            let total = payload.len();
+            let payload_arc = Arc::new(payload.clone());
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let mut start = 0usize;
+                    let mut end = total - 1;
+                    for line in req.lines() {
+                        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                            let mut parts = rest.trim().split('-');
+                            if let Some(s) = parts.next().and_then(|v| v.parse::<usize>().ok()) {
+                                start = s;
+                            }
+                            if let Some(e) = parts.next().and_then(|v| v.parse::<usize>().ok()) {
+                                end = e.min(total - 1);
+                            }
+                        }
+                    }
+                    let slice = &payload_arc[start..=end];
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mp4\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        slice.len()
+                    );
+                    sock.write_all(header.as_bytes()).await.unwrap();
+                    sock.write_all(slice).await.unwrap();
+                }
+            });
+
+            let dir = TempDir::new().unwrap();
+            let out_path = dir.path().join("chunked.m4a.tmp");
+            let client = reqwest::Client::new();
+            let url = format!("http://{addr}/videoplayback?clen={total}");
+
+            let (written, mime) = download_url_chunked_to_file(&client, &url, &out_path)
+                .await
+                .unwrap();
+            assert_eq!(written, total as u64);
+            assert_eq!(mime, "audio/mp4");
+            assert_eq!(std::fs::read(&out_path).unwrap(), payload);
+            server.await.unwrap();
+        });
     }
 }

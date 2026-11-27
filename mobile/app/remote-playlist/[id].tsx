@@ -29,6 +29,7 @@ export default function RemotePlaylistScreen() {
     downloadingUids,
     playTrack,
     downloadOffline,
+    downloadPlaylistOffline,
     toggleLikeTrack,
     refreshLibraryState,
   } = usePlayer();
@@ -106,9 +107,18 @@ export default function RemotePlaylistScreen() {
                 >
                   <Ionicons name="bookmark-outline" size={17} color="#FFFFFF" />
                   <Text style={styles.saveBtnText}>
-                    {saving ? 'Menyimpan...' : 'Simpan ke Library'}
+                    {saving ? 'Menyimpan...' : 'Simpan'}
                   </Text>
                 </Pressable>
+                {detail.tracks.length > 0 && (
+                  <Pressable
+                    onPress={() => void downloadPlaylistOffline(detail.name, detail.tracks)}
+                    style={styles.saveBtn}
+                  >
+                    <Ionicons name="cloud-download-outline" size={17} color="#FFFFFF" />
+                    <Text style={styles.saveBtnText}>Offline</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
 

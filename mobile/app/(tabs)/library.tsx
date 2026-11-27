@@ -16,6 +16,7 @@ import { File as ExpoFile } from 'expo-file-system';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { LumeCore } from '../../modules/lume-core';
 import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
+import { BatchDownloadBanner } from '../../src/components/BatchDownloadBanner';
 import { TrackRow } from '../../src/components/TrackRow';
 import { usePlayer } from '../../src/context/PlayerContext';
 import { LumeTheme } from '../../src/theme';
@@ -40,6 +41,7 @@ export default function LibraryScreen() {
     downloadingUids,
     playTrack,
     downloadOffline,
+    downloadPlaylistOffline,
     toggleLikeTrack,
     refreshLibraryState,
   } = usePlayer();
@@ -184,23 +186,21 @@ export default function LibraryScreen() {
     ]);
   };
 
-  const handleDownloadPlaylist = async (tracks: Track[]) => {
-    setBusyMessage(`Mengunduh ${tracks.length} lagu ke Offline...`);
-    let ok = 0;
-    for (const track of tracks) {
-      if (offlineUids.has(track.uid)) {
-        ok++;
-        continue;
+  const handleDownloadPlaylist = (name: string, tracks: Track[]) => {
+    void downloadPlaylistOffline(name, tracks);
+  };
+
+  const handleDownloadPlaylistById = async (pl: Playlist) => {
+    try {
+      const tracks = await LumeCore.getPlaylistTracks(pl.id);
+      if (tracks.length === 0) {
+        Alert.alert('Playlist Kosong', `"${pl.name}" belum memiliki lagu.`);
+        return;
       }
-      try {
-        await downloadOffline(track);
-        ok++;
-      } catch {
-        // Keep going for remaining tracks.
-      }
+      void downloadPlaylistOffline(pl.name, tracks);
+    } catch (err) {
+      Alert.alert('Gagal', err instanceof Error ? err.message : String(err));
     }
-    setBusyMessage(null);
-    Alert.alert('Offline Download', `${ok} / ${tracks.length} lagu siap diputar tanpa sinyal.`);
   };
 
   const rawDetailTracks =
@@ -277,7 +277,7 @@ export default function LibraryScreen() {
               )}
               {sortedDetailTracks.length > 0 && activeView !== 'local' && (
                 <Pressable
-                  onPress={() => void handleDownloadPlaylist(sortedDetailTracks)}
+                  onPress={() => handleDownloadPlaylist(activeTitle, sortedDetailTracks)}
                   style={[styles.smallActionBtn, { backgroundColor: palette.accent }]}
                 >
                   <Ionicons name="cloud-download" size={15} color="#0A0C12" />
@@ -331,6 +331,8 @@ export default function LibraryScreen() {
             ))}
           </ScrollView>
 
+          <BatchDownloadBanner />
+
           {busyMessage && (
             <View style={styles.busyRow}>
               <ActivityIndicator size="small" color={palette.accent} />
@@ -376,6 +378,8 @@ export default function LibraryScreen() {
               <Ionicons name="settings-outline" size={20} color="#FFFFFF" />
             </Pressable>
           </View>
+
+          <BatchDownloadBanner />
 
           {busyMessage && (
             <View style={styles.busyRow}>
@@ -458,6 +462,17 @@ export default function LibraryScreen() {
                       <Text style={styles.cardSub}>{pl.track_count} lagu</Text>
                     </View>
                   </View>
+                  <Pressable
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      void handleDownloadPlaylistById(pl);
+                    }}
+                    hitSlop={8}
+                    style={styles.iconSmallBtn}
+                    accessibilityLabel={`Download playlist ${pl.name}`}
+                  >
+                    <Ionicons name="cloud-download-outline" size={18} color={palette.accent} />
+                  </Pressable>
                   <Ionicons name="chevron-forward" size={18} color={LumeTheme.textMuted} />
                 </Pressable>
               );
