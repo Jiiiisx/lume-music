@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { TrackActionSheet } from '../src/components/TrackActionSheet';
 import { PlayerProvider } from '../src/context/PlayerContext';
 import { LumeTheme } from '../src/theme';
 
@@ -33,7 +34,25 @@ export default function RootLayout() {
                 animation: 'fade',
               }}
             />
+            <Stack.Screen
+              name="queue"
+              options={{
+                presentation: 'modal',
+                animation: 'slide_from_bottom',
+              }}
+            />
+            <Stack.Screen
+              name="settings"
+              options={{
+                presentation: 'modal',
+                animation: 'slide_from_bottom',
+              }}
+            />
+            <Stack.Screen name="artist/[id]" />
+            <Stack.Screen name="album/[id]" />
+            <Stack.Screen name="remote-playlist/[id]" />
           </Stack>
+          <TrackActionSheet />
         </PlayerProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

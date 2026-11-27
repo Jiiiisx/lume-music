@@ -7,6 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { LumeTheme } from '../theme';
 import type { LyricsData, LyricsLine } from '../types';
 
@@ -15,6 +16,7 @@ interface SyncedLyricsViewProps {
   loading: boolean;
   positionMs: number;
   onSeekToMs: (ms: number) => void;
+  onRefreshLyrics?: () => void;
 }
 
 function findActiveLineIndex(lines: LyricsLine[], positionMs: number): number {
@@ -35,6 +37,7 @@ export function SyncedLyricsView({
   loading,
   positionMs,
   onSeekToMs,
+  onRefreshLyrics,
 }: SyncedLyricsViewProps) {
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const lineOffsetsRef = useRef<Record<number, number>>({});
@@ -43,6 +46,17 @@ export function SyncedLyricsView({
     () => (lyrics ? findActiveLineIndex(lyrics.synced, positionMs) : -1),
     [lyrics, positionMs]
   );
+
+  const isInterlude = useMemo(() => {
+    if (!lyrics || lyrics.synced.length === 0) return false;
+    if (activeIndex < 0) return positionMs > 1500 && lyrics.synced[0].time_ms - positionMs > 3000;
+    const cur = lyrics.synced[activeIndex];
+    const next = lyrics.synced[activeIndex + 1];
+    if (cur.end_ms && next && positionMs > cur.end_ms + 800 && next.time_ms - positionMs > 2500) {
+      return true;
+    }
+    return false;
+  }, [lyrics, activeIndex, positionMs]);
 
   useEffect(() => {
     if (activeIndex < 0) return;
@@ -58,7 +72,7 @@ export function SyncedLyricsView({
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color={LumeTheme.accentBright} />
+        <ActivityIndicator size="large" color="#FFFFFF" />
         <Text style={styles.hint}>Memuat lirik tersinkronisasi...</Text>
       </View>
     );
@@ -68,6 +82,12 @@ export function SyncedLyricsView({
     return (
       <View style={styles.center}>
         <Text style={styles.hint}>Lirik tidak tersedia untuk lagu ini.</Text>
+        {onRefreshLyrics && (
+          <Pressable onPress={onRefreshLyrics} style={styles.refreshBtn}>
+            <Ionicons name="refresh" size={16} color="#FFFFFF" />
+            <Text style={styles.refreshText}>Coba Muat Ulang Lirik</Text>
+          </Pressable>
+        )}
       </View>
     );
   }
@@ -79,7 +99,14 @@ export function SyncedLyricsView({
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.providerTag}>Sumber: {lyrics.provider}</Text>
+        <View style={styles.providerRow}>
+          <Text style={styles.providerTag}>Sumber: {lyrics.provider}</Text>
+          {onRefreshLyrics && (
+            <Pressable onPress={onRefreshLyrics} hitSlop={8}>
+              <Ionicons name="refresh" size={15} color={LumeTheme.textSecondary} />
+            </Pressable>
+          )}
+        </View>
         <Text style={styles.plainText}>{lyrics.plain}</Text>
       </ScrollView>
     );
@@ -92,12 +119,27 @@ export function SyncedLyricsView({
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      <Text style={styles.providerTag}>
-        {lyrics.provider.toUpperCase()} • Tap baris untuk lompat
-      </Text>
+      <View style={styles.providerRow}>
+        <Text style={styles.providerTag}>
+          {lyrics.provider.toUpperCase()} • Tap baris untuk lompat
+        </Text>
+        {onRefreshLyrics && (
+          <Pressable onPress={onRefreshLyrics} hitSlop={8}>
+            <Ionicons name="refresh" size={15} color={LumeTheme.textSecondary} />
+          </Pressable>
+        )}
+      </View>
+
+      {isInterlude && (
+        <View style={styles.interludeRow}>
+          <View style={styles.dot} />
+          <View style={[styles.dot, { opacity: 0.7 }]} />
+          <View style={[styles.dot, { opacity: 0.4 }]} />
+        </View>
+      )}
 
       {lyrics.synced.map((line, index) => {
-        const isActive = index === activeIndex;
+        const isActive = index === activeIndex && !isInterlude;
         const isPast = index < activeIndex;
         const hasWords = line.words && line.words.length > 0;
 
@@ -162,28 +204,58 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
-    gap: 12,
+    gap: 14,
   },
   hint: {
     color: LumeTheme.textSecondary,
     fontSize: 15,
     textAlign: 'center',
   },
+  refreshBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 999,
+  },
+  refreshText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
   scroll: {
     flex: 1,
   },
   content: {
     paddingHorizontal: 20,
-    paddingTop: 12,
+    paddingTop: 10,
     paddingBottom: 40,
   },
+  providerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 16,
+  },
   providerTag: {
-    color: LumeTheme.textMuted,
+    color: 'rgba(255,255,255,0.55)',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
-    marginBottom: 18,
-    textAlign: 'center',
+  },
+  interludeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 10,
+  },
+  dot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
   },
   lineBox: {
     paddingVertical: 9,
@@ -195,7 +267,7 @@ const styles = StyleSheet.create({
     fontSize: 22,
     lineHeight: 30,
     fontWeight: '700',
-    color: 'rgba(248, 250, 252, 0.35)',
+    color: 'rgba(248, 250, 252, 0.34)',
   },
   activeLine: {
     fontSize: 25,

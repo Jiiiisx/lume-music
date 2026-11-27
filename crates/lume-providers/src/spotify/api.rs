@@ -49,7 +49,7 @@ pub struct SpotifyPlaylistSummary {
     pub track_count: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpotifyCatalogSearchResult {
     pub tracks: Vec<Track>,
     pub artists: Vec<ArtistSummary>,

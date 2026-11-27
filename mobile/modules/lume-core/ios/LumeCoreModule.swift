@@ -276,5 +276,60 @@ public class LumeCoreModule: Module {
         try core.rematchSpotifyTrack(spotifyTrackId: spotifyTrackId, ytVideoId: ytVideoId)
       }
     }
+
+    AsyncFunction("renamePlaylist") { (playlistId: String, newName: String, promise: Promise) in
+      self.runAsyncVoid(promise) { core in
+        try core.renamePlaylist(playlistId: playlistId, newName: newName)
+      }
+    }
+
+    AsyncFunction("importYtmPlaylistUrl") { (urlOrId: String, promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.importYtmPlaylistUrlJson(urlOrId: urlOrId)
+      }
+    }
+
+    AsyncFunction("importExportifyCsv") { (csvText: String, playlistName: String, promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.importExportifyCsvJson(csvText: csvText, playlistName: playlistName)
+      }
+    }
+
+    AsyncFunction("importLocalAudioFile") { (sourceUriOrPath: String, fileName: String, promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.importLocalAudioFileJson(sourceUriOrPath: sourceUriOrPath, fileName: fileName)
+      }
+    }
+
+    AsyncFunction("listLocalTracks") { (promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.listLocalTracksJson()
+      }
+    }
+
+    AsyncFunction("searchLocalTracks") { (query: String, promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.searchLocalTracksJson(query: query)
+      }
+    }
+
+    AsyncFunction("clearAllOfflineTracks") { (promise: Promise) in
+      self.runAsyncVoid(promise) { core in
+        try core.clearAllOfflineTracks()
+      }
+    }
+
+    AsyncFunction("searchSpotifyCatalog") { (accessToken: String, query: String, limit: Int, promise: Promise) in
+      let cap = UInt32(max(1, min(limit, 30)))
+      self.runAsync(promise) { core in
+        try core.searchSpotifyCatalogJson(accessToken: accessToken, query: query, limit: cap)
+      }
+    }
+
+    AsyncFunction("extractPalette") { (artworkRef: String, promise: Promise) in
+      self.runAsync(promise) { core in
+        try core.extractPaletteJson(artworkRef: artworkRef)
+      }
+    }
   }
 }

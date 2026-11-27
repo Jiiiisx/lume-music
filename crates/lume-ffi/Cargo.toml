@@ -18,6 +18,7 @@ default = []
 bindgen-cli = ["uniffi/cli"]
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 lume-core.workspace = true
 lume-providers.workspace = true
 lume-storage.workspace = true

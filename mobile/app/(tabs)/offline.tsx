@@ -3,6 +3,7 @@ import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
 import { TrackRow } from '../../src/components/TrackRow';
 import { usePlayer } from '../../src/context/PlayerContext';
 import { LumeTheme } from '../../src/theme';
@@ -16,6 +17,7 @@ export default function OfflineScreen() {
     offlineBytes,
     playTrack,
     removeOffline,
+    toggleLikeTrack,
     toggleShuffle,
     shuffle,
   } = usePlayer();
@@ -31,72 +33,74 @@ export default function OfflineScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Offline Cache</Text>
-        <Text style={styles.subtitle}>
-          {offlineEntries.length} lagu siap putar tanpa sinyal •{' '}
-          {formatBytes(offlineBytes)} terpakai
-        </Text>
+    <AmbientBackdrop>
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Offline Cache</Text>
+          <Text style={styles.subtitle}>
+            {offlineEntries.length} lagu siap putar tanpa sinyal •{' '}
+            {formatBytes(offlineBytes)} terpakai
+          </Text>
 
-        {tracks.length > 0 && (
-          <Pressable
-            onPress={() => void playAllOfflineDriving()}
-            style={styles.playAllBtn}
-          >
-            <Ionicons name="car-sport" size={18} color="#FFFFFF" />
-            <Text style={styles.playAllText}>
-              Putar Acak Semua Offline (Mode Berkendara)
-            </Text>
-          </Pressable>
-        )}
-      </View>
+          {tracks.length > 0 && (
+            <Pressable
+              onPress={() => void playAllOfflineDriving()}
+              style={styles.playAllBtn}
+            >
+              <Ionicons name="car-sport" size={18} color="#FFFFFF" />
+              <Text style={styles.playAllText}>
+                Putar Acak Semua Offline (Mode Berkendara)
+              </Text>
+            </Pressable>
+          )}
+        </View>
 
-      <FlatList
-        data={offlineEntries}
-        keyExtractor={(item) => item.track.uid}
-        contentContainerStyle={styles.listContent}
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Ionicons name="cloud-offline-outline" size={42} color={LumeTheme.textMuted} />
-            <Text style={styles.emptyTitle}>Belum Ada Lagu Offline</Text>
-            <Text style={styles.emptyDesc}>
-              Ketuk ikon awan pada lagu di tab Home, Search, atau Library untuk
-              menyimpan audio M4A + lirik ke penyimpanan iPhone sebelum berkendara.
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <TrackRow
-            track={item.track}
-            isActive={currentTrack?.uid === item.track.uid}
-            isOffline
-            onPress={() => void playTrack(item.track, tracks)}
-            onDeleteOfflinePress={() => {
-              Alert.alert(
-                'Hapus File Offline?',
-                `Hapus "${item.track.title}" (${formatBytes(item.record.file_size_bytes)}) dari penyimpanan iPhone?`,
-                [
-                  { text: 'Batal', style: 'cancel' },
-                  {
-                    text: 'Hapus',
-                    style: 'destructive',
-                    onPress: () => void removeOffline(item.track.uid),
-                  },
-                ]
-              );
-            }}
-          />
-        )}
-      />
-    </SafeAreaView>
+        <FlatList
+          data={offlineEntries}
+          keyExtractor={(item) => item.track.uid}
+          contentContainerStyle={styles.listContent}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Ionicons name="cloud-offline-outline" size={42} color={LumeTheme.textMuted} />
+              <Text style={styles.emptyTitle}>Belum Ada Lagu Offline</Text>
+              <Text style={styles.emptyDesc}>
+                Ketuk ikon awan pada lagu di tab Home, Explore, atau Library untuk
+                menyimpan audio M4A + lirik ke penyimpanan iPhone sebelum berkendara.
+              </Text>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <TrackRow
+              track={item.track}
+              isActive={currentTrack?.uid === item.track.uid}
+              isOffline
+              onPress={() => void playTrack(item.track, tracks)}
+              onLikePress={() => void toggleLikeTrack(item.track)}
+              onDeleteOfflinePress={() => {
+                Alert.alert(
+                  'Hapus File Offline?',
+                  `Hapus "${item.track.title}" (${formatBytes(item.record.file_size_bytes)}) dari penyimpanan iPhone?`,
+                  [
+                    { text: 'Batal', style: 'cancel' },
+                    {
+                      text: 'Hapus',
+                      style: 'destructive',
+                      onPress: () => void removeOffline(item.track.uid),
+                    },
+                  ]
+                );
+              }}
+            />
+          )}
+        />
+      </SafeAreaView>
+    </AmbientBackdrop>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: LumeTheme.bg,
   },
   header: {
     paddingHorizontal: 16,
@@ -106,7 +110,7 @@ const styles = StyleSheet.create({
   },
   title: {
     color: LumeTheme.textPrimary,
-    fontSize: 28,
+    fontSize: 27,
     fontWeight: '800',
   },
   subtitle: {
@@ -130,7 +134,7 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingHorizontal: 10,
-    paddingBottom: 160,
+    paddingBottom: 165,
   },
   empty: {
     alignItems: 'center',

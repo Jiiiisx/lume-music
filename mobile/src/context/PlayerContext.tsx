@@ -9,15 +9,21 @@ import React, {
 } from 'react';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
+import * as SecureStore from 'expo-secure-store';
 import { LumeCore } from '../../modules/lume-core';
 import {
+  DEFAULT_PALETTE,
+  type DynamicPaletteDto,
   type LyricsData,
   type OfflineEntryDto,
   type PlayableStreamDto,
+  type Playlist,
   type RepeatMode,
   type Track,
   trackArtistDisplay,
 } from '../types';
+
+const KEY_DYNAMIC_THEME = 'lume_dynamic_theme_enabled';
 
 interface PlayerContextValue {
   currentTrack: Track | null;
@@ -32,12 +38,23 @@ interface PlayerContextValue {
   repeat: RepeatMode;
   lyrics: LyricsData | null;
   lyricsLoading: boolean;
+  likedTracks: Track[];
+  likedUids: Set<string>;
+  playlists: Playlist[];
   offlineUids: Set<string>;
   downloadingUids: Set<string>;
   offlineEntries: OfflineEntryDto[];
   offlineBytes: number;
+  palette: DynamicPaletteDto;
+  dynamicThemeEnabled: boolean;
+  menuTrack: Track | null;
   errorMessage: string | null;
-  playTrack: (track: Track, newQueue?: Track[]) => Promise<void>;
+  playTrack: (track: Track, newQueue?: Track[], forceRematch?: boolean) => Promise<void>;
+  playNext: (track: Track) => void;
+  addToQueue: (track: Track) => void;
+  removeFromQueue: (index: number) => void;
+  jumpToQueueIndex: (index: number) => Promise<void>;
+  clearUpcomingQueue: () => void;
   togglePlayPause: () => void;
   nextTrack: () => Promise<void>;
   previousTrack: () => Promise<void>;
@@ -46,9 +63,15 @@ interface PlayerContextValue {
   cycleRepeat: () => void;
   toggleLikeCurrent: () => Promise<void>;
   toggleLikeTrack: (track: Track) => Promise<boolean>;
+  refreshLibraryState: () => Promise<void>;
   downloadOffline: (track: Track) => Promise<void>;
   removeOffline: (trackUid: string) => Promise<void>;
+  clearAllOffline: () => Promise<void>;
   refreshOfflineCache: () => Promise<void>;
+  refreshLyrics: () => Promise<void>;
+  setDynamicThemeEnabled: (enabled: boolean) => Promise<void>;
+  openTrackMenu: (track: Track) => void;
+  closeTrackMenu: () => void;
   clearError: () => void;
 }
 
@@ -71,9 +94,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [repeat, setRepeat] = useState<RepeatMode>('all');
   const [lyrics, setLyrics] = useState<LyricsData | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [likedTracks, setLikedTracks] = useState<Track[]>([]);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [offlineEntries, setOfflineEntries] = useState<OfflineEntryDto[]>([]);
   const [offlineBytes, setOfflineBytes] = useState(0);
   const [downloadingUids, setDownloadingUids] = useState<Set<string>>(new Set());
+  const [palette, setPalette] = useState<DynamicPaletteDto>(DEFAULT_PALETTE);
+  const [dynamicThemeEnabled, setDynamicThemeEnabledState] = useState(true);
+  const [menuTrack, setMenuTrack] = useState<Track | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const queueRef = useRef(queue);
@@ -81,12 +109,22 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const shuffleRef = useRef(shuffle);
   const repeatRef = useRef(repeat);
   const positionMsRef = useRef(positionMs);
+  const currentTrackRef = useRef(currentTrack);
+  const effectiveDurationRef = useRef(0);
+  const dynamicThemeEnabledRef = useRef(dynamicThemeEnabled);
 
   queueRef.current = queue;
   queueIndexRef.current = queueIndex;
   shuffleRef.current = shuffle;
   repeatRef.current = repeat;
   positionMsRef.current = positionMs;
+  currentTrackRef.current = currentTrack;
+  dynamicThemeEnabledRef.current = dynamicThemeEnabled;
+
+  const likedUids = useMemo(
+    () => new Set(likedTracks.map((t) => t.uid)),
+    [likedTracks]
+  );
 
   const offlineUids = useMemo(
     () => new Set(offlineEntries.map((item) => item.track.uid)),
@@ -107,15 +145,63 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshLibraryState = useCallback(async () => {
+    if (!LumeCore.isAvailable()) return;
+    try {
+      const [liked, pls] = await Promise.all([
+        LumeCore.listLikedTracks(),
+        LumeCore.listPlaylists(),
+      ]);
+      setLikedTracks(liked);
+      setPlaylists(pls);
+    } catch {
+      // Non-fatal on cold start.
+    }
+  }, []);
+
+  const updateDynamicPalette = useCallback(async (artworkRef: string | null) => {
+    if (!dynamicThemeEnabledRef.current || !artworkRef || !LumeCore.isAvailable()) {
+      setPalette(DEFAULT_PALETTE);
+      return;
+    }
+    try {
+      const extracted = await LumeCore.extractPalette(artworkRef);
+      setPalette(extracted);
+    } catch {
+      setPalette(DEFAULT_PALETTE);
+    }
+  }, []);
+
+  const setDynamicThemeEnabled = useCallback(
+    async (enabled: boolean) => {
+      setDynamicThemeEnabledState(enabled);
+      dynamicThemeEnabledRef.current = enabled;
+      await SecureStore.setItemAsync(KEY_DYNAMIC_THEME, enabled ? '1' : '0').catch(() => {});
+      if (!enabled) {
+        setPalette(DEFAULT_PALETTE);
+      } else if (currentTrackRef.current?.artwork_ref) {
+        void updateDynamicPalette(currentTrackRef.current.artwork_ref);
+      }
+    },
+    [updateDynamicPalette]
+  );
+
   const loadTrackInternal = useCallback(
-    async (track: Track, newQueue?: Track[], explicitIndex?: number) => {
+    async (
+      track: Track,
+      newQueue?: Track[],
+      explicitIndex?: number,
+      forceRematch = false
+    ) => {
       const gen = ++loadGenRef.current;
       finishedHandledForGenRef.current = -1;
       setErrorMessage(null);
       setCurrentTrack(track);
+      currentTrackRef.current = track;
       setIsBuffering(true);
       setPositionMs(0);
       setDurationMs(track.duration_ms);
+      effectiveDurationRef.current = track.duration_ms;
       setLyrics(null);
 
       if (newQueue) {
@@ -127,6 +213,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setQueueIndex(explicitIndex);
       }
 
+      void updateDynamicPalette(track.artwork_ref);
+
       if (!LumeCore.isAvailable()) {
         setIsBuffering(false);
         setErrorMessage(
@@ -136,7 +224,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
-        const resolved = await LumeCore.resolvePlayableTrack(track, false);
+        const resolved = await LumeCore.resolvePlayableTrack(track, forceRematch);
         if (gen !== loadGenRef.current) return;
 
         setCurrentStream(resolved);
@@ -148,7 +236,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             {
               title: track.title,
               artist: trackArtistDisplay(track),
-              albumTitle: track.album ?? (resolved.is_offline ? 'Offline Library' : 'Lume Music'),
+              albumTitle:
+                track.album ?? (resolved.is_offline ? 'Offline Library' : 'Lume Music'),
               artworkUrl: track.artwork_ref ?? undefined,
             },
             {
@@ -161,7 +250,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           player.play();
         }
 
-        // Best-effort history & lyrics fetch in parallel without blocking playback start.
+        // Best-effort history & lyrics fetch without blocking audio start.
         LumeCore.recordPlayHistory(track).catch(() => {});
         setLyricsLoading(true);
         LumeCore.fetchLyrics(track, false)
@@ -183,7 +272,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setErrorMessage(err instanceof Error ? err.message : String(err));
       }
     },
-    []
+    [updateDynamicPalette]
   );
 
   const nextTrack = useCallback(async () => {
@@ -220,7 +309,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const list = queueRef.current;
     if (list.length === 0) return;
 
-    // Standard music player behavior: if > 3 seconds into song, restart current track.
     if (positionMsRef.current > 3000 && playerRef.current) {
       await playerRef.current.seekTo(0);
       setPositionMs(0);
@@ -235,6 +323,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Initialize native iOS AVAudioSession + persistent AudioPlayer + Lock Screen Remote Commands.
   useEffect(() => {
     let mounted = true;
+
+    SecureStore.getItemAsync(KEY_DYNAMIC_THEME)
+      .then((val) => {
+        if (val === '0') {
+          setDynamicThemeEnabledState(false);
+          dynamicThemeEnabledRef.current = false;
+        }
+      })
+      .catch(() => {});
 
     setAudioModeAsync({
       playsInSilentMode: true,
@@ -256,15 +353,54 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       if (!mounted) return;
       setIsPlaying(status.playing);
       setIsBuffering(status.isBuffering);
-      setPositionMs(Math.round((status.currentTime || 0) * 1000));
-      if (status.duration && status.duration > 0) {
-        setDurationMs(Math.round(status.duration * 1000));
+
+      const reportedPosMs = Math.round((status.currentTime || 0) * 1000);
+      const trackMetaDurationMs = currentTrackRef.current?.duration_ms ?? 0;
+      const reportedDurMs =
+        status.duration && Number.isFinite(status.duration) && status.duration > 0
+          ? Math.round(status.duration * 1000)
+          : 0;
+
+      // Guard against Apple AVPlayer's known 2x duration inflation on YouTube DASH M4A streams
+      // (e.g. 4:03 reported as 8:03 with 4 minutes of trailing silence).
+      let effectiveDur = trackMetaDurationMs;
+      if (reportedDurMs > 0) {
+        if (trackMetaDurationMs <= 0) {
+          effectiveDur = reportedDurMs;
+        } else if (reportedDurMs <= trackMetaDurationMs * 1.22) {
+          effectiveDur = reportedDurMs;
+        } else {
+          effectiveDur = trackMetaDurationMs;
+        }
       }
+
+      if (effectiveDur > 0) {
+        effectiveDurationRef.current = effectiveDur;
+        setDurationMs(effectiveDur);
+      }
+
+      const clampedPos =
+        effectiveDur > 0 ? Math.min(reportedPosMs, effectiveDur) : reportedPosMs;
+      setPositionMs(clampedPos);
+
       if (status.error) {
         setErrorMessage(status.error);
       }
-      if (status.didJustFinish && finishedHandledForGenRef.current !== loadGenRef.current) {
+
+      const hitInflatedEnd =
+        effectiveDur > 0 &&
+        reportedDurMs > effectiveDur * 1.22 &&
+        reportedPosMs >= effectiveDur - 350 &&
+        status.playing;
+
+      if (
+        (status.didJustFinish || hitInflatedEnd) &&
+        finishedHandledForGenRef.current !== loadGenRef.current
+      ) {
         finishedHandledForGenRef.current = loadGenRef.current;
+        if (hitInflatedEnd) {
+          player.pause();
+        }
         void nextTrack();
       }
     });
@@ -279,6 +415,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     );
 
     void refreshOfflineCache();
+    void refreshLibraryState();
 
     return () => {
       mounted = false;
@@ -288,14 +425,58 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       player.remove();
       playerRef.current = null;
     };
-  }, [nextTrack, previousTrack, refreshOfflineCache]);
+  }, [nextTrack, previousTrack, refreshLibraryState, refreshOfflineCache]);
 
   const playTrack = useCallback(
-    async (track: Track, newQueue?: Track[]) => {
-      await loadTrackInternal(track, newQueue ?? [track]);
+    async (track: Track, newQueue?: Track[], forceRematch = false) => {
+      await loadTrackInternal(track, newQueue ?? [track], undefined, forceRematch);
     },
     [loadTrackInternal]
   );
+
+  const playNext = useCallback((track: Track) => {
+    setQueue((prev) => {
+      if (prev.length === 0) return [track];
+      const idx = Math.max(0, queueIndexRef.current);
+      const copy = [...prev];
+      copy.splice(idx + 1, 0, track);
+      return copy;
+    });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }, []);
+
+  const addToQueue = useCallback((track: Track) => {
+    setQueue((prev) => [...prev, track]);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }, []);
+
+  const removeFromQueue = useCallback((index: number) => {
+    setQueue((prev) => {
+      if (index < 0 || index >= prev.length || index === queueIndexRef.current) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      if (index < queueIndexRef.current) {
+        setQueueIndex((cur) => Math.max(0, cur - 1));
+      }
+      return next;
+    });
+  }, []);
+
+  const jumpToQueueIndex = useCallback(
+    async (index: number) => {
+      const list = queueRef.current;
+      if (index < 0 || index >= list.length) return;
+      await loadTrackInternal(list[index], undefined, index);
+    },
+    [loadTrackInternal]
+  );
+
+  const clearUpcomingQueue = useCallback(() => {
+    setQueue((prev) => {
+      const idx = queueIndexRef.current;
+      if (idx < 0 || idx >= prev.length) return [];
+      return prev.slice(0, idx + 1);
+    });
+  }, []);
 
   const togglePlayPause = useCallback(() => {
     const player = playerRef.current;
@@ -311,31 +492,35 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const seekToMs = useCallback(async (ms: number) => {
     const player = playerRef.current;
     if (!player) return;
-    const clampedSec = Math.max(0, ms / 1000);
-    await player.seekTo(clampedSec);
-    setPositionMs(Math.round(clampedSec * 1000));
+    const maxMs = effectiveDurationRef.current > 0 ? effectiveDurationRef.current - 400 : ms;
+    const clampedMs = Math.max(0, Math.min(ms, Math.max(0, maxMs)));
+    await player.seekTo(clampedMs / 1000);
+    setPositionMs(Math.round(clampedMs));
   }, []);
 
-  const toggleShuffle = useCallback(() => {
-    setShuffle((prev) => !prev);
-  }, []);
+  const toggleShuffle = useCallback(() => setShuffle((prev) => !prev), []);
 
   const cycleRepeat = useCallback(() => {
     setRepeat((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'));
   }, []);
 
-  const toggleLikeTrack = useCallback(async (track: Track): Promise<boolean> => {
-    const nextLiked = !track.is_liked;
-    await LumeCore.setTrackLiked(track, nextLiked);
-    setCurrentTrack((prev) =>
-      prev && prev.uid === track.uid ? { ...prev, is_liked: nextLiked } : prev
-    );
-    setQueue((prev) =>
-      prev.map((t) => (t.uid === track.uid ? { ...t, is_liked: nextLiked } : t))
-    );
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    return nextLiked;
-  }, []);
+  const toggleLikeTrack = useCallback(
+    async (track: Track): Promise<boolean> => {
+      const currentlyLiked = likedUids.has(track.uid);
+      const nextLiked = !currentlyLiked;
+      await LumeCore.setTrackLiked(track, nextLiked);
+      setCurrentTrack((prev) =>
+        prev && prev.uid === track.uid ? { ...prev, is_liked: nextLiked } : prev
+      );
+      setQueue((prev) =>
+        prev.map((t) => (t.uid === track.uid ? { ...t, is_liked: nextLiked } : t))
+      );
+      await refreshLibraryState();
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      return nextLiked;
+    },
+    [likedUids, refreshLibraryState]
+  );
 
   const toggleLikeCurrent = useCallback(async () => {
     if (!currentTrack) return;
@@ -371,6 +556,27 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     [refreshOfflineCache]
   );
 
+  const clearAllOffline = useCallback(async () => {
+    await LumeCore.clearAllOfflineTracks();
+    await refreshOfflineCache();
+  }, [refreshOfflineCache]);
+
+  const refreshLyrics = useCallback(async () => {
+    const track = currentTrackRef.current;
+    if (!track || !LumeCore.isAvailable()) return;
+    setLyricsLoading(true);
+    try {
+      const data = await LumeCore.fetchLyrics(track, true);
+      setLyrics(data);
+    } catch {
+      // Ignore refresh failure.
+    } finally {
+      setLyricsLoading(false);
+    }
+  }, []);
+
+  const openTrackMenu = useCallback((track: Track) => setMenuTrack(track), []);
+  const closeTrackMenu = useCallback(() => setMenuTrack(null), []);
   const clearError = useCallback(() => setErrorMessage(null), []);
 
   const value = useMemo<PlayerContextValue>(
@@ -387,12 +593,23 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       repeat,
       lyrics,
       lyricsLoading,
+      likedTracks,
+      likedUids,
+      playlists,
       offlineUids,
       downloadingUids,
       offlineEntries,
       offlineBytes,
+      palette,
+      dynamicThemeEnabled,
+      menuTrack,
       errorMessage,
       playTrack,
+      playNext,
+      addToQueue,
+      removeFromQueue,
+      jumpToQueueIndex,
+      clearUpcomingQueue,
       togglePlayPause,
       nextTrack,
       previousTrack,
@@ -401,9 +618,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       cycleRepeat,
       toggleLikeCurrent,
       toggleLikeTrack,
+      refreshLibraryState,
       downloadOffline,
       removeOffline,
+      clearAllOffline,
       refreshOfflineCache,
+      refreshLyrics,
+      setDynamicThemeEnabled,
+      openTrackMenu,
+      closeTrackMenu,
       clearError,
     }),
     [
@@ -419,12 +642,23 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       repeat,
       lyrics,
       lyricsLoading,
+      likedTracks,
+      likedUids,
+      playlists,
       offlineUids,
       downloadingUids,
       offlineEntries,
       offlineBytes,
+      palette,
+      dynamicThemeEnabled,
+      menuTrack,
       errorMessage,
       playTrack,
+      playNext,
+      addToQueue,
+      removeFromQueue,
+      jumpToQueueIndex,
+      clearUpcomingQueue,
       togglePlayPause,
       nextTrack,
       previousTrack,
@@ -433,9 +667,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       cycleRepeat,
       toggleLikeCurrent,
       toggleLikeTrack,
+      refreshLibraryState,
       downloadOffline,
       removeOffline,
+      clearAllOffline,
       refreshOfflineCache,
+      refreshLyrics,
+      setDynamicThemeEnabled,
+      openTrackMenu,
+      closeTrackMenu,
       clearError,
     ]
   );

@@ -1,6 +1,7 @@
 import React from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { usePlayer } from '../context/PlayerContext';
 import { LumeTheme } from '../theme';
 import {
   formatDurationMs,
@@ -18,6 +19,7 @@ interface TrackRowProps {
   onDownloadPress?: () => void;
   onDeleteOfflinePress?: () => void;
   onLikePress?: () => void;
+  onMorePress?: () => void;
 }
 
 export function TrackRow({
@@ -29,15 +31,22 @@ export function TrackRow({
   onDownloadPress,
   onDeleteOfflinePress,
   onLikePress,
+  onMorePress,
 }: TrackRowProps) {
+  const { likedUids, palette, openTrackMenu } = usePlayer();
   const badge = trackSourceBadge(track);
+  const liked = likedUids.has(track.uid);
 
   return (
     <Pressable
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
-        isActive && styles.activeRow,
+        isActive && {
+          backgroundColor: palette.accent_soft,
+          borderWidth: 1,
+          borderColor: 'rgba(255,255,255,0.22)',
+        },
         pressed && styles.pressedRow,
       ]}
     >
@@ -45,13 +54,13 @@ export function TrackRow({
         <Image source={{ uri: track.artwork_ref }} style={styles.art} />
       ) : (
         <View style={[styles.art, styles.artFallback]}>
-          <Ionicons name="musical-note" size={20} color={LumeTheme.accentBright} />
+          <Ionicons name="musical-note" size={20} color={palette.accent} />
         </View>
       )}
 
       <View style={styles.info}>
         <Text
-          style={[styles.title, isActive && styles.activeTitle]}
+          style={[styles.title, isActive && { color: palette.accent }]}
           numberOfLines={1}
         >
           {track.title}
@@ -70,11 +79,7 @@ export function TrackRow({
             <Text style={styles.badgeText}>{badge}</Text>
           </View>
           {isOffline && (
-            <Ionicons
-              name="checkmark-circle"
-              size={13}
-              color={LumeTheme.emerald}
-            />
+            <Ionicons name="checkmark-circle" size={13} color={LumeTheme.emerald} />
           )}
           <Text style={styles.artist} numberOfLines={1}>
             {trackArtistDisplay(track)}
@@ -94,13 +99,13 @@ export function TrackRow({
               e.stopPropagation();
               onLikePress();
             }}
-            hitSlop={8}
+            hitSlop={6}
             style={styles.actionBtn}
           >
             <Ionicons
-              name={track.is_liked ? 'heart' : 'heart-outline'}
-              size={19}
-              color={track.is_liked ? LumeTheme.rose : LumeTheme.textSecondary}
+              name={liked ? 'heart' : 'heart-outline'}
+              size={18}
+              color={liked ? LumeTheme.rose : LumeTheme.textSecondary}
             />
           </Pressable>
         )}
@@ -111,10 +116,10 @@ export function TrackRow({
               e.stopPropagation();
               onDeleteOfflinePress();
             }}
-            hitSlop={8}
+            hitSlop={6}
             style={styles.actionBtn}
           >
-            <Ionicons name="trash-outline" size={19} color={LumeTheme.rose} />
+            <Ionicons name="trash-outline" size={18} color={LumeTheme.rose} />
           </Pressable>
         ) : (
           onDownloadPress && (
@@ -123,21 +128,37 @@ export function TrackRow({
                 e.stopPropagation();
                 onDownloadPress();
               }}
-              hitSlop={8}
+              hitSlop={6}
               style={styles.actionBtn}
             >
               {isDownloading ? (
-                <ActivityIndicator size="small" color={LumeTheme.accentBright} />
+                <ActivityIndicator size="small" color={palette.accent} />
               ) : (
                 <Ionicons
                   name={isOffline ? 'cloud-done' : 'cloud-download-outline'}
-                  size={19}
+                  size={18}
                   color={isOffline ? LumeTheme.emerald : LumeTheme.textSecondary}
                 />
               )}
             </Pressable>
           )
         )}
+
+        <Pressable
+          onPress={(e) => {
+            e.stopPropagation();
+            if (onMorePress) {
+              onMorePress();
+            } else {
+              openTrackMenu(track);
+            }
+          }}
+          hitSlop={6}
+          style={styles.actionBtn}
+          accessibilityLabel="More options"
+        >
+          <Ionicons name="ellipsis-horizontal" size={18} color={LumeTheme.textSecondary} />
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -148,14 +169,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     borderRadius: 14,
-    gap: 12,
-  },
-  activeRow: {
-    backgroundColor: 'rgba(99, 102, 241, 0.16)',
-    borderWidth: 1,
-    borderColor: LumeTheme.borderAccent,
+    gap: 11,
   },
   pressedRow: {
     backgroundColor: LumeTheme.bgCard,
@@ -178,9 +194,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
-  activeTitle: {
-    color: LumeTheme.accentBright,
-  },
   subRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -196,7 +209,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(29, 185, 84, 0.22)',
   },
   badgeYtm: {
-    backgroundColor: 'rgba(99, 102, 241, 0.25)',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
   },
   badgeLocal: {
     backgroundColor: 'rgba(148, 163, 184, 0.22)',
@@ -218,10 +231,9 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
   },
   actionBtn: {
-    width: 34,
+    width: 30,
     height: 34,
     alignItems: 'center',
     justifyContent: 'center',

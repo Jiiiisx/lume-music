@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use lume_core::{PlaybackSourceUsed, ResolvedStream, Track, TrackSource};
 use lume_providers::{
-    build_authorize_url, exchange_authorization_code, import_spotify_playlist_url,
-    refresh_spotify_token, resolve_spotify_to_ytm_video_id, ChainedLyricsProvider, PkceChallenge,
+    build_authorize_url, canonical_ytm_playlist_url, exchange_authorization_code,
+    import_spotify_playlist_url, parse_exportify_csv, refresh_spotify_token,
+    resolve_spotify_to_ytm_video_id, ChainedLyricsProvider, LocalProvider, PkceChallenge,
     SpotifyWebClient, YouTubeMusicProvider, SPOTIFY_ACCOUNTS_TOKEN_URL,
     SPOTIFY_MOBILE_REDIRECT_URI, SPOTIFY_WEB_API_SCOPES,
 };
-use lume_storage::{Database, OfflineTrackRecord, SpotifyTokenSet, WEEKLY_CHARTS_TTL_S};
+use lume_storage::{ArtCache, Database, OfflineTrackRecord, SpotifyTokenSet, WEEKLY_CHARTS_TTL_S};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
@@ -96,6 +97,15 @@ pub struct HealthCheckDto {
     pub offline_storage_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicPaletteDto {
+    pub bg_top: String,
+    pub bg_mid: String,
+    pub bg_bottom: String,
+    pub accent: String,
+    pub accent_soft: String,
+}
+
 #[derive(uniffi::Object)]
 pub struct LumeMobileCore {
     runtime: Runtime,
@@ -105,6 +115,8 @@ pub struct LumeMobileCore {
     http: reqwest::Client,
     db_path: PathBuf,
     offline_dir: PathBuf,
+    local_audio_dir: PathBuf,
+    art_cache_dir: PathBuf,
 }
 
 fn sanitize_filename(uid: &str) -> String {
@@ -136,6 +148,143 @@ fn parse_track_json(track_json: &str) -> Result<Track, LumeFfiError> {
 fn to_json<T: Serialize>(value: &T) -> Result<String, LumeFfiError> {
     serde_json::to_string(value)
         .map_err(|e| LumeFfiError::internal(format!("JSON serialization failed: {e}")))
+}
+
+fn default_dynamic_palette() -> DynamicPaletteDto {
+    DynamicPaletteDto {
+        bg_top: "#181C2E".into(),
+        bg_mid: "#0E111B".into(),
+        bg_bottom: "#0A0C12".into(),
+        accent: "#818CF8".into(),
+        accent_soft: "rgba(99, 102, 241, 0.22)".into(),
+    }
+}
+
+fn rgb_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+fn extract_palette_from_bytes(bytes: &[u8]) -> DynamicPaletteDto {
+    if bytes.is_empty() {
+        return default_dynamic_palette();
+    }
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return default_dynamic_palette();
+    };
+    let small = img.resize_exact(32, 32, image::imageops::FilterType::Triangle);
+    let rgba = small.to_rgba8();
+
+    let mut best_score = -1.0_f32;
+    let mut best_rgb = (99_u8, 102_u8, 241_u8);
+    let mut avg_r = 0.0_f64;
+    let mut avg_g = 0.0_f64;
+    let mut avg_b = 0.0_f64;
+    let mut count = 0.0_f64;
+
+    for pixel in rgba.pixels() {
+        let [r, g, b, a] = pixel.0;
+        if a < 128 {
+            continue;
+        }
+        let rf = r as f32 / 255.0;
+        let gf = g as f32 / 255.0;
+        let bf = b as f32 / 255.0;
+        avg_r += rf as f64;
+        avg_g += gf as f64;
+        avg_b += bf as f64;
+        count += 1.0;
+
+        let max_c = rf.max(gf).max(bf);
+        let min_c = rf.min(gf).min(bf);
+        let sat = if max_c > 0.01 {
+            (max_c - min_c) / max_c
+        } else {
+            0.0
+        };
+        let luma = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
+        if luma > 0.10 && luma < 0.88 {
+            let luma_bonus = 1.0 - (luma - 0.45).abs();
+            let score = sat * 1.6 + luma_bonus * 0.4;
+            if score > best_score {
+                best_score = score;
+                best_rgb = (r, g, b);
+            }
+        }
+    }
+
+    if count < 1.0 {
+        return default_dynamic_palette();
+    }
+
+    let (dom_r, dom_g, dom_b) = if best_score >= 0.35 {
+        best_rgb
+    } else {
+        (
+            ((avg_r / count) * 255.0) as u8,
+            ((avg_g / count) * 255.0) as u8,
+            ((avg_b / count) * 255.0) as u8,
+        )
+    };
+
+    // Rich dark glassmorphism tones (matching Lume Desktop's WCAG-safe vibrant tint).
+    let scale_channel = |c: u8, factor: f32, floor: u8, ceil: u8| -> u8 {
+        ((c as f32 * factor).round() as u8).clamp(floor, ceil)
+    };
+
+    let top = rgb_hex(
+        scale_channel(dom_r, 0.46, 18, 128),
+        scale_channel(dom_g, 0.46, 16, 120),
+        scale_channel(dom_b, 0.46, 20, 132),
+    );
+    let mid = rgb_hex(
+        scale_channel(dom_r, 0.24, 12, 74),
+        scale_channel(dom_g, 0.24, 12, 70),
+        scale_channel(dom_b, 0.24, 16, 82),
+    );
+    let bottom = rgb_hex(
+        scale_channel(dom_r, 0.11, 8, 34),
+        scale_channel(dom_g, 0.11, 8, 32),
+        scale_channel(dom_b, 0.11, 12, 38),
+    );
+
+    // Bright readable accent normalized for dark backgrounds.
+    let ar = dom_r as f32 / 255.0;
+    let ag = dom_g as f32 / 255.0;
+    let ab = dom_b as f32 / 255.0;
+    let luma = (0.2126 * ar + 0.7152 * ag + 0.0722 * ab).max(0.01);
+    let target_luma = luma.clamp(0.55, 0.78);
+    let boost = (target_luma / luma).min(2.2);
+    let acc_r = ((ar * boost * 255.0).round() as u8).clamp(90, 255);
+    let acc_g = ((ag * boost * 255.0).round() as u8).clamp(90, 255);
+    let acc_b = ((ab * boost * 255.0).round() as u8).clamp(90, 255);
+
+    DynamicPaletteDto {
+        bg_top: top,
+        bg_mid: mid,
+        bg_bottom: bottom,
+        accent: rgb_hex(acc_r, acc_g, acc_b),
+        accent_soft: format!("rgba({acc_r}, {acc_g}, {acc_b}, 0.22)"),
+    }
+}
+
+fn extract_ytm_playlist_id(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(pos) = trimmed.find("list=") {
+        let rest = &trimmed[pos + 5..];
+        rest.split('&').next().unwrap_or(trimmed).trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn strip_file_scheme(uri_or_path: &str) -> PathBuf {
+    let trimmed = uri_or_path.trim();
+    if let Some(stripped) = trimmed.strip_prefix("file://") {
+        let decoded = stripped.replace("%20", " ");
+        PathBuf::from(decoded)
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 impl LumeMobileCore {
@@ -207,6 +356,14 @@ impl LumeMobileCore {
         std::fs::create_dir_all(&offline_dir)
             .map_err(|e| LumeFfiError::storage(format!("failed to create offline dir: {e}")))?;
 
+        let local_audio_dir = data_path.join("local_audio");
+        std::fs::create_dir_all(&local_audio_dir)
+            .map_err(|e| LumeFfiError::storage(format!("failed to create local_audio dir: {e}")))?;
+
+        let art_cache_dir = cache_path.join("art");
+        std::fs::create_dir_all(&art_cache_dir)
+            .map_err(|e| LumeFfiError::storage(format!("failed to create art cache dir: {e}")))?;
+
         let ytm_cache = cache_path.join("ytm");
         std::fs::create_dir_all(&ytm_cache)
             .map_err(|e| LumeFfiError::storage(format!("failed to create ytm cache dir: {e}")))?;
@@ -238,6 +395,8 @@ impl LumeMobileCore {
             http,
             db_path,
             offline_dir,
+            local_audio_dir,
+            art_cache_dir,
         }))
     }
 
@@ -811,6 +970,199 @@ impl LumeMobileCore {
         db.put_yt_mapping(spotify_track_id.trim(), yt_video_id.trim(), 1.0)
             .map_err(|e| LumeFfiError::storage(e.to_string()))
     }
+
+    pub fn rename_playlist(&self, playlist_id: String, new_name: String) -> Result<(), LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.rename_playlist(&playlist_id, &new_name)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
+    pub fn import_ytm_playlist_url_json(&self, url_or_id: String) -> Result<String, LumeFfiError> {
+        let playlist_id = extract_ytm_playlist_id(&url_or_id);
+        if playlist_id.is_empty() {
+            return Err(LumeFfiError::invalid("YouTube Music playlist URL/ID is empty"));
+        }
+        let detail = self
+            .runtime
+            .block_on(self.ytm.get_playlist_detail(&playlist_id))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        let source_url = canonical_ytm_playlist_url(&detail.id);
+        let (playlist, _) = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.upsert_imported_ytm_playlist(&detail.name, &source_url, &detail.tracks)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&playlist)
+    }
+
+    pub fn import_exportify_csv_json(
+        &self,
+        csv_text: String,
+        playlist_name: String,
+    ) -> Result<String, LumeFfiError> {
+        let name = if playlist_name.trim().is_empty() {
+            "Imported CSV Playlist"
+        } else {
+            playlist_name.trim()
+        };
+        let source_tag = format!("csv:{}", sanitize_filename(name));
+        let imported = parse_exportify_csv(&csv_text, name, &source_tag)
+            .map_err(|e| LumeFfiError::invalid(e.to_string()))?;
+        let playlist = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.upsert_imported_spotify_playlist(
+                &imported.name,
+                &imported.source_url,
+                &imported.tracks,
+            )
+            .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&playlist)
+    }
+
+    /// Copies a user-picked local audio file into the iOS app container and indexes it via `lofty`.
+    pub fn import_local_audio_file_json(
+        &self,
+        source_uri_or_path: String,
+        file_name: String,
+    ) -> Result<String, LumeFfiError> {
+        let src = strip_file_scheme(&source_uri_or_path);
+        if !src.is_file() {
+            return Err(LumeFfiError::invalid("selected local audio file not found"));
+        }
+
+        let safe_name = file_name
+            .trim()
+            .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let final_name = if safe_name.is_empty() {
+            src.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("imported_audio.m4a")
+                .to_string()
+        } else {
+            safe_name
+        };
+
+        let dest = self.local_audio_dir.join(&final_name);
+        if src != dest {
+            std::fs::copy(&src, &dest)
+                .map_err(|e| LumeFfiError::storage(format!("failed to copy audio file: {e}")))?;
+        }
+
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            let mut art_cache = ArtCache::new(self.art_cache_dir.clone(), 64 * 1024 * 1024, 128);
+            let local = LocalProvider::new(self.db_path.clone());
+            local
+                .scan_folders(std::slice::from_ref(&self.local_audio_dir), &db, &mut art_cache)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+            db.list_local_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn list_local_tracks_json(&self) -> Result<String, LumeFfiError> {
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.list_local_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn search_local_tracks_json(&self, query: String) -> Result<String, LumeFfiError> {
+        let tracks = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.search_local_tracks(&query, 50)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?
+        };
+        to_json(&tracks)
+    }
+
+    pub fn clear_all_offline_tracks(&self) -> Result<(), LumeFfiError> {
+        let entries = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            let list = db
+                .list_offline_tracks()
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+            for (track, _) in &list {
+                let _ = db.delete_offline_track(&track.uid);
+            }
+            list
+        };
+        for (_, rec) in entries {
+            let p = PathBuf::from(rec.file_path);
+            if p.exists() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn search_spotify_catalog_json(
+        &self,
+        access_token: String,
+        query: String,
+        limit: u32,
+    ) -> Result<String, LumeFfiError> {
+        let token = access_token.trim();
+        if token.is_empty() {
+            return Err(LumeFfiError::auth("Spotify access token is empty"));
+        }
+        let cap = (limit as usize).clamp(1, 30);
+        let client = SpotifyWebClient::new();
+        let catalog = self
+            .runtime
+            .block_on(client.search_catalog(token, &query, cap))
+            .map_err(|e| LumeFfiError::network(e.to_string()))?;
+        to_json(&catalog)
+    }
+
+    /// Extracts WCAG-safe dynamic album-art glassmorphism colors (matching Lume Desktop).
+    pub fn extract_palette_json(&self, artwork_ref: String) -> Result<String, LumeFfiError> {
+        let trimmed = artwork_ref.trim();
+        if trimmed.is_empty() {
+            return to_json(&default_dynamic_palette());
+        }
+
+        let bytes = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            self.runtime.block_on(async {
+                match self.http.get(trimmed).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                }
+            })
+        } else {
+            let path = strip_file_scheme(trimmed);
+            std::fs::read(path).unwrap_or_default()
+        };
+
+        to_json(&extract_palette_from_bytes(&bytes))
+    }
 }
 
 #[cfg(test)]
@@ -945,5 +1297,47 @@ mod tests {
         assert!(started.authorize_url.contains("code_challenge_method=S256"));
         assert!(!started.code_verifier.is_empty());
         assert!(!started.state.is_empty());
+    }
+
+    #[test]
+    fn rename_csv_import_clear_offline_and_palette_work() {
+        let dir = TempDir::new().unwrap();
+        let core = LumeMobileCore::new(
+            dir.path().join("data").to_string_lossy().into_owned(),
+            dir.path().join("cache").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let pl: lume_core::Playlist =
+            serde_json::from_str(&core.create_playlist_json("Old Name".into()).unwrap()).unwrap();
+        core.rename_playlist(pl.id.clone(), "Road Trip".into())
+            .unwrap();
+        let list: Vec<lume_core::Playlist> =
+            serde_json::from_str(&core.list_playlists_json().unwrap()).unwrap();
+        assert_eq!(list[0].name, "Road Trip");
+
+        let csv = "Track URI,Track Name,Artist Name(s),Album Name,Duration (ms)\n\
+                   spotify:track:abc123,Pelangi,HIVI!,Kereta Kencan,220000\n";
+        let imported: lume_core::Playlist = serde_json::from_str(
+            &core
+                .import_exportify_csv_json(csv.into(), "Exportify Mix".into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported.name, "Exportify Mix");
+        assert_eq!(imported.track_count, 1);
+
+        // Verify palette extraction on a synthetic crimson PNG image.
+        let mut img = image::RgbaImage::new(8, 8);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([200, 32, 36, 255]);
+        }
+        let mut png_bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png_bytes, image::ImageFormat::Png)
+            .unwrap();
+        let pal = extract_palette_from_bytes(png_bytes.get_ref());
+        assert!(pal.bg_top.starts_with('#'));
+        assert!(pal.accent.starts_with('#'));
     }
 }

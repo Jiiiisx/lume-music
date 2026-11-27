@@ -1,11 +1,16 @@
 import { requireOptionalNativeModule, EventSubscription } from 'expo-modules-core';
 import type {
+  AlbumDetail,
+  ArtistProfile,
+  DynamicPaletteDto,
   HealthCheckDto,
   LyricsData,
   MobileSpotifyAuthStartDto,
   OfflineEntryDto,
   PlayableStreamDto,
   Playlist,
+  RemotePlaylistDetail,
+  SpotifyCatalogSearchResult,
   SpotifySyncSummaryDto,
   SpotifyTokenSet,
   Track,
@@ -18,14 +23,17 @@ interface NativeLumeCoreModule {
   downloadTrackOffline(trackJson: string): Promise<string>;
   listOfflineTracks(): Promise<string>;
   deleteOfflineTrack(trackUid: string): Promise<void>;
+  clearAllOfflineTracks(): Promise<void>;
   offlineStorageBytes(): Promise<number>;
   searchYtm(query: string, limit: number): Promise<string>;
+  searchSpotifyCatalog(accessToken: string, query: string, limit: number): Promise<string>;
   getCharts(indonesia: boolean, limit: number, forceRefresh: boolean): Promise<string>;
   getArtistProfile(artistId: string): Promise<string>;
   getAlbumDetail(albumId: string): Promise<string>;
   getYtmPlaylistDetail(playlistId: string): Promise<string>;
   listPlaylists(): Promise<string>;
   createPlaylist(name: string): Promise<string>;
+  renamePlaylist(playlistId: string, newName: string): Promise<void>;
   deletePlaylist(playlistId: string): Promise<void>;
   getPlaylistTracks(playlistId: string): Promise<string>;
   addTrackToPlaylist(playlistId: string, trackJson: string): Promise<void>;
@@ -44,7 +52,13 @@ interface NativeLumeCoreModule {
   refreshSpotifyToken(clientId: string, tokenJson: string): Promise<string>;
   syncSpotifyLibrary(accessToken: string): Promise<string>;
   importSpotifyPlaylistUrl(url: string): Promise<string>;
+  importYtmPlaylistUrl(urlOrId: string): Promise<string>;
+  importExportifyCsv(csvText: string, playlistName: string): Promise<string>;
+  importLocalAudioFile(sourceUriOrPath: string, fileName: string): Promise<string>;
+  listLocalTracks(): Promise<string>;
+  searchLocalTracks(query: string): Promise<string>;
   rematchSpotifyTrack(spotifyTrackId: string, ytVideoId: string): Promise<void>;
+  extractPalette(artworkRef: string): Promise<string>;
   enableRemoteTrackCommands(): void;
   addListener(
     eventName: 'onRemoteNextTrack' | 'onRemotePreviousTrack',
@@ -57,7 +71,7 @@ const native = requireOptionalNativeModule<NativeLumeCoreModule>('LumeCore');
 function ensureNative(): NativeLumeCoreModule {
   if (!native) {
     throw new Error(
-      'LumeCore native Rust module is not linked. Install the Lume Music iOS DevClient/Release .ipa built via GitHub Actions.'
+      'LumeCore native Rust module is not linked. Install the Lume Music iOS .ipa built via GitHub Actions.'
     );
   }
   return native;
@@ -69,33 +83,34 @@ export const LumeCore = {
   },
 
   async healthCheck(): Promise<HealthCheckDto> {
-    const raw = await ensureNative().healthCheck();
-    return JSON.parse(raw) as HealthCheckDto;
+    return JSON.parse(await ensureNative().healthCheck()) as HealthCheckDto;
   },
 
   async resolvePlayableTrack(
     track: Track,
     forceRematch = false
   ): Promise<PlayableStreamDto> {
-    const raw = await ensureNative().resolvePlayableTrack(
-      JSON.stringify(track),
-      forceRematch
-    );
-    return JSON.parse(raw) as PlayableStreamDto;
+    return JSON.parse(
+      await ensureNative().resolvePlayableTrack(JSON.stringify(track), forceRematch)
+    ) as PlayableStreamDto;
   },
 
   async downloadTrackOffline(track: Track): Promise<OfflineEntryDto> {
-    const raw = await ensureNative().downloadTrackOffline(JSON.stringify(track));
-    return JSON.parse(raw) as OfflineEntryDto;
+    return JSON.parse(
+      await ensureNative().downloadTrackOffline(JSON.stringify(track))
+    ) as OfflineEntryDto;
   },
 
   async listOfflineTracks(): Promise<OfflineEntryDto[]> {
-    const raw = await ensureNative().listOfflineTracks();
-    return JSON.parse(raw) as OfflineEntryDto[];
+    return JSON.parse(await ensureNative().listOfflineTracks()) as OfflineEntryDto[];
   },
 
   async deleteOfflineTrack(trackUid: string): Promise<void> {
     await ensureNative().deleteOfflineTrack(trackUid);
+  },
+
+  async clearAllOfflineTracks(): Promise<void> {
+    await ensureNative().clearAllOfflineTracks();
   },
 
   async offlineStorageBytes(): Promise<number> {
@@ -103,8 +118,17 @@ export const LumeCore = {
   },
 
   async searchYtm(query: string, limit = 20): Promise<YtmCatalogSearchResult> {
-    const raw = await ensureNative().searchYtm(query, limit);
-    return JSON.parse(raw) as YtmCatalogSearchResult;
+    return JSON.parse(await ensureNative().searchYtm(query, limit)) as YtmCatalogSearchResult;
+  },
+
+  async searchSpotifyCatalog(
+    accessToken: string,
+    query: string,
+    limit = 20
+  ): Promise<SpotifyCatalogSearchResult> {
+    return JSON.parse(
+      await ensureNative().searchSpotifyCatalog(accessToken, query, limit)
+    ) as SpotifyCatalogSearchResult;
   },
 
   async getCharts(
@@ -112,18 +136,35 @@ export const LumeCore = {
     limit = 25,
     forceRefresh = false
   ): Promise<Track[]> {
-    const raw = await ensureNative().getCharts(indonesia, limit, forceRefresh);
-    return JSON.parse(raw) as Track[];
+    return JSON.parse(
+      await ensureNative().getCharts(indonesia, limit, forceRefresh)
+    ) as Track[];
+  },
+
+  async getArtistProfile(artistId: string): Promise<ArtistProfile> {
+    return JSON.parse(await ensureNative().getArtistProfile(artistId)) as ArtistProfile;
+  },
+
+  async getAlbumDetail(albumId: string): Promise<AlbumDetail> {
+    return JSON.parse(await ensureNative().getAlbumDetail(albumId)) as AlbumDetail;
+  },
+
+  async getYtmPlaylistDetail(playlistId: string): Promise<RemotePlaylistDetail> {
+    return JSON.parse(
+      await ensureNative().getYtmPlaylistDetail(playlistId)
+    ) as RemotePlaylistDetail;
   },
 
   async listPlaylists(): Promise<Playlist[]> {
-    const raw = await ensureNative().listPlaylists();
-    return JSON.parse(raw) as Playlist[];
+    return JSON.parse(await ensureNative().listPlaylists()) as Playlist[];
   },
 
   async createPlaylist(name: string): Promise<Playlist> {
-    const raw = await ensureNative().createPlaylist(name);
-    return JSON.parse(raw) as Playlist;
+    return JSON.parse(await ensureNative().createPlaylist(name)) as Playlist;
+  },
+
+  async renamePlaylist(playlistId: string, newName: string): Promise<void> {
+    await ensureNative().renamePlaylist(playlistId, newName);
   },
 
   async deletePlaylist(playlistId: string): Promise<void> {
@@ -131,8 +172,7 @@ export const LumeCore = {
   },
 
   async getPlaylistTracks(playlistId: string): Promise<Track[]> {
-    const raw = await ensureNative().getPlaylistTracks(playlistId);
-    return JSON.parse(raw) as Track[];
+    return JSON.parse(await ensureNative().getPlaylistTracks(playlistId)) as Track[];
   },
 
   async addTrackToPlaylist(playlistId: string, track: Track): Promise<void> {
@@ -148,8 +188,7 @@ export const LumeCore = {
   },
 
   async listLikedTracks(): Promise<Track[]> {
-    const raw = await ensureNative().listLikedTracks();
-    return JSON.parse(raw) as Track[];
+    return JSON.parse(await ensureNative().listLikedTracks()) as Track[];
   },
 
   async recordPlayHistory(track: Track): Promise<void> {
@@ -157,18 +196,19 @@ export const LumeCore = {
   },
 
   async listRecentTracks(limit = 20): Promise<Track[]> {
-    const raw = await ensureNative().listRecentTracks(limit);
-    return JSON.parse(raw) as Track[];
+    return JSON.parse(await ensureNative().listRecentTracks(limit)) as Track[];
   },
 
   async fetchLyrics(track: Track, forceRefresh = false): Promise<LyricsData | null> {
-    const raw = await ensureNative().fetchLyrics(JSON.stringify(track), forceRefresh);
-    return JSON.parse(raw) as LyricsData | null;
+    return JSON.parse(
+      await ensureNative().fetchLyrics(JSON.stringify(track), forceRefresh)
+    ) as LyricsData | null;
   },
 
   async beginSpotifyMobileAuth(clientId: string): Promise<MobileSpotifyAuthStartDto> {
-    const raw = await ensureNative().beginSpotifyMobileAuth(clientId);
-    return JSON.parse(raw) as MobileSpotifyAuthStartDto;
+    return JSON.parse(
+      await ensureNative().beginSpotifyMobileAuth(clientId)
+    ) as MobileSpotifyAuthStartDto;
   },
 
   async exchangeSpotifyMobileCode(
@@ -176,43 +216,63 @@ export const LumeCore = {
     code: string,
     codeVerifier: string
   ): Promise<SpotifyTokenSet> {
-    const raw = await ensureNative().exchangeSpotifyMobileCode(
-      clientId,
-      code,
-      codeVerifier
-    );
-    return JSON.parse(raw) as SpotifyTokenSet;
+    return JSON.parse(
+      await ensureNative().exchangeSpotifyMobileCode(clientId, code, codeVerifier)
+    ) as SpotifyTokenSet;
   },
 
   async refreshSpotifyToken(
     clientId: string,
     current: SpotifyTokenSet
   ): Promise<SpotifyTokenSet> {
-    const raw = await ensureNative().refreshSpotifyToken(
-      clientId,
-      JSON.stringify(current)
-    );
-    return JSON.parse(raw) as SpotifyTokenSet;
+    return JSON.parse(
+      await ensureNative().refreshSpotifyToken(clientId, JSON.stringify(current))
+    ) as SpotifyTokenSet;
   },
 
   async syncSpotifyLibrary(accessToken: string): Promise<SpotifySyncSummaryDto> {
-    const raw = await ensureNative().syncSpotifyLibrary(accessToken);
-    return JSON.parse(raw) as SpotifySyncSummaryDto;
+    return JSON.parse(
+      await ensureNative().syncSpotifyLibrary(accessToken)
+    ) as SpotifySyncSummaryDto;
   },
 
   async importSpotifyPlaylistUrl(url: string): Promise<Playlist> {
-    const raw = await ensureNative().importSpotifyPlaylistUrl(url);
-    return JSON.parse(raw) as Playlist;
+    return JSON.parse(await ensureNative().importSpotifyPlaylistUrl(url)) as Playlist;
+  },
+
+  async importYtmPlaylistUrl(urlOrId: string): Promise<Playlist> {
+    return JSON.parse(await ensureNative().importYtmPlaylistUrl(urlOrId)) as Playlist;
+  },
+
+  async importExportifyCsv(csvText: string, playlistName: string): Promise<Playlist> {
+    return JSON.parse(
+      await ensureNative().importExportifyCsv(csvText, playlistName)
+    ) as Playlist;
+  },
+
+  async importLocalAudioFile(sourceUriOrPath: string, fileName: string): Promise<Track[]> {
+    return JSON.parse(
+      await ensureNative().importLocalAudioFile(sourceUriOrPath, fileName)
+    ) as Track[];
+  },
+
+  async listLocalTracks(): Promise<Track[]> {
+    return JSON.parse(await ensureNative().listLocalTracks()) as Track[];
+  },
+
+  async searchLocalTracks(query: string): Promise<Track[]> {
+    return JSON.parse(await ensureNative().searchLocalTracks(query)) as Track[];
   },
 
   async rematchSpotifyTrack(spotifyTrackId: string, ytVideoId: string): Promise<void> {
     await ensureNative().rematchSpotifyTrack(spotifyTrackId, ytVideoId);
   },
 
-  subscribeRemoteCommands(
-    onNext: () => void,
-    onPrev: () => void
-  ): () => void {
+  async extractPalette(artworkRef: string): Promise<DynamicPaletteDto> {
+    return JSON.parse(await ensureNative().extractPalette(artworkRef)) as DynamicPaletteDto;
+  },
+
+  subscribeRemoteCommands(onNext: () => void, onPrev: () => void): () => void {
     if (!native) return () => {};
     native.enableRemoteTrackCommands();
     const s1 = native.addListener('onRemoteNextTrack', onNext);

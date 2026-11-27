@@ -3513,6 +3513,7 @@ dependencies = [
 name = "lume-ffi"
 version = "1.0.0"
 dependencies = [
+ "image",
  "lume-core",
  "lume-providers",
  "lume-storage",

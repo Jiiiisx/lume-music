@@ -23,6 +23,8 @@ export default function PlayerModal() {
   const {
     currentTrack,
     currentStream,
+    palette,
+    likedUids,
     isPlaying,
     isBuffering,
     positionMs,
@@ -41,6 +43,8 @@ export default function PlayerModal() {
     cycleRepeat,
     toggleLikeCurrent,
     downloadOffline,
+    refreshLyrics,
+    openTrackMenu,
   } = usePlayer();
 
   const [showLyrics, setShowLyrics] = useState(false);
@@ -58,6 +62,7 @@ export default function PlayerModal() {
   }
 
   const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
+  const isLiked = likedUids.has(currentTrack.uid);
   const isOffline = offlineUids.has(currentTrack.uid);
   const isDownloading = downloadingUids.has(currentTrack.uid);
 
@@ -67,12 +72,12 @@ export default function PlayerModal() {
         <Image
           source={{ uri: currentTrack.artwork_ref }}
           style={StyleSheet.absoluteFill}
-          blurRadius={40}
+          blurRadius={44}
         />
       )}
       <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFill} />
       <LinearGradient
-        colors={['rgba(10,12,18,0.45)', 'rgba(10,12,18,0.88)', '#0A0C12']}
+        colors={[palette.bg_top + 'AA', palette.bg_mid + 'D9', palette.bg_bottom]}
         style={StyleSheet.absoluteFill}
       />
 
@@ -85,26 +90,46 @@ export default function PlayerModal() {
           <View style={styles.modeSwitch}>
             <Pressable
               onPress={() => setShowLyrics(false)}
-              style={[styles.modePill, !showLyrics && styles.modePillActive]}
+              style={[
+                styles.modePill,
+                !showLyrics && { backgroundColor: palette.accent },
+              ]}
             >
-              <Text style={styles.modePillText}>Player</Text>
+              <Text style={[styles.modePillText, !showLyrics && styles.modePillDark]}>
+                Player
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => setShowLyrics(true)}
-              style={[styles.modePill, showLyrics && styles.modePillActive]}
+              style={[
+                styles.modePill,
+                showLyrics && { backgroundColor: palette.accent },
+              ]}
             >
-              <Text style={styles.modePillText}>Lyrics</Text>
+              <Text style={[styles.modePillText, showLyrics && styles.modePillDark]}>
+                Lyrics
+              </Text>
             </Pressable>
           </View>
 
-          <Pressable
-            onPress={() => router.push('/driving')}
-            style={styles.topBtn}
-            hitSlop={10}
-            accessibilityLabel="Driving Mode"
-          >
-            <Ionicons name="car-sport" size={22} color={LumeTheme.accentBright} />
-          </Pressable>
+          <View style={styles.topRight}>
+            <Pressable
+              onPress={() => router.push('/queue')}
+              style={styles.topBtn}
+              hitSlop={8}
+              accessibilityLabel="Queue"
+            >
+              <Ionicons name="list" size={22} color="#FFFFFF" />
+            </Pressable>
+            <Pressable
+              onPress={() => router.push('/driving')}
+              style={styles.topBtn}
+              hitSlop={8}
+              accessibilityLabel="Driving Mode"
+            >
+              <Ionicons name="car-sport" size={21} color={palette.accent} />
+            </Pressable>
+          </View>
         </View>
 
         {showLyrics ? (
@@ -114,6 +139,7 @@ export default function PlayerModal() {
               loading={lyricsLoading}
               positionMs={positionMs}
               onSeekToMs={(ms) => void seekToMs(ms)}
+              onRefreshLyrics={() => void refreshLyrics()}
             />
           </View>
         ) : (
@@ -122,7 +148,7 @@ export default function PlayerModal() {
               <Image source={{ uri: currentTrack.artwork_ref }} style={styles.coverArt} />
             ) : (
               <View style={[styles.coverArt, styles.coverFallback]}>
-                <Ionicons name="musical-notes" size={76} color={LumeTheme.accentBright} />
+                <Ionicons name="musical-notes" size={76} color={palette.accent} />
               </View>
             )}
           </View>
@@ -146,11 +172,11 @@ export default function PlayerModal() {
               hitSlop={8}
             >
               {isDownloading ? (
-                <ActivityIndicator size="small" color={LumeTheme.accentBright} />
+                <ActivityIndicator size="small" color={palette.accent} />
               ) : (
                 <Ionicons
                   name={isOffline ? 'cloud-done' : 'cloud-download-outline'}
-                  size={23}
+                  size={22}
                   color={isOffline ? LumeTheme.emerald : LumeTheme.textSecondary}
                 />
               )}
@@ -162,10 +188,18 @@ export default function PlayerModal() {
               hitSlop={8}
             >
               <Ionicons
-                name={currentTrack.is_liked ? 'heart' : 'heart-outline'}
-                size={24}
-                color={currentTrack.is_liked ? LumeTheme.rose : LumeTheme.textPrimary}
+                name={isLiked ? 'heart' : 'heart-outline'}
+                size={23}
+                color={isLiked ? LumeTheme.rose : LumeTheme.textPrimary}
               />
+            </Pressable>
+
+            <Pressable
+              onPress={() => openTrackMenu(currentTrack)}
+              style={styles.metaBtn}
+              hitSlop={8}
+            >
+              <Ionicons name="ellipsis-horizontal" size={22} color="#FFFFFF" />
             </Pressable>
           </View>
 
@@ -194,7 +228,7 @@ export default function PlayerModal() {
               <Ionicons
                 name="shuffle"
                 size={22}
-                color={shuffle ? LumeTheme.accentBright : LumeTheme.textMuted}
+                color={shuffle ? palette.accent : LumeTheme.textMuted}
               />
             </Pressable>
 
@@ -230,9 +264,11 @@ export default function PlayerModal() {
               <Ionicons
                 name={repeat === 'one' ? 'repeat-outline' : 'repeat'}
                 size={22}
-                color={repeat !== 'off' ? LumeTheme.accentBright : LumeTheme.textMuted}
+                color={repeat !== 'off' ? palette.accent : LumeTheme.textMuted}
               />
-              {repeat === 'one' && <Text style={styles.repeatOne}>1</Text>}
+              {repeat === 'one' && (
+                <Text style={[styles.repeatOne, { color: palette.accent }]}>1</Text>
+              )}
             </Pressable>
           </View>
         </View>
@@ -275,18 +311,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 8,
   },
+  topRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   topBtn: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     alignItems: 'center',
     justifyContent: 'center',
   },
   modeSwitch: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     borderRadius: 999,
     padding: 3,
   },
@@ -295,13 +335,14 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 999,
   },
-  modePillActive: {
-    backgroundColor: LumeTheme.accent,
-  },
   modePillText: {
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 13,
+  },
+  modePillDark: {
+    color: '#0A0C12',
+    fontWeight: '800',
   },
   artContainer: {
     flex: 1,
@@ -330,7 +371,7 @@ const styles = StyleSheet.create({
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 4,
     marginBottom: 14,
   },
   trackTitle: {
@@ -344,7 +385,7 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   metaBtn: {
-    width: 38,
+    width: 34,
     height: 38,
     alignItems: 'center',
     justifyContent: 'center',
@@ -355,7 +396,7 @@ const styles = StyleSheet.create({
   seekTrack: {
     height: 5,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.20)',
+    backgroundColor: 'rgba(255,255,255,0.22)',
     overflow: 'hidden',
   },
   seekFill: {
@@ -394,7 +435,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 6,
     right: 8,
-    color: LumeTheme.accentBright,
     fontSize: 10,
     fontWeight: '900',
   },

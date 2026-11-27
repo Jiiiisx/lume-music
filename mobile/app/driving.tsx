@@ -25,6 +25,7 @@ export default function DrivingModeScreen() {
   const {
     currentTrack,
     currentStream,
+    likedUids,
     isPlaying,
     isBuffering,
     positionMs,
@@ -34,6 +35,7 @@ export default function DrivingModeScreen() {
     previousTrack,
     toggleLikeCurrent,
   } = usePlayer();
+  const isLiked = currentTrack ? likedUids.has(currentTrack.uid) : false;
 
   const swipeGesture = Gesture.Pan()
     .runOnJS(true)
@@ -141,12 +143,12 @@ export default function DrivingModeScreen() {
             style={styles.likeWideBtn}
           >
             <Ionicons
-              name={currentTrack.is_liked ? 'heart' : 'heart-outline'}
+              name={isLiked ? 'heart' : 'heart-outline'}
               size={24}
-              color={currentTrack.is_liked ? LumeTheme.rose : '#FFFFFF'}
+              color={isLiked ? LumeTheme.rose : '#FFFFFF'}
             />
             <Text style={styles.likeWideText}>
-              {currentTrack.is_liked ? 'Disukai' : 'Sukai Lagu Ini'}
+              {isLiked ? 'Disukai' : 'Sukai Lagu Ini'}
             </Text>
           </Pressable>
         )}

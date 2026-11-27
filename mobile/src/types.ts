@@ -35,6 +35,16 @@ export interface ArtistSummary {
   subtitle: string | null;
 }
 
+export interface AlbumSummary {
+  id: string;
+  source: 'Spotify' | 'YouTubeMusic';
+  title: string;
+  artist_name: string;
+  year: string | null;
+  album_type: string | null;
+  cover_url: string | null;
+}
+
 export interface RemotePlaylistSummary {
   id: string;
   source: 'Spotify' | 'YouTubeMusic';
@@ -44,11 +54,48 @@ export interface RemotePlaylistSummary {
   cover_url: string | null;
 }
 
+export interface ArtistProfile {
+  id: string;
+  source: 'Spotify' | 'YouTubeMusic';
+  name: string;
+  avatar_url: string | null;
+  description: string | null;
+  subscriber_label: string | null;
+  top_tracks: Track[];
+  albums: AlbumSummary[];
+  singles: AlbumSummary[];
+  playlists: RemotePlaylistSummary[];
+}
+
+export interface AlbumDetail {
+  id: string;
+  source: 'Spotify' | 'YouTubeMusic';
+  title: string;
+  artist_name: string;
+  artist_id: string | null;
+  year: string | null;
+  cover_url: string | null;
+  tracks: Track[];
+}
+
+export interface RemotePlaylistDetail {
+  id: string;
+  source: 'Spotify' | 'YouTubeMusic';
+  name: string;
+  owner: string | null;
+  cover_url: string | null;
+  source_url: string;
+  tracks: Track[];
+  is_truncated_embed: boolean;
+}
+
 export interface YtmCatalogSearchResult {
   tracks: Track[];
   artists: ArtistSummary[];
   playlists: RemotePlaylistSummary[];
 }
+
+export type SpotifyCatalogSearchResult = YtmCatalogSearchResult;
 
 export interface LyricsWord {
   start_ms: number;
@@ -128,6 +175,22 @@ export interface HealthCheckDto {
   offline_storage_bytes: number;
 }
 
+export interface DynamicPaletteDto {
+  bg_top: string;
+  bg_mid: string;
+  bg_bottom: string;
+  accent: string;
+  accent_soft: string;
+}
+
+export const DEFAULT_PALETTE: DynamicPaletteDto = {
+  bg_top: '#181C2E',
+  bg_mid: '#0E111B',
+  bg_bottom: '#0A0C12',
+  accent: '#818CF8',
+  accent_soft: 'rgba(99, 102, 241, 0.22)',
+};
+
 export type RepeatMode = 'off' | 'all' | 'one';
 
 export function trackArtistDisplay(track: Track): string {
@@ -138,6 +201,17 @@ export function trackSourceBadge(track: Track): 'SP' | 'YTM' | 'LOCAL' {
   if ('Spotify' in track.source) return 'SP';
   if ('YouTubeMusic' in track.source) return 'YTM';
   return 'LOCAL';
+}
+
+export function playlistOriginBadge(origin: PlaylistOrigin): string {
+  if (origin === 'SpotifySynced') return 'SP';
+  if (origin === 'LocalCustom') return 'LOCAL';
+  if ('SpotifyImported' in origin) return 'IMP';
+  return 'YTM';
+}
+
+export function isPlaylistEditable(origin: PlaylistOrigin): boolean {
+  return origin !== 'SpotifySynced';
 }
 
 export function formatDurationMs(ms: number): string {
