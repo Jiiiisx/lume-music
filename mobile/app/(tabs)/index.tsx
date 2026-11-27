@@ -10,7 +10,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { LumeCore } from '../../modules/lume-core';
 import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
@@ -130,36 +129,6 @@ export default function HomeScreen() {
               <Text style={styles.errorText}>{errorMessage}</Text>
             </Pressable>
           )}
-
-          <Pressable
-            onPress={() => {
-              if (offlineEntries.length > 0) {
-                const tracks = offlineEntries.map((e) => e.track);
-                void playTrack(tracks[0], tracks);
-              }
-              router.push('/driving');
-            }}
-          >
-            <LinearGradient
-              colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.05)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.heroCard}
-            >
-              <View style={[styles.heroIcon, { backgroundColor: palette.accent }]}>
-                <Ionicons name="car-sport" size={24} color="#0A0C12" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.heroTitle}>Mode Berkendara (Standalone)</Text>
-                <Text style={styles.heroDesc}>
-                  {offlineEntries.length > 0
-                    ? `Putar ${offlineEntries.length} lagu offline siap jalan tanpa sinyal + kontrol Bluetooth.`
-                    : 'Tombol ekstra besar, swipe ganti lagu, & kontrol penuh Lock Screen / Bluetooth.'}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={LumeTheme.textPrimary} />
-            </LinearGradient>
-          </Pressable>
 
           {recent.length > 0 && (
             <View style={styles.section}>
@@ -319,34 +288,6 @@ const styles = StyleSheet.create({
     color: '#FECDD3',
     fontSize: 13,
     flex: 1,
-  },
-  heroCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    padding: 15,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    marginBottom: 22,
-  },
-  heroIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  heroTitle: {
-    color: LumeTheme.textPrimary,
-    fontSize: 15.5,
-    fontWeight: '700',
-  },
-  heroDesc: {
-    color: LumeTheme.textSecondary,
-    fontSize: 12.5,
-    marginTop: 3,
-    lineHeight: 17,
   },
   section: {
     marginBottom: 22,
