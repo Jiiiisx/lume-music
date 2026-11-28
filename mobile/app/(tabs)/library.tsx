@@ -63,6 +63,8 @@ export default function LibraryScreen() {
   const [activeView, setActiveView] = useState<'main' | 'liked' | 'local' | 'playlist'>('main');
   const [sortMode, setSortMode] = useState<SortMode>('custom');
   const enrichRunRef = useRef(0);
+  const pickerInFlightRef = useRef(false);
+  const pendingImportActionRef = useRef<'csv' | 'audio' | null>(null);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -188,11 +190,12 @@ export default function LibraryScreen() {
     }
   };
 
-  const handleImportCsv = async () => {
-    setShowImportModal(false);
+  const runImportCsvPicker = async () => {
+    if (pickerInFlightRef.current) return;
+    pickerInFlightRef.current = true;
     try {
       const picked = await DocumentPicker.getDocumentAsync({
-        type: ['text/csv', 'text/comma-separated-values', 'public.comma-separated-values-text', '*/*'],
+        type: ['text/csv', 'text/comma-separated-values', 'text/plain', '*/*'],
         multiple: true,
         copyToCacheDirectory: true,
       });
@@ -221,15 +224,17 @@ export default function LibraryScreen() {
     } catch (err) {
       Alert.alert('Import CSV Gagal', err instanceof Error ? err.message : String(err));
     } finally {
+      pickerInFlightRef.current = false;
       setBusyMessage(null);
     }
   };
 
-  const handleImportLocalAudio = async () => {
-    setShowImportModal(false);
+  const runImportLocalAudioPicker = async () => {
+    if (pickerInFlightRef.current) return;
+    pickerInFlightRef.current = true;
     try {
       const picked = await DocumentPicker.getDocumentAsync({
-        type: ['audio/*', 'public.audio'],
+        type: ['audio/*'],
         multiple: true,
         copyToCacheDirectory: true,
       });
@@ -244,7 +249,46 @@ export default function LibraryScreen() {
     } catch (err) {
       Alert.alert('Import Audio Gagal', err instanceof Error ? err.message : String(err));
     } finally {
+      pickerInFlightRef.current = false;
       setBusyMessage(null);
+    }
+  };
+
+  const flushPendingImportAction = () => {
+    const action = pendingImportActionRef.current;
+    if (!action) return;
+    pendingImportActionRef.current = null;
+    // Give UIKit one runloop turn after Modal dismissal before presenting UIDocumentPickerViewController.
+    setTimeout(() => {
+      if (action === 'csv') {
+        void runImportCsvPicker();
+      } else {
+        void runImportLocalAudioPicker();
+      }
+    }, 80);
+  };
+
+  const handleImportCsv = () => {
+    if (showImportModal) {
+      pendingImportActionRef.current = 'csv';
+      setShowImportModal(false);
+      if (Platform.OS !== 'ios') {
+        setTimeout(flushPendingImportAction, 350);
+      }
+    } else {
+      void runImportCsvPicker();
+    }
+  };
+
+  const handleImportLocalAudio = () => {
+    if (showImportModal) {
+      pendingImportActionRef.current = 'audio';
+      setShowImportModal(false);
+      if (Platform.OS !== 'ios') {
+        setTimeout(flushPendingImportAction, 350);
+      }
+    } else {
+      void runImportLocalAudioPicker();
     }
   };
 
@@ -735,6 +779,7 @@ export default function LibraryScreen() {
           visible={showImportModal}
           transparent
           animationType="slide"
+          onDismiss={flushPendingImportAction}
           onRequestClose={() => setShowImportModal(false)}
         >
           <KeyboardAvoidingView
