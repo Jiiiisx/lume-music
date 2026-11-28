@@ -3,26 +3,32 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useRouter } from 'expo-router';
-import { usePlayer } from '../context/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../context/PlayerContext';
 import { LumeTheme } from '../theme';
 import { trackArtistDisplay } from '../types';
 
-export function MiniPlayer() {
+const MiniPlayerProgressBar = React.memo(function MiniPlayerProgressBar() {
+  const { positionMs, durationMs } = usePlaybackProgress();
+  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
+  return (
+    <View style={styles.progressTrack}>
+      <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+    </View>
+  );
+});
+
+export const MiniPlayer = React.memo(function MiniPlayer() {
   const router = useRouter();
   const {
     currentTrack,
     currentStream,
     isPlaying,
     isBuffering,
-    positionMs,
-    durationMs,
     togglePlayPause,
     nextTrack,
   } = usePlayer();
 
   if (!currentTrack) return null;
-
-  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
 
   return (
     <Pressable
@@ -102,14 +108,12 @@ export function MiniPlayer() {
             </Pressable>
           </View>
 
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
-          </View>
+          <MiniPlayerProgressBar />
         </View>
       </BlurView>
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   outer: {

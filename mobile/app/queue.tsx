@@ -1,5 +1,5 @@
 import React from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -70,80 +70,84 @@ export default function QueueModal() {
           </Pressable>
         </View>
 
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          {queue.length === 0 ? (
-            <Text style={styles.empty}>Antrean masih kosong.</Text>
-          ) : (
-            queue.map((track, idx) => {
-              const active = idx === queueIndex;
-              return (
-                <Pressable
-                  key={`${track.uid}-${idx}`}
-                  onPress={() => void jumpToQueueIndex(idx)}
-                  style={[styles.row, active && styles.activeRow]}
-                >
-                  <Text style={[styles.idx, active && styles.idxActive]}>
-                    {active ? '▶' : String(idx + 1).padStart(2, '0')}
-                  </Text>
-                  {track.artwork_ref ? (
-                    <Image source={{ uri: track.artwork_ref }} style={styles.art} />
-                  ) : (
-                    <View style={[styles.art, styles.artFallback]}>
-                      <Ionicons name="musical-note" size={16} color="rgba(255,255,255,0.7)" />
-                    </View>
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={[styles.trackTitle, active && styles.trackTitleActive]}
-                      numberOfLines={1}
-                    >
-                      {track.title}
-                    </Text>
-                    <Text style={styles.trackArtist} numberOfLines={1}>
-                      {trackArtistDisplay(track)} • {formatDurationMs(track.duration_ms)}
-                    </Text>
+        <FlatList
+          data={queue}
+          keyExtractor={(track, idx) => `${track.uid}-${idx}`}
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+          initialNumToRender={16}
+          maxToRenderPerBatch={14}
+          windowSize={7}
+          removeClippedSubviews
+          ListEmptyComponent={<Text style={styles.empty}>Antrean masih kosong.</Text>}
+          renderItem={({ item: track, index: idx }) => {
+            const active = idx === queueIndex;
+            return (
+              <Pressable
+                onPress={() => void jumpToQueueIndex(idx)}
+                style={[styles.row, active && styles.activeRow]}
+              >
+                <Text style={[styles.idx, active && styles.idxActive]}>
+                  {active ? '▶' : String(idx + 1).padStart(2, '0')}
+                </Text>
+                {track.artwork_ref ? (
+                  <Image source={{ uri: track.artwork_ref }} style={styles.art} />
+                ) : (
+                  <View style={[styles.art, styles.artFallback]}>
+                    <Ionicons name="musical-note" size={16} color="rgba(255,255,255,0.7)" />
                   </View>
-                  {!active && (
-                    <View style={styles.rowTools}>
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          if (idx > 0) reorderQueue(idx, idx - 1);
-                        }}
-                        disabled={idx === 0}
-                        hitSlop={6}
-                        style={[styles.toolBtn, idx === 0 && styles.toolDisabled]}
-                      >
-                        <Ionicons name="chevron-up" size={16} color="#FFFFFF" />
-                      </Pressable>
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          if (idx + 1 < queue.length) reorderQueue(idx, idx + 1);
-                        }}
-                        disabled={idx + 1 >= queue.length}
-                        hitSlop={6}
-                        style={[styles.toolBtn, idx + 1 >= queue.length && styles.toolDisabled]}
-                      >
-                        <Ionicons name="chevron-down" size={16} color="#FFFFFF" />
-                      </Pressable>
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          removeFromQueue(idx);
-                        }}
-                        hitSlop={6}
-                        style={styles.toolBtn}
-                      >
-                        <Ionicons name="close" size={16} color={LumeTheme.rose} />
-                      </Pressable>
-                    </View>
-                  )}
-                </Pressable>
-              );
-            })
-          )}
-        </ScrollView>
+                )}
+                <View style={{ flex: 1 }}>
+                  <Text
+                    style={[styles.trackTitle, active && styles.trackTitleActive]}
+                    numberOfLines={1}
+                  >
+                    {track.title}
+                  </Text>
+                  <Text style={styles.trackArtist} numberOfLines={1}>
+                    {trackArtistDisplay(track)} • {formatDurationMs(track.duration_ms)}
+                  </Text>
+                </View>
+                {!active && (
+                  <View style={styles.rowTools}>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        if (idx > 0) reorderQueue(idx, idx - 1);
+                      }}
+                      disabled={idx === 0}
+                      hitSlop={6}
+                      style={[styles.toolBtn, idx === 0 && styles.toolDisabled]}
+                    >
+                      <Ionicons name="chevron-up" size={16} color="#FFFFFF" />
+                    </Pressable>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        if (idx + 1 < queue.length) reorderQueue(idx, idx + 1);
+                      }}
+                      disabled={idx + 1 >= queue.length}
+                      hitSlop={6}
+                      style={[styles.toolBtn, idx + 1 >= queue.length && styles.toolDisabled]}
+                    >
+                      <Ionicons name="chevron-down" size={16} color="#FFFFFF" />
+                    </Pressable>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        removeFromQueue(idx);
+                      }}
+                      hitSlop={6}
+                      style={styles.toolBtn}
+                    >
+                      <Ionicons name="close" size={16} color={LumeTheme.rose} />
+                    </Pressable>
+                  </View>
+                )}
+              </Pressable>
+            );
+          }}
+        />
       </SafeAreaView>
     </AmbientBackdrop>
   );

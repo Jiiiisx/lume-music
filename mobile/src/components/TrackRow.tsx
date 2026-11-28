@@ -23,7 +23,7 @@ interface TrackRowProps {
   onMorePress?: () => void;
 }
 
-export function TrackRow({
+export const TrackRow = React.memo(function TrackRow({
   track,
   rank,
   isActive,
@@ -170,7 +170,7 @@ export function TrackRow({
       </View>
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   row: {

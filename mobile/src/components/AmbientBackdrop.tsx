@@ -1,10 +1,13 @@
 import React from 'react';
 import { Image, StyleSheet, View } from 'react-native';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { usePlayer } from '../context/PlayerContext';
 
-export function AmbientBackdrop({ children }: { children: React.ReactNode }) {
+export const AmbientBackdrop = React.memo(function AmbientBackdrop({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const { currentTrack, palette, dynamicThemeEnabled } = usePlayer();
   const artworkUri = dynamicThemeEnabled ? currentTrack?.artwork_ref : null;
 
@@ -17,17 +20,16 @@ export function AmbientBackdrop({ children }: { children: React.ReactNode }) {
         style={StyleSheet.absoluteFill}
       />
 
-      {/* Desktop-style luminous blurred album art layer */}
+      {/* Desktop-style luminous blurred album art (pre-blurred by iOS CoreImage on decode;
+          avoids stacking a redundant full-screen live GPU BlurView pass on every frame) */}
       {artworkUri ? (
-        <>
-          <Image
-            source={{ uri: artworkUri }}
-            style={styles.artworkBackdrop}
-            blurRadius={90}
-            resizeMode="cover"
-          />
-          <BlurView intensity={55} tint="dark" style={StyleSheet.absoluteFill} />
-        </>
+        <Image
+          source={{ uri: artworkUri }}
+          style={styles.artworkBackdrop}
+          blurRadius={72}
+          resizeMode="cover"
+          fadeDuration={0}
+        />
       ) : (
         <LinearGradient
           colors={['rgba(99, 102, 241, 0.20)', 'rgba(139, 92, 246, 0.08)', 'transparent']}
@@ -39,9 +41,9 @@ export function AmbientBackdrop({ children }: { children: React.ReactNode }) {
       {/* Smooth dark crystal scrim so text & glass cards stay razor-sharp */}
       <LinearGradient
         colors={[
-          'rgba(8, 10, 16, 0.46)',
-          'rgba(8, 10, 16, 0.72)',
-          'rgba(7, 9, 14, 0.94)',
+          'rgba(8, 10, 16, 0.48)',
+          'rgba(8, 10, 16, 0.74)',
+          'rgba(7, 9, 14, 0.95)',
         ]}
         locations={[0, 0.52, 1]}
         style={StyleSheet.absoluteFill}
@@ -50,7 +52,7 @@ export function AmbientBackdrop({ children }: { children: React.ReactNode }) {
       {children}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   root: {
@@ -63,7 +65,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     left: 0,
-    opacity: 0.48,
+    opacity: 0.44,
     transform: [{ scale: 1.18 }],
   },
 });

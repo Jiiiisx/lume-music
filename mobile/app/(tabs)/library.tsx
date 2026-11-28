@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -69,6 +70,7 @@ export default function LibraryScreen() {
   const [reorderingPlaylists, setReorderingPlaylists] = useState(false);
   const [playlistOrder, setPlaylistOrder] = useState<string[]>([]);
   const enrichRunRef = useRef(0);
+  const lastLibraryLoadRef = useRef(0);
   const pickerInFlightRef = useRef(false);
   const pendingImportActionRef = useRef<'csv' | 'audio' | null>(null);
 
@@ -80,7 +82,10 @@ export default function LibraryScreen() {
   const [renaming, setRenaming] = useState(false);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
 
-  const loadLibrary = useCallback(async () => {
+  const loadLibrary = useCallback(async (force = true) => {
+    const now = Date.now();
+    if (!force && now - lastLibraryLoadRef.current < 3000) return;
+    lastLibraryLoadRef.current = now;
     await refreshLibraryState();
     try {
       const savedOrder = await SecureStore.getItemAsync(KEY_PLAYLIST_ORDER);
@@ -104,7 +109,7 @@ export default function LibraryScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadLibrary();
+      void loadLibrary(false);
     }, [loadLibrary])
   );
 
@@ -539,124 +544,136 @@ export default function LibraryScreen() {
             </View>
           </View>
 
-          <ScrollView contentContainerStyle={styles.detailScroll} showsVerticalScrollIndicator={false}>
-            {/* Desktop-inspired Playlist Hero Header */}
-            <View style={styles.detailHero}>
-              {renaming ? (
-                <View style={styles.inlineForm}>
-                  <TextInput
-                    value={renameText}
-                    onChangeText={setRenameText}
-                    style={styles.input}
-                    placeholder="Nama playlist baru"
-                    placeholderTextColor={LumeTheme.textMuted}
-                  />
-                  <Pressable
-                    onPress={() => void handleRenamePlaylist()}
-                    style={styles.crystalPrimaryBtn}
-                  >
-                    <Text style={styles.btnTextDark}>Simpan</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <>
-                  <Text style={styles.detailTitle}>{activeTitle}</Text>
-                  <Text style={styles.detailSub}>
-                    {sortedDetailTracks.length} lagu
-                    {activeView === 'playlist' && selectedPlaylist
-                      ? ` • ${playlistOriginBadge(selectedPlaylist.origin)}`
-                      : ''}
-                  </Text>
-                </>
-              )}
+          <FlatList
+            data={reorderingTracks && canEdit ? selectedTracks : sortedDetailTracks}
+            keyExtractor={(item, idx) => `${item.uid}-${idx}`}
+            contentContainerStyle={styles.detailScroll}
+            showsVerticalScrollIndicator={false}
+            initialNumToRender={14}
+            maxToRenderPerBatch={12}
+            windowSize={7}
+            removeClippedSubviews
+            ListHeaderComponent={
+              <>
+                {/* Desktop-inspired Playlist Hero Header */}
+                <View style={styles.detailHero}>
+                  {renaming ? (
+                    <View style={styles.inlineForm}>
+                      <TextInput
+                        value={renameText}
+                        onChangeText={setRenameText}
+                        style={styles.input}
+                        placeholder="Nama playlist baru"
+                        placeholderTextColor={LumeTheme.textMuted}
+                      />
+                      <Pressable
+                        onPress={() => void handleRenamePlaylist()}
+                        style={styles.crystalPrimaryBtn}
+                      >
+                        <Text style={styles.btnTextDark}>Simpan</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <>
+                      <Text style={styles.detailTitle}>{activeTitle}</Text>
+                      <Text style={styles.detailSub}>
+                        {sortedDetailTracks.length} lagu
+                        {activeView === 'playlist' && selectedPlaylist
+                          ? ` • ${playlistOriginBadge(selectedPlaylist.origin)}`
+                          : ''}
+                      </Text>
+                    </>
+                  )}
 
-              {sortedDetailTracks.length > 0 && (
-                <View style={styles.heroBtnRow}>
-                  <Pressable
-                    onPress={() => void playDetailAll(false)}
-                    style={styles.heroPlayBtn}
-                  >
-                    <Ionicons name="play" size={16} color={LumeTheme.inkDark} />
-                    <Text style={styles.heroPlayText}>Putar</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => void playDetailAll(true)}
-                    style={styles.heroGlassBtn}
-                  >
-                    <Ionicons name="shuffle" size={16} color="#FFFFFF" />
-                    <Text style={styles.heroGlassText}>Acak</Text>
-                  </Pressable>
-                  {activeView !== 'local' && (
-                    <Pressable
-                      onPress={() => handleDownloadPlaylist(activeTitle, sortedDetailTracks)}
-                      style={styles.heroGlassBtn}
-                    >
-                      <Ionicons name="cloud-download-outline" size={16} color="#FFFFFF" />
-                      <Text style={styles.heroGlassText}>Offline</Text>
-                    </Pressable>
+                  {sortedDetailTracks.length > 0 && (
+                    <View style={styles.heroBtnRow}>
+                      <Pressable
+                        onPress={() => void playDetailAll(false)}
+                        style={styles.heroPlayBtn}
+                      >
+                        <Ionicons name="play" size={16} color={LumeTheme.inkDark} />
+                        <Text style={styles.heroPlayText}>Putar</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => void playDetailAll(true)}
+                        style={styles.heroGlassBtn}
+                      >
+                        <Ionicons name="shuffle" size={16} color="#FFFFFF" />
+                        <Text style={styles.heroGlassText}>Acak</Text>
+                      </Pressable>
+                      {activeView !== 'local' && (
+                        <Pressable
+                          onPress={() => handleDownloadPlaylist(activeTitle, sortedDetailTracks)}
+                          style={styles.heroGlassBtn}
+                        >
+                          <Ionicons name="cloud-download-outline" size={16} color="#FFFFFF" />
+                          <Text style={styles.heroGlassText}>Offline</Text>
+                        </Pressable>
+                      )}
+                    </View>
                   )}
                 </View>
-              )}
-            </View>
 
-            {reorderingTracks && canEdit ? (
-              <View style={styles.reorderBanner}>
-                <Ionicons name="swap-vertical" size={16} color="#FFFFFF" />
-                <Text style={styles.reorderBannerText}>
-                  Geser naik/turun untuk mengatur urutan lagu
-                </Text>
-                <Pressable
-                  onPress={() => setReorderingTracks(false)}
-                  style={styles.reorderDoneBtn}
-                >
-                  <Text style={styles.reorderDoneText}>Selesai</Text>
-                </Pressable>
-              </View>
-            ) : (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ flexGrow: 0 }}
-                contentContainerStyle={styles.sortRow}
-              >
-                {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
-                  <Pressable
-                    key={mode}
-                    onPress={() => setSortMode(mode)}
-                    style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
-                  >
-                    <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
-                      {mode === 'custom'
-                        ? 'Urutan Asli'
-                        : mode === 'title'
-                          ? 'Judul'
-                          : mode === 'artist'
-                            ? 'Artis'
-                            : 'Durasi'}
+                {reorderingTracks && canEdit ? (
+                  <View style={styles.reorderBanner}>
+                    <Ionicons name="swap-vertical" size={16} color="#FFFFFF" />
+                    <Text style={styles.reorderBannerText}>
+                      Geser naik/turun untuk mengatur urutan lagu
                     </Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
+                    <Pressable
+                      onPress={() => setReorderingTracks(false)}
+                      style={styles.reorderDoneBtn}
+                    >
+                      <Text style={styles.reorderDoneText}>Selesai</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={{ flexGrow: 0 }}
+                    contentContainerStyle={styles.sortRow}
+                  >
+                    {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
+                      <Pressable
+                        key={mode}
+                        onPress={() => setSortMode(mode)}
+                        style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
+                      >
+                        <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
+                          {mode === 'custom'
+                            ? 'Urutan Asli'
+                            : mode === 'title'
+                              ? 'Judul'
+                              : mode === 'artist'
+                                ? 'Artis'
+                                : 'Durasi'}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )}
 
-            <BatchDownloadBanner />
+                <BatchDownloadBanner />
 
-            {busyMessage && (
-              <View style={styles.busyRow}>
-                <ActivityIndicator size="small" color="#FFFFFF" />
-                <Text style={styles.busyText}>{busyMessage}</Text>
-              </View>
-            )}
-
-            {sortedDetailTracks.length === 0 ? (
-              <View style={styles.emptyBox}>
+                {busyMessage && (
+                  <View style={styles.busyRow}>
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                    <Text style={styles.busyText}>{busyMessage}</Text>
+                  </View>
+                )}
+              </>
+            }
+            ListEmptyComponent={
+              <View style={[styles.emptyBox, { marginHorizontal: 16 }]}>
                 <Ionicons name="musical-notes-outline" size={32} color={LumeTheme.textMuted} />
                 <Text style={styles.emptyDetail}>Belum ada lagu di sini.</Text>
               </View>
-            ) : reorderingTracks && canEdit ? (
-              <View style={styles.glassListBox}>
-                {selectedTracks.map((track, idx) => (
-                  <View key={`${track.uid}-${idx}`} style={styles.reorderRow}>
+            }
+            renderItem={({ item: track, index: idx }) =>
+              reorderingTracks && canEdit ? (
+                <View style={styles.detailRowPad}>
+                  <View style={styles.reorderRow}>
                     <Text style={styles.reorderRank}>{String(idx + 1).padStart(2, '0')}</Text>
                     {track.artwork_ref ? (
                       <Image source={{ uri: track.artwork_ref }} style={styles.reorderArt} />
@@ -702,13 +719,10 @@ export default function LibraryScreen() {
                       </Pressable>
                     </View>
                   </View>
-                ))}
-              </View>
-            ) : (
-              <View style={styles.glassListBox}>
-                {sortedDetailTracks.map((track, idx) => (
+                </View>
+              ) : (
+                <View style={styles.detailRowPad}>
                   <TrackRow
-                    key={track.uid}
                     track={track}
                     rank={idx + 1}
                     isActive={currentTrack?.uid === track.uid}
@@ -720,10 +734,10 @@ export default function LibraryScreen() {
                     }
                     onLikePress={() => void toggleLikeTrack(track)}
                   />
-                ))}
-              </View>
-            )}
-          </ScrollView>
+                </View>
+              )
+            }
+          />
         </SafeAreaView>
       </AmbientBackdrop>
     );
@@ -1396,6 +1410,9 @@ const styles = StyleSheet.create({
   },
   detailScroll: {
     paddingBottom: 170,
+  },
+  detailRowPad: {
+    paddingHorizontal: 14,
   },
   detailHero: {
     paddingHorizontal: 18,

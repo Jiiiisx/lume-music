@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -47,16 +47,30 @@ export default function HomeScreen() {
   const [recent, setRecent] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const lastHomeLoadRef = useRef<{ time: number; indonesia: boolean }>({
+    time: 0,
+    indonesia: true,
+  });
 
   const loadHome = useCallback(
     async (forceRefresh = false) => {
       if (!LumeCore.isAvailable()) return;
+      const now = Date.now();
+      if (
+        !forceRefresh &&
+        charts.length > 0 &&
+        lastHomeLoadRef.current.indonesia === indonesia &&
+        now - lastHomeLoadRef.current.time < 5000
+      ) {
+        return;
+      }
       if (!forceRefresh && charts.length === 0) setLoading(true);
       try {
         const [rec, chartTracks] = await Promise.all([
           LumeCore.listRecentTracks(12),
           LumeCore.getCharts(indonesia, 25, forceRefresh),
         ]);
+        lastHomeLoadRef.current = { time: Date.now(), indonesia };
         setRecent(rec);
         setCharts(chartTracks);
         void refreshLibraryState();

@@ -6,6 +6,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
@@ -24,6 +25,45 @@ import {
 } from '../types';
 
 const KEY_DYNAMIC_THEME = 'lume_dynamic_theme_enabled';
+
+export interface PlaybackProgressSnapshot {
+  positionMs: number;
+  durationMs: number;
+}
+
+const progressStore = {
+  snapshot: { positionMs: 0, durationMs: 0 } as PlaybackProgressSnapshot,
+  listeners: new Set<() => void>(),
+};
+
+function publishProgress(positionMs: number, durationMs: number): void {
+  const prev = progressStore.snapshot;
+  if (prev.positionMs === positionMs && prev.durationMs === durationMs) {
+    return;
+  }
+  progressStore.snapshot = { positionMs, durationMs };
+  progressStore.listeners.forEach((listener) => listener());
+}
+
+function subscribeProgress(listener: () => void): () => void {
+  progressStore.listeners.add(listener);
+  return () => {
+    progressStore.listeners.delete(listener);
+  };
+}
+
+function getProgressSnapshot(): PlaybackProgressSnapshot {
+  return progressStore.snapshot;
+}
+
+/**
+ * Isolated 20Hz playback-progress hook backed by `useSyncExternalStore`.
+ * Only progress bars & synced lyrics subscribe to this — keeping every other
+ * screen (Home, Library, Explore, Offline, TrackRow) at 0 renders/sec during playback.
+ */
+export function usePlaybackProgress(): PlaybackProgressSnapshot {
+  return useSyncExternalStore(subscribeProgress, getProgressSnapshot, getProgressSnapshot);
+}
 
 export interface BatchDownloadState {
   playlistName: string;
@@ -65,8 +105,6 @@ interface PlayerContextValue {
   queueIndex: number;
   isPlaying: boolean;
   isBuffering: boolean;
-  positionMs: number;
-  durationMs: number;
   shuffle: boolean;
   repeat: RepeatMode;
   lyrics: LyricsData | null;
@@ -130,8 +168,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [currentStream, setCurrentStream] = useState<PlayableStreamDto | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [positionMs, setPositionMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('all');
   const [lyrics, setLyrics] = useState<LyricsData | null>(null);
@@ -154,7 +190,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const queueIndexRef = useRef(queueIndex);
   const shuffleRef = useRef(shuffle);
   const repeatRef = useRef(repeat);
-  const positionMsRef = useRef(positionMs);
+  const isPlayingRef = useRef(isPlaying);
+  const isBufferingRef = useRef(isBuffering);
   const currentTrackRef = useRef(currentTrack);
   const effectiveDurationRef = useRef(0);
   const dynamicThemeEnabledRef = useRef(dynamicThemeEnabled);
@@ -163,7 +200,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   queueIndexRef.current = queueIndex;
   shuffleRef.current = shuffle;
   repeatRef.current = repeat;
-  positionMsRef.current = positionMs;
+  isPlayingRef.current = isPlaying;
+  isBufferingRef.current = isBuffering;
   currentTrackRef.current = currentTrack;
   dynamicThemeEnabledRef.current = dynamicThemeEnabled;
 
@@ -245,9 +283,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setCurrentTrack(track);
       currentTrackRef.current = track;
       setIsBuffering(true);
-      setPositionMs(0);
-      setDurationMs(track.duration_ms);
+      isBufferingRef.current = true;
       effectiveDurationRef.current = track.duration_ms;
+      publishProgress(0, track.duration_ms);
       setLyrics(null);
 
       if (newQueue) {
@@ -379,7 +417,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (player) {
           finishedHandledForGenRef.current = -1;
           await player.seekTo(0);
-          setPositionMs(0);
+          publishProgress(0, effectiveDurationRef.current);
           player.play();
           return;
         }
@@ -421,9 +459,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const list = queueRef.current;
     if (list.length === 0) return;
 
-    if (positionMsRef.current > 3000 && playerRef.current) {
+    if (progressStore.snapshot.positionMs > 3000 && playerRef.current) {
       await playerRef.current.seekTo(0);
-      setPositionMs(0);
+      publishProgress(0, effectiveDurationRef.current);
       return;
     }
 
@@ -463,8 +501,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const statusSub = player.addListener('playbackStatusUpdate', (status) => {
       if (!mounted) return;
-      setIsPlaying(status.playing);
-      setIsBuffering(status.isBuffering);
+      if (isPlayingRef.current !== status.playing) {
+        isPlayingRef.current = status.playing;
+        setIsPlaying(status.playing);
+      }
+      if (isBufferingRef.current !== status.isBuffering) {
+        isBufferingRef.current = status.isBuffering;
+        setIsBuffering(status.isBuffering);
+      }
 
       const reportedPosMs = Math.round((status.currentTime || 0) * 1000);
       const trackMetaDurationMs = currentTrackRef.current?.duration_ms ?? 0;
@@ -488,12 +532,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       if (effectiveDur > 0) {
         effectiveDurationRef.current = effectiveDur;
-        setDurationMs(effectiveDur);
       }
 
       const clampedPos =
         effectiveDur > 0 ? Math.min(reportedPosMs, effectiveDur) : reportedPosMs;
-      setPositionMs(clampedPos);
+      publishProgress(clampedPos, effectiveDurationRef.current);
 
       if (status.error) {
         setErrorMessage(status.error);
@@ -673,7 +716,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const maxMs = effectiveDurationRef.current > 0 ? effectiveDurationRef.current - 400 : ms;
     const clampedMs = Math.max(0, Math.min(ms, Math.max(0, maxMs)));
     await player.seekTo(clampedMs / 1000);
-    setPositionMs(Math.round(clampedMs));
+    publishProgress(Math.round(clampedMs), effectiveDurationRef.current);
   }, []);
 
   const toggleShuffle = useCallback(() => {
@@ -978,8 +1021,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       queueIndex,
       isPlaying,
       isBuffering,
-      positionMs,
-      durationMs,
       shuffle,
       repeat,
       lyrics,
@@ -1031,8 +1072,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       queueIndex,
       isPlaying,
       isBuffering,
-      positionMs,
-      durationMs,
       shuffle,
       repeat,
       lyrics,

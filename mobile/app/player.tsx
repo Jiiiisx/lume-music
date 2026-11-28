@@ -10,13 +10,70 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { SyncedLyricsView } from '../src/components/SyncedLyricsView';
-import { usePlayer } from '../src/context/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../src/context/PlayerContext';
 import { LumeTheme } from '../src/theme';
-import { formatDurationMs, trackArtistDisplay } from '../src/types';
+import { formatDurationMs, type LyricsData, trackArtistDisplay } from '../src/types';
+
+const PlayerLyricsPanel = React.memo(function PlayerLyricsPanel({
+  lyrics,
+  loading,
+  onSeekToMs,
+  onRefreshLyrics,
+}: {
+  lyrics: LyricsData | null;
+  loading: boolean;
+  onSeekToMs: (ms: number) => void;
+  onRefreshLyrics: () => void;
+}) {
+  const { positionMs, durationMs } = usePlaybackProgress();
+  return (
+    <SyncedLyricsView
+      lyrics={lyrics}
+      loading={loading}
+      positionMs={positionMs}
+      durationMs={durationMs}
+      onSeekToMs={onSeekToMs}
+      onRefreshLyrics={onRefreshLyrics}
+    />
+  );
+});
+
+const PlayerSeekSection = React.memo(function PlayerSeekSection({
+  onSeekToMs,
+}: {
+  onSeekToMs: (ms: number) => void;
+}) {
+  const { positionMs, durationMs } = usePlaybackProgress();
+  const [barWidth, setBarWidth] = useState(1);
+  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
+
+  return (
+    <>
+      <Pressable
+        onLayout={(e: LayoutChangeEvent) =>
+          setBarWidth(Math.max(1, e.nativeEvent.layout.width))
+        }
+        onPress={(e) => {
+          const ratio = Math.min(1, Math.max(0, e.nativeEvent.locationX / barWidth));
+          onSeekToMs(ratio * durationMs);
+        }}
+        style={styles.seekHitArea}
+      >
+        <View style={styles.seekTrack}>
+          <View style={[styles.seekFill, { width: `${progress * 100}%` }]} />
+        </View>
+      </Pressable>
+
+      <View style={styles.timeRow}>
+        <Text style={styles.timeText}>{formatDurationMs(positionMs)}</Text>
+        <Text style={styles.timeText}>{formatDurationMs(durationMs)}</Text>
+      </View>
+    </>
+  );
+});
 
 export default function PlayerModal() {
   const router = useRouter();
@@ -27,8 +84,6 @@ export default function PlayerModal() {
     likedUids,
     isPlaying,
     isBuffering,
-    positionMs,
-    durationMs,
     shuffle,
     repeat,
     lyrics,
@@ -48,7 +103,6 @@ export default function PlayerModal() {
   } = usePlayer();
 
   const [showLyrics, setShowLyrics] = useState(false);
-  const [barWidth, setBarWidth] = useState(1);
 
   if (!currentTrack) {
     return (
@@ -61,7 +115,6 @@ export default function PlayerModal() {
     );
   }
 
-  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
   const isLiked = likedUids.has(currentTrack.uid);
   const isOffline = offlineUids.has(currentTrack.uid);
   const isDownloading = downloadingUids.has(currentTrack.uid);
@@ -74,13 +127,13 @@ export default function PlayerModal() {
           style={styles.backdropImg}
           blurRadius={70}
           resizeMode="cover"
+          fadeDuration={0}
         />
       )}
-      <BlurView intensity={65} tint="dark" style={StyleSheet.absoluteFill} />
       <LinearGradient
         colors={[
-          palette.bg_top + '78',
-          'rgba(8, 10, 16, 0.72)',
+          palette.bg_top + '8A',
+          'rgba(8, 10, 16, 0.74)',
           'rgba(7, 9, 14, 0.96)',
         ]}
         locations={[0, 0.52, 1]}
@@ -134,11 +187,9 @@ export default function PlayerModal() {
 
         {showLyrics ? (
           <View style={styles.lyricsContainer}>
-            <SyncedLyricsView
+            <PlayerLyricsPanel
               lyrics={lyrics}
               loading={lyricsLoading}
-              positionMs={positionMs}
-              durationMs={durationMs}
               onSeekToMs={(ms) => void seekToMs(ms)}
               onRefreshLyrics={() => void refreshLyrics()}
             />
@@ -211,25 +262,7 @@ export default function PlayerModal() {
             </Pressable>
           </View>
 
-          <Pressable
-            onLayout={(e: LayoutChangeEvent) =>
-              setBarWidth(Math.max(1, e.nativeEvent.layout.width))
-            }
-            onPress={(e) => {
-              const ratio = Math.min(1, Math.max(0, e.nativeEvent.locationX / barWidth));
-              void seekToMs(ratio * durationMs);
-            }}
-            style={styles.seekHitArea}
-          >
-            <View style={styles.seekTrack}>
-              <View style={[styles.seekFill, { width: `${progress * 100}%` }]} />
-            </View>
-          </Pressable>
-
-          <View style={styles.timeRow}>
-            <Text style={styles.timeText}>{formatDurationMs(positionMs)}</Text>
-            <Text style={styles.timeText}>{formatDurationMs(durationMs)}</Text>
-          </View>
+          <PlayerSeekSection onSeekToMs={(ms) => void seekToMs(ms)} />
 
           <View style={styles.controlsRow}>
             <Pressable

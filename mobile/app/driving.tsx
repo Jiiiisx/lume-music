@@ -12,9 +12,24 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { usePlayer } from '../src/context/PlayerContext';
+import { usePlaybackProgress, usePlayer } from '../src/context/PlayerContext';
 import { LumeTheme } from '../src/theme';
 import { formatDurationMs, trackArtistDisplay } from '../src/types';
+
+const DrivingProgressBar = React.memo(function DrivingProgressBar() {
+  const { positionMs, durationMs } = usePlaybackProgress();
+  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
+  return (
+    <>
+      <View style={styles.progressTrack}>
+        <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+      </View>
+      <Text style={styles.timeText}>
+        {formatDurationMs(positionMs)} / {formatDurationMs(durationMs)}
+      </Text>
+    </>
+  );
+});
 
 /**
  * Driving-first screen: high contrast, giant touch targets, and full-screen swipe left/right
@@ -28,8 +43,6 @@ export default function DrivingModeScreen() {
     likedUids,
     isPlaying,
     isBuffering,
-    positionMs,
-    durationMs,
     togglePlayPause,
     nextTrack,
     previousTrack,
@@ -49,8 +62,6 @@ export default function DrivingModeScreen() {
         void previousTrack();
       }
     });
-
-  const progress = durationMs > 0 ? Math.min(1, Math.max(0, positionMs / durationMs)) : 0;
 
   return (
     <GestureDetector gesture={swipeGesture}>
@@ -89,12 +100,7 @@ export default function DrivingModeScreen() {
             {currentTrack ? trackArtistDisplay(currentTrack) : 'Swipe kiri/kanan untuk ganti lagu'}
           </Text>
 
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
-          </View>
-          <Text style={styles.timeText}>
-            {formatDurationMs(positionMs)} / {formatDurationMs(durationMs)}
-          </Text>
+          <DrivingProgressBar />
         </View>
 
         <View style={styles.controls}>
