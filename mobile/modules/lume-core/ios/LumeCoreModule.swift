@@ -331,5 +331,12 @@ public class LumeCoreModule: Module {
         try core.extractPaletteJson(artworkRef: artworkRef)
       }
     }
+
+    AsyncFunction("enrichSpotifyArtwork") { (tracksJson: String, maxBatch: Int, promise: Promise) in
+      let cap = UInt32(max(1, min(maxBatch, 48)))
+      self.runAsync(promise) { core in
+        try core.enrichSpotifyArtworkJson(tracksJson: tracksJson, maxBatch: cap)
+      }
+    }
   }
 }

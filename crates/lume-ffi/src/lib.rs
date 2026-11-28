@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -6,10 +7,10 @@ use std::time::Duration;
 use lume_core::{PlaybackSourceUsed, ResolvedStream, Track, TrackSource};
 use lume_providers::{
     build_authorize_url, canonical_ytm_playlist_url, exchange_authorization_code,
-    import_spotify_playlist_url, parse_exportify_csv, refresh_spotify_token,
-    resolve_spotify_to_ytm_video_id, ChainedLyricsProvider, LocalProvider, PkceChallenge,
-    SpotifyWebClient, YouTubeMusicProvider, SPOTIFY_ACCOUNTS_TOKEN_URL,
-    SPOTIFY_MOBILE_REDIRECT_URI, SPOTIFY_WEB_API_SCOPES,
+    fetch_spotify_track_oembed_cover, import_spotify_playlist_url, needs_spotify_album_artwork,
+    parse_exportify_csv, refresh_spotify_token, resolve_spotify_to_ytm_video_id,
+    ChainedLyricsProvider, LocalProvider, PkceChallenge, SpotifyWebClient, YouTubeMusicProvider,
+    SPOTIFY_ACCOUNTS_TOKEN_URL, SPOTIFY_MOBILE_REDIRECT_URI, SPOTIFY_WEB_API_SCOPES,
 };
 use lume_storage::{ArtCache, Database, OfflineTrackRecord, SpotifyTokenSet, WEEKLY_CHARTS_TTL_S};
 use serde::{Deserialize, Serialize};
@@ -660,7 +661,20 @@ impl LumeMobileCore {
 
     /// Downloads a track's M4A/audio stream to local offline storage and caches lyrics for driving mode.
     pub fn download_track_offline_json(&self, track_json: String) -> Result<String, LumeFfiError> {
-        let track = parse_track_json(&track_json)?;
+        let mut track = parse_track_json(&track_json)?;
+        if needs_spotify_album_artwork(&track) {
+            if let TrackSource::Spotify { id } = &track.source {
+                if let Some(cover) = self
+                    .runtime
+                    .block_on(fetch_spotify_track_oembed_cover(&self.http, id))
+                {
+                    track.artwork_ref = Some(cover.clone());
+                    if let Ok(db) = self.db.lock() {
+                        let _ = db.update_track_artwork(&track.uid, &cover);
+                    }
+                }
+            }
+        }
         let (url, _, _) = self
             .runtime
             .block_on(self.resolve_remote_http_stream(&track, false))?;
@@ -1325,6 +1339,77 @@ impl LumeMobileCore {
 
         to_json(&extract_palette_from_bytes(&bytes))
     }
+
+    /// Fetches genuine 640×640 HD Spotify album artwork via Spotify's unauthenticated oEmbed
+    /// endpoint for imported tracks missing real album covers, persists resolved URLs to SQLite,
+    /// and returns a JSON map of `{ track_uid: artwork_url }`.
+    pub fn enrich_spotify_artwork_json(
+        &self,
+        tracks_json: String,
+        max_batch: u32,
+    ) -> Result<String, LumeFfiError> {
+        let tracks: Vec<Track> = serde_json::from_str(&tracks_json)
+            .map_err(|e| LumeFfiError::invalid(format!("invalid tracks JSON: {e}")))?;
+        let cap = (max_batch as usize).clamp(1, 48);
+
+        let mut seen = HashSet::new();
+        let mut batch: Vec<(String, String)> = Vec::new();
+        for t in tracks {
+            if !needs_spotify_album_artwork(&t) {
+                continue;
+            }
+            if let TrackSource::Spotify { id } = &t.source {
+                if seen.insert(t.uid.clone()) {
+                    batch.push((t.uid.clone(), id.clone()));
+                    if batch.len() >= cap {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if batch.is_empty() {
+            let empty: HashMap<String, String> = HashMap::new();
+            return to_json(&empty);
+        }
+
+        const OEMBED_CONCURRENCY: usize = 6;
+        let http = self.http.clone();
+        let resolved: Vec<(String, String)> = self.runtime.block_on(async move {
+            let mut out = Vec::with_capacity(batch.len());
+            for chunk in batch.chunks(OEMBED_CONCURRENCY) {
+                let mut set = tokio::task::JoinSet::new();
+                for (uid, sp_id) in chunk {
+                    let client = http.clone();
+                    let uid = uid.clone();
+                    let sp_id = sp_id.clone();
+                    set.spawn(async move {
+                        fetch_spotify_track_oembed_cover(&client, &sp_id)
+                            .await
+                            .map(|url| (uid, url))
+                    });
+                }
+                while let Some(joined) = set.join_next().await {
+                    if let Ok(Some(pair)) = joined {
+                        out.push(pair);
+                    }
+                }
+            }
+            out
+        });
+
+        if !resolved.is_empty() {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+            db.update_tracks_artwork_batch(&resolved)
+                .map_err(|e| LumeFfiError::storage(e.to_string()))?;
+        }
+
+        let map: HashMap<String, String> = resolved.into_iter().collect();
+        to_json(&map)
+    }
 }
 
 #[cfg(test)]
@@ -1515,6 +1600,28 @@ mod tests {
         let pal = extract_palette_from_bytes(png_bytes.get_ref());
         assert!(pal.bg_top.starts_with('#'));
         assert!(pal.accent.starts_with('#'));
+
+        // Verify artwork enrichment skips tracks that already have official Spotify album covers.
+        let already_artworked = Track {
+            uid: "spotify:track:4cOdK2wGLETKBW3PvgPWqT".into(),
+            source: TrackSource::Spotify {
+                id: "4cOdK2wGLETKBW3PvgPWqT".into(),
+            },
+            title: "Already Covered".into(),
+            artists: vec!["Artist".into()],
+            album: Some("Album".into()),
+            duration_ms: 180_000,
+            artwork_ref: Some("https://i.scdn.co/image/ab67616d0000b273abcdef0123456789".into()),
+            is_liked: false,
+        };
+        let enriched_json = core
+            .enrich_spotify_artwork_json(
+                serde_json::to_string(&vec![already_artworked]).unwrap(),
+                12,
+            )
+            .unwrap();
+        let enriched_map: HashMap<String, String> = serde_json::from_str(&enriched_json).unwrap();
+        assert!(enriched_map.is_empty());
     }
 
     #[test]

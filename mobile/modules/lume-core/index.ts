@@ -59,6 +59,7 @@ interface NativeLumeCoreModule {
   searchLocalTracks(query: string): Promise<string>;
   rematchSpotifyTrack(spotifyTrackId: string, ytVideoId: string): Promise<void>;
   extractPalette(artworkRef: string): Promise<string>;
+  enrichSpotifyArtwork(tracksJson: string, maxBatch: number): Promise<string>;
   enableRemoteTrackCommands(): void;
   addListener(
     eventName: 'onRemoteNextTrack' | 'onRemotePreviousTrack',
@@ -270,6 +271,16 @@ export const LumeCore = {
 
   async extractPalette(artworkRef: string): Promise<DynamicPaletteDto> {
     return JSON.parse(await ensureNative().extractPalette(artworkRef)) as DynamicPaletteDto;
+  },
+
+  async enrichSpotifyArtwork(
+    tracks: Track[],
+    maxBatch = 16
+  ): Promise<Record<string, string>> {
+    if (tracks.length === 0) return {};
+    return JSON.parse(
+      await ensureNative().enrichSpotifyArtwork(JSON.stringify(tracks), maxBatch)
+    ) as Record<string, string>;
   },
 
   subscribeRemoteCommands(onNext: () => void, onPrev: () => void): () => void {

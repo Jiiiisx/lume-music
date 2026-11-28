@@ -245,6 +245,47 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       void updateDynamicPalette(track.artwork_ref);
 
+      // Non-blocking Spotify oEmbed artwork fetch for CSV/URL imported tracks missing album art.
+      if (
+        LumeCore.isAvailable() &&
+        'Spotify' in track.source &&
+        (!track.artwork_ref || !track.artwork_ref.includes('ab67616d'))
+      ) {
+        LumeCore.enrichSpotifyArtwork([track], 1)
+          .then((map) => {
+            const cover = map[track.uid];
+            if (!cover || gen !== loadGenRef.current) return;
+            const enriched: Track = { ...track, artwork_ref: cover };
+            setCurrentTrack((prev) =>
+              prev && prev.uid === track.uid ? { ...prev, artwork_ref: cover } : prev
+            );
+            currentTrackRef.current = enriched;
+            setQueue((prev) =>
+              prev.map((q) => (q.uid === track.uid ? { ...q, artwork_ref: cover } : q))
+            );
+            void updateDynamicPalette(cover);
+            const activePlayer = playerRef.current;
+            if (activePlayer) {
+              activePlayer.setActiveForLockScreen(
+                true,
+                {
+                  title: enriched.title,
+                  artist: trackArtistDisplay(enriched),
+                  albumTitle: enriched.album ?? 'Lume Music',
+                  artworkUrl: cover,
+                },
+                {
+                  showNextTrack: true,
+                  showPreviousTrack: true,
+                  showSeekForward: false,
+                  showSeekBackward: false,
+                }
+              );
+            }
+          })
+          .catch(() => {});
+      }
+
       if (!LumeCore.isAvailable()) {
         setIsBuffering(false);
         setErrorMessage(

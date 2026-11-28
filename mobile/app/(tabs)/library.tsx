@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -34,6 +34,12 @@ import {
 
 type SortMode = 'custom' | 'title' | 'artist' | 'duration';
 
+function needsSpotifyArt(track: Track): boolean {
+  if (!('Spotify' in track.source)) return false;
+  const art = track.artwork_ref?.trim() ?? '';
+  return art.length === 0 || !art.includes('ab67616d');
+}
+
 export default function LibraryScreen() {
   const router = useRouter();
   const {
@@ -56,6 +62,7 @@ export default function LibraryScreen() {
   const [selectedTracks, setSelectedTracks] = useState<Track[]>([]);
   const [activeView, setActiveView] = useState<'main' | 'liked' | 'local' | 'playlist'>('main');
   const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const enrichRunRef = useRef(0);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -91,6 +98,70 @@ export default function LibraryScreen() {
     setSortMode('custom');
     setActiveView('playlist');
   };
+
+  // Progressively enrich missing Spotify album artwork (Exportify CSV & public URL imports)
+  // via Spotify's unauthenticated oEmbed endpoint (matching Lume Desktop), caching results in SQLite.
+  useEffect(() => {
+    if (!LumeCore.isAvailable()) return;
+    if (activeView !== 'playlist' && activeView !== 'liked') return;
+
+    const initialTracks = activeView === 'liked' ? likedTracks : selectedTracks;
+    if (!initialTracks.some(needsSpotifyArt)) return;
+
+    const runId = ++enrichRunRef.current;
+    let cancelled = false;
+
+    const run = async () => {
+      const attempted = new Set<string>();
+      const working = [...initialTracks];
+      let firstBatch = true;
+
+      while (!cancelled && enrichRunRef.current === runId) {
+        const batchSize = firstBatch ? 12 : 24;
+        firstBatch = false;
+        const pending = working.filter((t) => needsSpotifyArt(t) && !attempted.has(t.uid));
+        if (pending.length === 0) break;
+
+        const slice = pending.slice(0, batchSize);
+        for (const t of slice) attempted.add(t.uid);
+
+        try {
+          const resolvedMap = await LumeCore.enrichSpotifyArtwork(slice, slice.length);
+          if (cancelled || enrichRunRef.current !== runId) break;
+          const entries = Object.entries(resolvedMap);
+          if (entries.length > 0) {
+            for (let i = 0; i < working.length; i++) {
+              const updatedUrl = resolvedMap[working[i].uid];
+              if (updatedUrl) {
+                working[i] = { ...working[i], artwork_ref: updatedUrl };
+              }
+            }
+            if (activeView === 'playlist') {
+              setSelectedTracks((prev) =>
+                prev.map((t) =>
+                  resolvedMap[t.uid] ? { ...t, artwork_ref: resolvedMap[t.uid] } : t
+                )
+              );
+            } else if (activeView === 'liked') {
+              void refreshLibraryState();
+            }
+          }
+        } catch {
+          // Network may be offline; skip remaining enrichment quietly.
+          break;
+        }
+
+        await new Promise((r) => setTimeout(r, 120));
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // Trigger once per opened playlist / liked view (avoid re-triggering on every batch state update).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, selectedPlaylist?.id]);
 
   const handleImportUrl = async () => {
     const trimmed = importUrl.trim();
@@ -378,6 +449,7 @@ export default function LibraryScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
+              style={{ flexGrow: 0 }}
               contentContainerStyle={styles.sortRow}
             >
               {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
