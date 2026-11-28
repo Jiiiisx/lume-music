@@ -12,7 +12,6 @@ export function MiniPlayer() {
   const {
     currentTrack,
     currentStream,
-    palette,
     isPlaying,
     isBuffering,
     positionMs,
@@ -28,84 +27,84 @@ export function MiniPlayer() {
   return (
     <Pressable
       onPress={() => router.push('/player')}
-      style={[styles.outer, { borderColor: 'rgba(255,255,255,0.16)' }]}
+      style={({ pressed }) => [styles.outer, pressed && styles.outerPressed]}
       accessibilityRole="button"
       accessibilityLabel={`Now playing ${currentTrack.title}`}
     >
-      <BlurView intensity={55} tint="dark" style={[styles.blur, { backgroundColor: palette.bg_mid + 'D9' }]}>
-        <View style={styles.row}>
-          {currentTrack.artwork_ref ? (
-            <Image source={{ uri: currentTrack.artwork_ref }} style={styles.art} />
-          ) : (
-            <View style={[styles.art, styles.artFallback]}>
-              <Ionicons name="musical-notes" size={20} color={palette.accent} />
-            </View>
-          )}
+      <BlurView intensity={70} tint="dark" style={styles.blur}>
+        <View style={styles.glassTint}>
+          <View style={styles.row}>
+            {currentTrack.artwork_ref ? (
+              <Image source={{ uri: currentTrack.artwork_ref }} style={styles.art} />
+            ) : (
+              <View style={[styles.art, styles.artFallback]}>
+                <Ionicons name="musical-notes" size={19} color="#FFFFFF" />
+              </View>
+            )}
 
-          <View style={styles.meta}>
-            <View style={styles.titleRow}>
+            <View style={styles.meta}>
               <Text style={styles.title} numberOfLines={1}>
                 {currentTrack.title}
               </Text>
-              {currentStream?.is_offline && (
-                <View style={styles.offlineBadge}>
-                  <Text style={styles.offlineBadgeText}>OFFLINE</Text>
-                </View>
-              )}
+              <View style={styles.artistRow}>
+                {currentStream?.is_offline && (
+                  <Ionicons name="checkmark-circle" size={12} color={LumeTheme.emerald} />
+                )}
+                <Text style={styles.artist} numberOfLines={1}>
+                  {trackArtistDisplay(currentTrack)}
+                </Text>
+              </View>
             </View>
-            <Text style={styles.artist} numberOfLines={1}>
-              {trackArtistDisplay(currentTrack)}
-            </Text>
+
+            <Pressable
+              onPress={(e) => {
+                e.stopPropagation();
+                router.push('/driving');
+              }}
+              style={styles.iconBtn}
+              hitSlop={8}
+              accessibilityLabel="Open Driving Mode"
+            >
+              <Ionicons name="car-sport-outline" size={19} color="rgba(255,255,255,0.82)" />
+            </Pressable>
+
+            <Pressable
+              onPress={(e) => {
+                e.stopPropagation();
+                togglePlayPause();
+              }}
+              style={styles.playBtn}
+              hitSlop={8}
+              accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isBuffering ? (
+                <ActivityIndicator size="small" color={LumeTheme.inkDark} />
+              ) : (
+                <Ionicons
+                  name={isPlaying ? 'pause' : 'play'}
+                  size={18}
+                  color={LumeTheme.inkDark}
+                  style={!isPlaying ? { marginLeft: 1.5 } : undefined}
+                />
+              )}
+            </Pressable>
+
+            <Pressable
+              onPress={(e) => {
+                e.stopPropagation();
+                void nextTrack();
+              }}
+              style={styles.iconBtn}
+              hitSlop={8}
+              accessibilityLabel="Next track"
+            >
+              <Ionicons name="play-skip-forward" size={19} color="#FFFFFF" />
+            </Pressable>
           </View>
 
-          <Pressable
-            onPress={(e) => {
-              e.stopPropagation();
-              router.push('/driving');
-            }}
-            style={styles.iconBtn}
-            hitSlop={8}
-            accessibilityLabel="Open Driving Mode"
-          >
-            <Ionicons name="car-sport-outline" size={20} color={palette.accent} />
-          </Pressable>
-
-          <Pressable
-            onPress={(e) => {
-              e.stopPropagation();
-              togglePlayPause();
-            }}
-            style={[styles.playBtn, { backgroundColor: '#FFFFFF' }]}
-            hitSlop={8}
-            accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isBuffering ? (
-              <ActivityIndicator size="small" color="#0A0C12" />
-            ) : (
-              <Ionicons name={isPlaying ? 'pause' : 'play'} size={19} color="#0A0C12" />
-            )}
-          </Pressable>
-
-          <Pressable
-            onPress={(e) => {
-              e.stopPropagation();
-              void nextTrack();
-            }}
-            style={styles.iconBtn}
-            hitSlop={8}
-            accessibilityLabel="Next track"
-          >
-            <Ionicons name="play-skip-forward" size={20} color={LumeTheme.textPrimary} />
-          </Pressable>
-        </View>
-
-        <View style={styles.progressTrack}>
-          <View
-            style={[
-              styles.progressFill,
-              { width: `${progress * 100}%`, backgroundColor: palette.accent },
-            ]}
-          />
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+          </View>
         </View>
       </BlurView>
     </Pressable>
@@ -116,12 +115,23 @@ const styles = StyleSheet.create({
   outer: {
     marginHorizontal: 12,
     marginBottom: 8,
-    borderRadius: 18,
+    borderRadius: 20,
     overflow: 'hidden',
     borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.20)',
+    shadowColor: '#000000',
+    shadowOpacity: 0.42,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  outerPressed: {
+    transform: [{ scale: 0.99 }],
   },
   blur: {
-    backgroundColor: 'rgba(16, 20, 32, 0.82)',
+    overflow: 'hidden',
+  },
+  glassTint: {
+    backgroundColor: 'rgba(18, 22, 34, 0.62)',
   },
   row: {
     flexDirection: 'row',
@@ -133,45 +143,35 @@ const styles = StyleSheet.create({
   art: {
     width: 44,
     height: 44,
-    borderRadius: 10,
+    borderRadius: 11,
   },
   artFallback: {
-    backgroundColor: LumeTheme.bgElevated,
+    backgroundColor: 'rgba(255,255,255,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   meta: {
     flex: 1,
   },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
   title: {
-    color: LumeTheme.textPrimary,
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
-    flexShrink: 1,
+    letterSpacing: -0.1,
   },
-  offlineBadge: {
-    backgroundColor: 'rgba(16, 185, 129, 0.22)',
-    borderRadius: 6,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-  },
-  offlineBadgeText: {
-    color: LumeTheme.emerald,
-    fontSize: 9,
-    fontWeight: '800',
+  artistRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
   },
   artist: {
     color: LumeTheme.textSecondary,
     fontSize: 12,
-    marginTop: 2,
+    flexShrink: 1,
   },
   iconBtn: {
-    width: 34,
+    width: 32,
     height: 34,
     alignItems: 'center',
     justifyContent: 'center',
@@ -180,14 +180,16 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   progressTrack: {
     height: 2.5,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
   },
   progressFill: {
     height: 2.5,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
   },
 });

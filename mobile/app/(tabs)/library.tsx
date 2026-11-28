@@ -2,6 +2,9 @@ import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import * as DocumentPicker from 'expo-document-picker';
 import { File as ExpoFile } from 'expo-file-system';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -34,12 +38,13 @@ export default function LibraryScreen() {
   const router = useRouter();
   const {
     currentTrack,
-    palette,
     likedTracks,
     playlists,
     offlineUids,
     downloadingUids,
+    shuffle,
     playTrack,
+    toggleShuffle,
     downloadOffline,
     downloadPlaylistOffline,
     toggleLikeTrack,
@@ -52,6 +57,8 @@ export default function LibraryScreen() {
   const [activeView, setActiveView] = useState<'main' | 'liked' | 'local' | 'playlist'>('main');
   const [sortMode, setSortMode] = useState<SortMode>('custom');
 
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [importUrl, setImportUrl] = useState('');
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [renameText, setRenameText] = useState('');
@@ -88,6 +95,7 @@ export default function LibraryScreen() {
   const handleImportUrl = async () => {
     const trimmed = importUrl.trim();
     if (!trimmed) return;
+    setShowImportModal(false);
     setBusyMessage('Mengimpor playlist dari URL...');
     try {
       const isYtm =
@@ -110,6 +118,7 @@ export default function LibraryScreen() {
   };
 
   const handleImportCsv = async () => {
+    setShowImportModal(false);
     try {
       const picked = await DocumentPicker.getDocumentAsync({
         type: ['text/csv', 'text/comma-separated-values', 'public.comma-separated-values-text', '*/*'],
@@ -146,6 +155,7 @@ export default function LibraryScreen() {
   };
 
   const handleImportLocalAudio = async () => {
+    setShowImportModal(false);
     try {
       const picked = await DocumentPicker.getDocumentAsync({
         type: ['audio/*', 'public.audio'],
@@ -172,6 +182,7 @@ export default function LibraryScreen() {
     if (!trimmed) return;
     await LumeCore.createPlaylist(trimmed);
     setNewPlaylistName('');
+    setShowCreateModal(false);
     await loadLibrary();
   };
 
@@ -237,6 +248,15 @@ export default function LibraryScreen() {
     return copy;
   }, [rawDetailTracks, sortMode]);
 
+  const playDetailAll = async (shuffled: boolean) => {
+    if (sortedDetailTracks.length === 0) return;
+    if (shuffled && !shuffle) toggleShuffle();
+    const startTrack = shuffled
+      ? sortedDetailTracks[Math.floor(Math.random() * sortedDetailTracks.length)]
+      : sortedDetailTracks[0];
+    await playTrack(startTrack, sortedDetailTracks);
+  };
+
   if (activeView !== 'main') {
     const activeTitle =
       activeView === 'liked'
@@ -260,119 +280,157 @@ export default function LibraryScreen() {
               }}
               style={styles.backBtn}
             >
-              <Ionicons name="chevron-back" size={22} color={LumeTheme.textPrimary} />
+              <Ionicons name="chevron-back" size={22} color="#FFFFFF" />
               <Text style={styles.backText}>Library</Text>
             </Pressable>
 
             <View style={styles.detailActions}>
-              {activeView === 'local' && (
-                <Pressable
-                  onPress={() => void handleImportLocalAudio()}
-                  style={[styles.smallActionBtn, { backgroundColor: palette.accent }]}
-                >
-                  <Ionicons name="add" size={16} color="#0A0C12" />
-                  <Text style={styles.smallActionDark}>Import Audio</Text>
-                </Pressable>
-              )}
               {canEdit && selectedPlaylist && (
                 <>
                   <Pressable
                     onPress={() => setRenaming((r) => !r)}
-                    style={styles.iconSmallBtn}
+                    style={styles.iconCircle}
+                    accessibilityLabel="Rename playlist"
                   >
                     <Ionicons name="pencil" size={16} color="#FFFFFF" />
                   </Pressable>
                   <Pressable
                     onPress={() => handleDeletePlaylist(selectedPlaylist)}
-                    style={styles.iconSmallBtn}
+                    style={styles.iconCircle}
+                    accessibilityLabel="Delete playlist"
                   >
                     <Ionicons name="trash-outline" size={16} color={LumeTheme.rose} />
                   </Pressable>
                 </>
               )}
-              {sortedDetailTracks.length > 0 && activeView !== 'local' && (
+              {activeView === 'local' && (
                 <Pressable
-                  onPress={() => handleDownloadPlaylist(activeTitle, sortedDetailTracks)}
-                  style={[styles.smallActionBtn, { backgroundColor: palette.accent }]}
+                  onPress={() => void handleImportLocalAudio()}
+                  style={styles.crystalPillSmall}
                 >
-                  <Ionicons name="cloud-download" size={15} color="#0A0C12" />
-                  <Text style={styles.smallActionDark}>Offline All</Text>
+                  <Ionicons name="add" size={16} color={LumeTheme.inkDark} />
+                  <Text style={styles.crystalPillSmallText}>Import</Text>
                 </Pressable>
               )}
             </View>
           </View>
 
-          {renaming ? (
-            <View style={[styles.inlineForm, { paddingHorizontal: 16, marginVertical: 8 }]}>
-              <TextInput
-                value={renameText}
-                onChangeText={setRenameText}
-                style={styles.input}
-                placeholder="Nama playlist baru"
-                placeholderTextColor={LumeTheme.textMuted}
-              />
-              <Pressable
-                onPress={() => void handleRenamePlaylist()}
-                style={[styles.primaryBtn, { backgroundColor: palette.accent }]}
-              >
-                <Text style={styles.btnTextDark}>Simpan</Text>
-              </Pressable>
+          <ScrollView contentContainerStyle={styles.detailScroll} showsVerticalScrollIndicator={false}>
+            {/* Desktop-inspired Playlist Hero Header */}
+            <View style={styles.detailHero}>
+              {renaming ? (
+                <View style={styles.inlineForm}>
+                  <TextInput
+                    value={renameText}
+                    onChangeText={setRenameText}
+                    style={styles.input}
+                    placeholder="Nama playlist baru"
+                    placeholderTextColor={LumeTheme.textMuted}
+                  />
+                  <Pressable
+                    onPress={() => void handleRenamePlaylist()}
+                    style={styles.crystalPrimaryBtn}
+                  >
+                    <Text style={styles.btnTextDark}>Simpan</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.detailTitle}>{activeTitle}</Text>
+                  <Text style={styles.detailSub}>
+                    {sortedDetailTracks.length} lagu
+                    {activeView === 'playlist' && selectedPlaylist
+                      ? ` • ${playlistOriginBadge(selectedPlaylist.origin)}`
+                      : ''}
+                  </Text>
+                </>
+              )}
+
+              {sortedDetailTracks.length > 0 && (
+                <View style={styles.heroBtnRow}>
+                  <Pressable
+                    onPress={() => void playDetailAll(false)}
+                    style={styles.heroPlayBtn}
+                  >
+                    <Ionicons name="play" size={16} color={LumeTheme.inkDark} />
+                    <Text style={styles.heroPlayText}>Putar</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void playDetailAll(true)}
+                    style={styles.heroGlassBtn}
+                  >
+                    <Ionicons name="shuffle" size={16} color="#FFFFFF" />
+                    <Text style={styles.heroGlassText}>Acak</Text>
+                  </Pressable>
+                  {activeView !== 'local' && (
+                    <Pressable
+                      onPress={() => handleDownloadPlaylist(activeTitle, sortedDetailTracks)}
+                      style={styles.heroGlassBtn}
+                    >
+                      <Ionicons name="cloud-download-outline" size={16} color="#FFFFFF" />
+                      <Text style={styles.heroGlassText}>Offline</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
             </View>
-          ) : (
-            <Text style={styles.detailTitle}>{activeTitle}</Text>
-          )}
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.sortRow}
-          >
-            {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
-              <Pressable
-                key={mode}
-                onPress={() => setSortMode(mode)}
-                style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
-              >
-                <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
-                  {mode === 'custom'
-                    ? 'Urutan Asli'
-                    : mode === 'title'
-                      ? 'Judul'
-                      : mode === 'artist'
-                        ? 'Artis'
-                        : 'Durasi'}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.sortRow}
+            >
+              {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
+                <Pressable
+                  key={mode}
+                  onPress={() => setSortMode(mode)}
+                  style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
+                >
+                  <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
+                    {mode === 'custom'
+                      ? 'Urutan Asli'
+                      : mode === 'title'
+                        ? 'Judul'
+                        : mode === 'artist'
+                          ? 'Artis'
+                          : 'Durasi'}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
 
-          <BatchDownloadBanner />
+            <BatchDownloadBanner />
 
-          {busyMessage && (
-            <View style={styles.busyRow}>
-              <ActivityIndicator size="small" color={palette.accent} />
-              <Text style={styles.busyText}>{busyMessage}</Text>
-            </View>
-          )}
+            {busyMessage && (
+              <View style={styles.busyRow}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.busyText}>{busyMessage}</Text>
+              </View>
+            )}
 
-          <ScrollView contentContainerStyle={styles.listContent}>
             {sortedDetailTracks.length === 0 ? (
-              <Text style={styles.emptyDetail}>Belum ada lagu di sini.</Text>
+              <View style={styles.emptyBox}>
+                <Ionicons name="musical-notes-outline" size={32} color={LumeTheme.textMuted} />
+                <Text style={styles.emptyDetail}>Belum ada lagu di sini.</Text>
+              </View>
             ) : (
-              sortedDetailTracks.map((track) => (
-                <TrackRow
-                  key={track.uid}
-                  track={track}
-                  isActive={currentTrack?.uid === track.uid}
-                  isOffline={offlineUids.has(track.uid)}
-                  isDownloading={downloadingUids.has(track.uid)}
-                  onPress={() => void playTrack(track, sortedDetailTracks)}
-                  onDownloadPress={
-                    activeView === 'local' ? undefined : () => void downloadOffline(track)
-                  }
-                  onLikePress={() => void toggleLikeTrack(track)}
-                />
-              ))
+              <View style={styles.glassListBox}>
+                {sortedDetailTracks.map((track, idx) => (
+                  <TrackRow
+                    key={track.uid}
+                    track={track}
+                    rank={idx + 1}
+                    isActive={currentTrack?.uid === track.uid}
+                    isOffline={offlineUids.has(track.uid)}
+                    isDownloading={downloadingUids.has(track.uid)}
+                    onPress={() => void playTrack(track, sortedDetailTracks)}
+                    onDownloadPress={
+                      activeView === 'local' ? undefined : () => void downloadOffline(track)
+                    }
+                    onLikePress={() => void toggleLikeTrack(track)}
+                  />
+                ))}
+              </View>
             )}
           </ScrollView>
         </SafeAreaView>
@@ -383,36 +441,61 @@ export default function LibraryScreen() {
   return (
     <AmbientBackdrop>
       <SafeAreaView style={styles.container} edges={['top']}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          {/* Header with Desktop-style + & Import quick actions */}
           <View style={styles.topRow}>
-            <Text style={styles.title}>Library</Text>
-            <Pressable
-              onPress={() => router.push('/settings')}
-              style={styles.settingsBtn}
-            >
-              <Ionicons name="settings-outline" size={20} color="#FFFFFF" />
-            </Pressable>
+            <View>
+              <Text style={styles.title}>Library</Text>
+              <Text style={styles.subtitle}>
+                {playlists.length} playlist • {likedTracks.length} disukai
+              </Text>
+            </View>
+            <View style={styles.headerActions}>
+              <Pressable
+                onPress={() => setShowImportModal(true)}
+                style={styles.importHeaderPill}
+                accessibilityLabel="Import playlist or audio"
+              >
+                <Ionicons name="link-outline" size={16} color="#FFFFFF" />
+                <Text style={styles.importHeaderText}>Import</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setShowCreateModal(true)}
+                style={styles.createHeaderCircle}
+                accessibilityLabel="Create playlist"
+              >
+                <Ionicons name="add" size={21} color={LumeTheme.inkDark} />
+              </Pressable>
+              <Pressable
+                onPress={() => router.push('/settings')}
+                style={styles.iconCircle}
+                accessibilityLabel="Settings"
+              >
+                <Ionicons name="settings-outline" size={18} color="#FFFFFF" />
+              </Pressable>
+            </View>
           </View>
 
           <BatchDownloadBanner />
 
           {busyMessage && (
             <View style={styles.busyRow}>
-              <ActivityIndicator size="small" color={palette.accent} />
+              <ActivityIndicator size="small" color="#FFFFFF" />
               <Text style={styles.busyText}>{busyMessage}</Text>
             </View>
           )}
 
+          {/* Hero Quick Cards */}
           <View style={styles.quickGrid}>
             <Pressable
               onPress={() => {
                 setSortMode('custom');
                 setActiveView('liked');
               }}
-              style={styles.likedCard}
+              style={({ pressed }) => [styles.likedCard, pressed && styles.cardPressed]}
             >
               <View style={styles.likedIcon}>
-                <Ionicons name="heart" size={22} color="#FFFFFF" />
+                <Ionicons name="heart" size={20} color="#FFFFFF" />
               </View>
               <Text style={styles.cardTitle}>Liked Songs</Text>
               <Text style={styles.cardSub}>{likedTracks.length} lagu</Text>
@@ -423,109 +506,234 @@ export default function LibraryScreen() {
                 setSortMode('custom');
                 setActiveView('local');
               }}
-              style={styles.localCard}
+              style={({ pressed }) => [styles.localCard, pressed && styles.cardPressed]}
             >
               <View style={styles.localIcon}>
-                <Ionicons name="folder-open" size={22} color="#FFFFFF" />
+                <Ionicons name="folder-open" size={20} color="#FFFFFF" />
               </View>
               <Text style={styles.cardTitle}>Local Files</Text>
               <Text style={styles.cardSub}>{localTracks.length} file HP</Text>
             </Pressable>
           </View>
 
+          {/* Desktop-style PLAYLISTS + 🔗 Section */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Playlist Kamu</Text>
-            <View style={styles.inlineForm}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionLabel}>PLAYLISTS</Text>
+              <View style={styles.sectionTools}>
+                <Pressable
+                  onPress={() => setShowCreateModal(true)}
+                  style={styles.sectionToolBtn}
+                  hitSlop={6}
+                >
+                  <Ionicons name="add" size={18} color="#FFFFFF" />
+                </Pressable>
+                <Pressable
+                  onPress={() => setShowImportModal(true)}
+                  style={styles.sectionToolBtn}
+                  hitSlop={6}
+                >
+                  <Ionicons name="link" size={16} color="#FFFFFF" />
+                </Pressable>
+              </View>
+            </View>
+
+            {playlists.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Ionicons name="albums-outline" size={32} color={LumeTheme.textMuted} />
+                <Text style={styles.emptyDetail}>
+                  Belum ada playlist. Ketuk + untuk buat baru atau Import dari Spotify / YouTube / CSV.
+                </Text>
+                <View style={styles.emptyBtnRow}>
+                  <Pressable
+                    onPress={() => setShowCreateModal(true)}
+                    style={styles.crystalPillSmall}
+                  >
+                    <Ionicons name="add" size={15} color={LumeTheme.inkDark} />
+                    <Text style={styles.crystalPillSmallText}>Buat Playlist</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setShowImportModal(true)}
+                    style={styles.glassPillSmall}
+                  >
+                    <Ionicons name="link-outline" size={15} color="#FFFFFF" />
+                    <Text style={styles.glassPillSmallText}>Import</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.playlistList}>
+                {playlists.map((pl) => {
+                  const badge = playlistOriginBadge(pl.origin);
+                  return (
+                    <Pressable
+                      key={pl.id}
+                      onPress={() => void openPlaylist(pl)}
+                      style={({ pressed }) => [styles.playlistRow, pressed && styles.cardPressed]}
+                    >
+                      <View style={styles.plIcon}>
+                        <Ionicons
+                          name="musical-notes"
+                          size={19}
+                          color={badge === 'SP' ? LumeTheme.spotify : '#FFFFFF'}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.cardTitle} numberOfLines={1}>
+                          {pl.name}
+                        </Text>
+                        <View style={styles.plMetaRow}>
+                          <View style={styles.originBadge}>
+                            <Text style={styles.originBadgeText}>{badge}</Text>
+                          </View>
+                          <Text style={styles.cardSub}>{pl.track_count} lagu</Text>
+                        </View>
+                      </View>
+                      <Pressable
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          void handleDownloadPlaylistById(pl);
+                        }}
+                        hitSlop={8}
+                        style={styles.plDownloadBtn}
+                        accessibilityLabel={`Download playlist ${pl.name}`}
+                      >
+                        <Ionicons name="cloud-download-outline" size={17} color="#FFFFFF" />
+                      </Pressable>
+                      <Ionicons name="chevron-forward" size={17} color={LumeTheme.textMuted} />
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        </ScrollView>
+
+        {/* Create Playlist Bottom Sheet Modal */}
+        <Modal
+          visible={showCreateModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowCreateModal(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.modalBackdrop}
+          >
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={() => setShowCreateModal(false)}
+            />
+            <BlurView intensity={75} tint="dark" style={styles.modalSheet}>
+              <View style={styles.modalHandle} />
+              <Text style={styles.modalTitle}>Buat Playlist Baru</Text>
+              <Text style={styles.modalSub}>
+                Beri nama koleksi lagu kamu (bisa pakai emoji juga).
+              </Text>
               <TextInput
                 value={newPlaylistName}
                 onChangeText={setNewPlaylistName}
-                placeholder="Nama playlist baru..."
+                placeholder="Contoh: Roadtrip Malam"
                 placeholderTextColor={LumeTheme.textMuted}
-                style={styles.input}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={() => void handleCreatePlaylist()}
+                style={styles.modalInput}
               />
-              <Pressable
-                onPress={() => void handleCreatePlaylist()}
-                style={[styles.primaryBtn, { backgroundColor: palette.accent }]}
-              >
-                <Text style={styles.btnTextDark}>Buat</Text>
-              </Pressable>
-            </View>
-
-            {playlists.map((pl) => {
-              const badge = playlistOriginBadge(pl.origin);
-              return (
+              <View style={styles.modalBtnRow}>
                 <Pressable
-                  key={pl.id}
-                  onPress={() => void openPlaylist(pl)}
-                  style={styles.playlistRow}
+                  onPress={() => setShowCreateModal(false)}
+                  style={styles.modalCancelBtn}
                 >
-                  <View style={styles.plIcon}>
-                    <Ionicons
-                      name="musical-notes"
-                      size={18}
-                      color={badge === 'SP' ? LumeTheme.spotify : palette.accent}
-                    />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.cardTitle} numberOfLines={1}>
-                      {pl.name}
-                    </Text>
-                    <View style={styles.plMetaRow}>
-                      <View style={styles.originBadge}>
-                        <Text style={styles.originBadgeText}>{badge}</Text>
-                      </View>
-                      <Text style={styles.cardSub}>{pl.track_count} lagu</Text>
-                    </View>
-                  </View>
-                  <Pressable
-                    onPress={(e) => {
-                      e.stopPropagation();
-                      void handleDownloadPlaylistById(pl);
-                    }}
-                    hitSlop={8}
-                    style={styles.iconSmallBtn}
-                    accessibilityLabel={`Download playlist ${pl.name}`}
-                  >
-                    <Ionicons name="cloud-download-outline" size={18} color={palette.accent} />
-                  </Pressable>
-                  <Ionicons name="chevron-forward" size={18} color={LumeTheme.textMuted} />
+                  <Text style={styles.modalCancelText}>Batal</Text>
                 </Pressable>
-              );
-            })}
-          </View>
+                <Pressable
+                  onPress={() => void handleCreatePlaylist()}
+                  style={styles.modalConfirmBtn}
+                >
+                  <Text style={styles.btnTextDark}>Buat</Text>
+                </Pressable>
+              </View>
+            </BlurView>
+          </KeyboardAvoidingView>
+        </Modal>
 
-          <View style={styles.cardPanel}>
-            <Text style={styles.panelTitle}>Import Playlist (Spotify / YouTube Music / CSV)</Text>
-            <View style={styles.inlineForm}>
-              <TextInput
-                value={importUrl}
-                onChangeText={setImportUrl}
-                placeholder="Tempel URL Spotify atau YouTube Music..."
-                placeholderTextColor={LumeTheme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                style={styles.input}
-              />
+        {/* Import Hub Bottom Sheet Modal */}
+        <Modal
+          visible={showImportModal}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowImportModal(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.modalBackdrop}
+          >
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={() => setShowImportModal(false)}
+            />
+            <BlurView intensity={80} tint="dark" style={styles.modalSheet}>
+              <View style={styles.modalHandle} />
+              <Text style={styles.modalTitle}>Import ke Library</Text>
+              <Text style={styles.modalSub}>
+                Tempel tautan Spotify / YouTube Music, atau pilih file CSV & audio dari iPhone.
+              </Text>
+
+              <View style={styles.inlineForm}>
+                <TextInput
+                  value={importUrl}
+                  onChangeText={setImportUrl}
+                  placeholder="Tempel URL Spotify / YouTube Music..."
+                  placeholderTextColor={LumeTheme.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={styles.input}
+                />
+                <Pressable
+                  onPress={() => void handleImportUrl()}
+                  style={styles.crystalPrimaryBtn}
+                >
+                  <Text style={styles.btnTextDark}>Import</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.modalDivider} />
+
               <Pressable
-                onPress={() => void handleImportUrl()}
-                style={[styles.primaryBtn, { backgroundColor: palette.accent }]}
+                onPress={() => void handleImportCsv()}
+                style={({ pressed }) => [styles.importOptionRow, pressed && styles.cardPressed]}
               >
-                <Text style={styles.btnTextDark}>Import</Text>
+                <View style={styles.importOptionIcon}>
+                  <Ionicons name="document-text-outline" size={20} color="#FFFFFF" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.importOptionTitle}>Import Exportify .CSV</Text>
+                  <Text style={styles.importOptionSub}>
+                    Bisa pilih banyak file CSV sekaligus
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={LumeTheme.textMuted} />
               </Pressable>
-            </View>
 
-            <View style={styles.importRow}>
-              <Pressable onPress={() => void handleImportCsv()} style={styles.secondaryBtn}>
-                <Ionicons name="document-text-outline" size={16} color="#FFFFFF" />
-                <Text style={styles.secondaryBtnText}>Import Exportify .CSV</Text>
+              <Pressable
+                onPress={() => void handleImportLocalAudio()}
+                style={({ pressed }) => [styles.importOptionRow, pressed && styles.cardPressed]}
+              >
+                <View style={styles.importOptionIcon}>
+                  <Ionicons name="musical-note-outline" size={20} color="#FFFFFF" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.importOptionTitle}>Import Audio Lokal (MP3 / M4A)</Text>
+                  <Text style={styles.importOptionSub}>
+                    Tambahkan file musik langsung dari penyimpanan HP
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={LumeTheme.textMuted} />
               </Pressable>
-              <Pressable onPress={() => void handleImportLocalAudio()} style={styles.secondaryBtn}>
-                <Ionicons name="musical-note-outline" size={16} color="#FFFFFF" />
-                <Text style={styles.secondaryBtnText}>Import MP3/M4A HP</Text>
-              </Pressable>
-            </View>
-          </View>
-        </ScrollView>
+            </BlurView>
+          </KeyboardAvoidingView>
+        </Modal>
       </SafeAreaView>
     </AmbientBackdrop>
   );
@@ -537,25 +745,63 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 165,
-    gap: 16,
+    paddingTop: 10,
+    paddingBottom: 170,
+    gap: 18,
   },
   topRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingHorizontal: 2,
   },
   title: {
-    color: LumeTheme.textPrimary,
-    fontSize: 27,
+    color: '#FFFFFF',
+    fontSize: 28,
     fontWeight: '800',
+    letterSpacing: -0.6,
   },
-  settingsBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+  subtitle: {
+    color: LumeTheme.textSecondary,
+    fontSize: 12.5,
+    marginTop: 2,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  importHeaderPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    height: 36,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  importHeaderText: {
+    color: '#FFFFFF',
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  createHeaderCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -565,159 +811,91 @@ const styles = StyleSheet.create({
   },
   likedCard: {
     flex: 1,
-    padding: 14,
-    borderRadius: 16,
+    padding: 15,
+    borderRadius: 20,
     backgroundColor: 'rgba(244, 63, 94, 0.16)',
     borderWidth: 1,
     borderColor: 'rgba(244, 63, 94, 0.34)',
-    gap: 6,
+    gap: 4,
   },
   localCard: {
     flex: 1,
-    padding: 14,
-    borderRadius: 16,
+    padding: 15,
+    borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
-    gap: 6,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    gap: 4,
+  },
+  cardPressed: {
+    opacity: 0.82,
   },
   likedIcon: {
     width: 40,
     height: 40,
-    borderRadius: 12,
+    borderRadius: 13,
     backgroundColor: LumeTheme.rose,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 4,
+    marginBottom: 8,
   },
   localIcon: {
     width: 40,
     height: 40,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderRadius: 13,
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 4,
-  },
-  detailHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingTop: 8,
-  },
-  detailActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  backBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 6,
-  },
-  backText: {
-    color: LumeTheme.textPrimary,
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  smallActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 12,
-    height: 34,
-    borderRadius: 10,
-  },
-  smallActionDark: {
-    color: '#0A0C12',
-    fontSize: 12.5,
-    fontWeight: '800',
-  },
-  iconSmallBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  detailTitle: {
-    color: LumeTheme.textPrimary,
-    fontSize: 24,
-    fontWeight: '800',
-    paddingHorizontal: 16,
-    marginTop: 8,
     marginBottom: 8,
-  },
-  sortRow: {
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingBottom: 10,
-  },
-  sortChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  sortChipActive: {
-    backgroundColor: 'rgba(255,255,255,0.24)',
-  },
-  sortText: {
-    color: LumeTheme.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  sortTextActive: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-  },
-  listContent: {
-    paddingHorizontal: 10,
-    paddingBottom: 160,
-  },
-  emptyDetail: {
-    color: LumeTheme.textSecondary,
-    textAlign: 'center',
-    marginTop: 40,
-    fontSize: 14,
-  },
-  busyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  busyText: {
-    color: '#FFFFFF',
-    fontSize: 13,
   },
   section: {
     gap: 10,
   },
-  sectionTitle: {
-    color: LumeTheme.textPrimary,
-    fontSize: 18,
-    fontWeight: '700',
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+  sectionLabel: {
+    color: LumeTheme.textMuted,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+  },
+  sectionTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  sectionToolBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playlistList: {
+    gap: 8,
   },
   playlistRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     padding: 12,
-    borderRadius: 14,
-    backgroundColor: LumeTheme.bgCard,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.07)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
+    borderColor: 'rgba(255, 255, 255, 0.13)',
   },
   plIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -728,18 +906,28 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   originBadge: {
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
     paddingHorizontal: 6,
     paddingVertical: 1,
     borderRadius: 5,
   },
   originBadgeText: {
     color: '#FFFFFF',
-    fontSize: 9.5,
+    fontSize: 9,
     fontWeight: '800',
   },
+  plDownloadBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   cardTitle: {
-    color: LumeTheme.textPrimary,
+    color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '700',
   },
@@ -747,18 +935,186 @@ const styles = StyleSheet.create({
     color: LumeTheme.textSecondary,
     fontSize: 12,
   },
-  cardPanel: {
-    padding: 14,
-    borderRadius: 16,
-    backgroundColor: LumeTheme.bgCard,
-    borderWidth: 1,
-    borderColor: LumeTheme.border,
-    gap: 10,
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingTop: 8,
+    paddingBottom: 6,
   },
-  panelTitle: {
-    color: LumeTheme.textPrimary,
-    fontSize: 14.5,
+  detailActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingVertical: 6,
+  },
+  backText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  detailScroll: {
+    paddingBottom: 170,
+  },
+  detailHero: {
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    paddingBottom: 14,
+    gap: 6,
+  },
+  detailTitle: {
+    color: '#FFFFFF',
+    fontSize: 27,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+  },
+  detailSub: {
+    color: LumeTheme.textSecondary,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  heroBtnRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  heroPlayBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 42,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+  },
+  heroPlayText: {
+    color: LumeTheme.inkDark,
+    fontSize: 13.5,
+    fontWeight: '800',
+  },
+  heroGlassBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 42,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  heroGlassText: {
+    color: '#FFFFFF',
+    fontSize: 13,
     fontWeight: '700',
+  },
+  crystalPillSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 13,
+    height: 34,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+  },
+  crystalPillSmallText: {
+    color: LumeTheme.inkDark,
+    fontSize: 12.5,
+    fontWeight: '800',
+  },
+  glassPillSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 13,
+    height: 34,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  glassPillSmallText: {
+    color: '#FFFFFF',
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  sortRow: {
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+  },
+  sortChip: {
+    paddingHorizontal: 13,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  sortChipActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+  },
+  sortText: {
+    color: LumeTheme.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  sortTextActive: {
+    color: LumeTheme.inkDark,
+    fontWeight: '800',
+  },
+  glassListBox: {
+    marginHorizontal: 14,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.10)',
+  },
+  emptyBox: {
+    padding: 26,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 2,
+  },
+  emptyDetail: {
+    color: LumeTheme.textSecondary,
+    textAlign: 'center',
+    fontSize: 13.5,
+    lineHeight: 20,
+  },
+  emptyBtnRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  busyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+  },
+  busyText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
   },
   inlineForm: {
     flexDirection: 'row',
@@ -766,45 +1122,131 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    backgroundColor: 'rgba(0, 0, 0, 0.36)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    height: 42,
-    color: LumeTheme.textPrimary,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    borderRadius: 14,
+    paddingHorizontal: 13,
+    height: 44,
+    color: '#FFFFFF',
     fontSize: 14,
   },
-  primaryBtn: {
+  crystalPrimaryBtn: {
     paddingHorizontal: 16,
-    height: 42,
-    borderRadius: 12,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   btnTextDark: {
-    color: '#0A0C12',
+    color: LumeTheme.inkDark,
     fontWeight: '800',
     fontSize: 13.5,
   },
-  importRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  secondaryBtn: {
+  modalBackdrop: {
     flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: 'rgba(16, 20, 30, 0.90)',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 38,
+    borderTopWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    overflow: 'hidden',
+    gap: 12,
+  },
+  modalHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.24)',
+    alignSelf: 'center',
+    marginBottom: 4,
+  },
+  modalTitle: {
+    color: '#FFFFFF',
+    fontSize: 19,
+    fontWeight: '800',
+  },
+  modalSub: {
+    color: LumeTheme.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: -4,
+  },
+  modalInput: {
+    backgroundColor: 'rgba(0, 0, 0, 0.38)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    height: 46,
+    color: '#FFFFFF',
+    fontSize: 15,
+  },
+  modalBtnRow: {
     flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-    borderRadius: 12,
-    height: 40,
-    paddingHorizontal: 10,
   },
-  secondaryBtnText: {
+  modalCancelText: {
     color: '#FFFFFF',
-    fontSize: 12,
     fontWeight: '700',
+    fontSize: 14,
+  },
+  modalConfirmBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    marginVertical: 2,
+  },
+  importOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 13,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  importOptionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  importOptionTitle: {
+    color: '#FFFFFF',
+    fontSize: 14.5,
+    fontWeight: '700',
+  },
+  importOptionSub: {
+    color: LumeTheme.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
   },
 });

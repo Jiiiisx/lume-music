@@ -12,6 +12,7 @@ import {
 
 interface TrackRowProps {
   track: Track;
+  rank?: number;
   isActive?: boolean;
   isOffline?: boolean;
   isDownloading?: boolean;
@@ -24,6 +25,7 @@ interface TrackRowProps {
 
 export function TrackRow({
   track,
+  rank,
   isActive,
   isOffline,
   isDownloading,
@@ -33,36 +35,41 @@ export function TrackRow({
   onLikePress,
   onMorePress,
 }: TrackRowProps) {
-  const { likedUids, palette, openTrackMenu } = usePlayer();
+  const { likedUids, openTrackMenu } = usePlayer();
   const badge = trackSourceBadge(track);
   const liked = likedUids.has(track.uid);
+  const rankLabel = rank !== undefined ? String(rank).padStart(2, '0') : null;
 
   return (
     <Pressable
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
-        isActive && {
-          backgroundColor: palette.accent_soft,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.22)',
-        },
-        pressed && styles.pressedRow,
+        isActive && styles.activeRow,
+        pressed && !isActive && styles.pressedRow,
       ]}
     >
-      {track.artwork_ref ? (
-        <Image source={{ uri: track.artwork_ref }} style={styles.art} />
-      ) : (
-        <View style={[styles.art, styles.artFallback]}>
-          <Ionicons name="musical-note" size={20} color={palette.accent} />
-        </View>
+      {rankLabel !== null && (
+        <Text style={[styles.rank, isActive && styles.rankActive]}>{rankLabel}</Text>
       )}
 
+      <View style={styles.artWrap}>
+        {track.artwork_ref ? (
+          <Image source={{ uri: track.artwork_ref }} style={styles.art} />
+        ) : (
+          <View style={[styles.art, styles.artFallback]}>
+            <Ionicons name="musical-note" size={18} color="rgba(255,255,255,0.75)" />
+          </View>
+        )}
+        {isActive && (
+          <View style={styles.playingOverlay}>
+            <Ionicons name="musical-notes" size={16} color="#FFFFFF" />
+          </View>
+        )}
+      </View>
+
       <View style={styles.info}>
-        <Text
-          style={[styles.title, isActive && { color: palette.accent }]}
-          numberOfLines={1}
-        >
+        <Text style={[styles.title, isActive && styles.titleActive]} numberOfLines={1}>
           {track.title}
         </Text>
         <View style={styles.subRow}>
@@ -104,8 +111,8 @@ export function TrackRow({
           >
             <Ionicons
               name={liked ? 'heart' : 'heart-outline'}
-              size={18}
-              color={liked ? LumeTheme.rose : LumeTheme.textSecondary}
+              size={17}
+              color={liked ? LumeTheme.rose : 'rgba(255,255,255,0.58)'}
             />
           </Pressable>
         )}
@@ -119,10 +126,11 @@ export function TrackRow({
             hitSlop={6}
             style={styles.actionBtn}
           >
-            <Ionicons name="trash-outline" size={18} color={LumeTheme.rose} />
+            <Ionicons name="trash-outline" size={17} color={LumeTheme.rose} />
           </Pressable>
         ) : (
-          onDownloadPress && (
+          onDownloadPress &&
+          (!isOffline || isDownloading) && (
             <Pressable
               onPress={(e) => {
                 e.stopPropagation();
@@ -132,12 +140,12 @@ export function TrackRow({
               style={styles.actionBtn}
             >
               {isDownloading ? (
-                <ActivityIndicator size="small" color={palette.accent} />
+                <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <Ionicons
-                  name={isOffline ? 'cloud-done' : 'cloud-download-outline'}
-                  size={18}
-                  color={isOffline ? LumeTheme.emerald : LumeTheme.textSecondary}
+                  name="cloud-download-outline"
+                  size={17}
+                  color="rgba(255,255,255,0.58)"
                 />
               )}
             </Pressable>
@@ -157,7 +165,7 @@ export function TrackRow({
           style={styles.actionBtn}
           accessibilityLabel="More options"
         >
-          <Ionicons name="ellipsis-horizontal" size={18} color={LumeTheme.textSecondary} />
+          <Ionicons name="ellipsis-horizontal" size={17} color="rgba(255,255,255,0.58)" />
         </Pressable>
       </View>
     </Pressable>
@@ -168,21 +176,52 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
     borderRadius: 14,
-    gap: 11,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  activeRow: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderColor: 'rgba(255, 255, 255, 0.22)',
   },
   pressedRow: {
-    backgroundColor: LumeTheme.bgCard,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  rank: {
+    width: 22,
+    color: LumeTheme.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    textAlign: 'center',
+  },
+  rankActive: {
+    color: '#FFFFFF',
+  },
+  artWrap: {
+    position: 'relative',
   },
   art: {
-    width: 48,
-    height: 48,
+    width: 46,
+    height: 46,
     borderRadius: 10,
   },
   artFallback: {
-    backgroundColor: LumeTheme.bgElevated,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playingOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    borderRadius: 10,
+    backgroundColor: 'rgba(8, 10, 16, 0.56)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -191,14 +230,19 @@ const styles = StyleSheet.create({
   },
   title: {
     color: LumeTheme.textPrimary,
-    fontSize: 15,
+    fontSize: 14.5,
     fontWeight: '600',
+    letterSpacing: -0.1,
+  },
+  titleActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
   subRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginTop: 4,
+    gap: 5,
+    marginTop: 3.5,
   },
   badge: {
     paddingHorizontal: 5,
@@ -209,31 +253,33 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(29, 185, 84, 0.22)',
   },
   badgeYtm: {
-    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    backgroundColor: 'rgba(255, 255, 255, 0.13)',
   },
   badgeLocal: {
     backgroundColor: 'rgba(148, 163, 184, 0.22)',
   },
   badgeText: {
-    color: LumeTheme.textPrimary,
-    fontSize: 9,
+    color: '#FFFFFF',
+    fontSize: 8.5,
     fontWeight: '800',
+    letterSpacing: 0.3,
   },
   artist: {
     color: LumeTheme.textSecondary,
-    fontSize: 12.5,
+    fontSize: 12,
     flex: 1,
   },
   duration: {
     color: LumeTheme.textMuted,
-    fontSize: 11.5,
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
   },
   actions: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   actionBtn: {
-    width: 30,
+    width: 28,
     height: 34,
     alignItems: 'center',
     justifyContent: 'center',

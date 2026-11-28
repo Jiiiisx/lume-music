@@ -29,7 +29,6 @@ import { formatBytes, type HealthCheckDto } from '../src/types';
 export default function SettingsModal() {
   const router = useRouter();
   const {
-    palette,
     dynamicThemeEnabled,
     setDynamicThemeEnabled,
     offlineEntries,
@@ -114,44 +113,45 @@ export default function SettingsModal() {
     <AmbientBackdrop>
       <SafeAreaView style={styles.root}>
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} hitSlop={10}>
-            <Ionicons name="chevron-down" size={26} color="#FFFFFF" />
+          <Pressable onPress={() => router.back()} style={styles.closeBtn} hitSlop={10}>
+            <Ionicons name="chevron-down" size={22} color="#FFFFFF" />
           </Pressable>
           <Text style={styles.title}>Settings</Text>
-          <View style={{ width: 26 }} />
+          <View style={{ width: 36 }} />
         </View>
 
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {busy && (
             <View style={styles.busyRow}>
-              <ActivityIndicator size="small" color={palette.accent} />
+              <ActivityIndicator size="small" color="#FFFFFF" />
               <Text style={styles.busyText}>{busy}</Text>
             </View>
           )}
 
           <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Tampilan (Visual Glassmorphism)</Text>
+            <Text style={styles.panelTitle}>Tampilan (Liquid Glass)</Text>
             <View style={styles.switchRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.rowTitle}>Dynamic Album Color</Text>
+                <Text style={styles.rowTitle}>Dynamic Album Backdrop</Text>
                 <Text style={styles.rowDesc}>
-                  Warna latar belakang mengikuti warna cover album lagu yang sedang diputar
-                  (seperti versi Desktop).
+                  Latar belakang blur & warna dinamis mengikuti cover album lagu yang sedang diputar
+                  seperti versi Desktop.
                 </Text>
               </View>
               <Switch
                 value={dynamicThemeEnabled}
                 onValueChange={(v) => void setDynamicThemeEnabled(v)}
-                trackColor={{ false: '#334155', true: palette.accent }}
+                trackColor={{ false: 'rgba(255,255,255,0.16)', true: LumeTheme.emerald }}
+                thumbColor="#FFFFFF"
               />
             </View>
           </View>
 
           <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Spotify Sync (Keychain + Smart YTM Fallback)</Text>
+            <Text style={styles.panelTitle}>Spotify Sync</Text>
             <Text style={styles.rowDesc}>
               Tambahkan Redirect URI{' '}
-              <Text style={[styles.mono, { color: palette.accent }]}>lumemusic://callback</Text>{' '}
+              <Text style={styles.mono}>lumemusic://callback</Text>{' '}
               di Spotify Developer Dashboard, lalu masukkan Client ID kamu.
             </Text>
             <TextInput
@@ -169,14 +169,14 @@ export default function SettingsModal() {
                 style={[styles.btn, { flex: 1, backgroundColor: LumeTheme.spotify }]}
               >
                 <Text style={styles.btnTextWhite}>
-                  {spotifyConnected ? 'Reconnect Spotify' : 'Connect Spotify'}
+                  {spotifyConnected ? 'Reconnect' : 'Connect Spotify'}
                 </Text>
               </Pressable>
               {spotifyConnected && (
                 <>
                   <Pressable
                     onPress={() => void handleSyncSpotify()}
-                    style={[styles.btn, { flex: 1, backgroundColor: palette.accent }]}
+                    style={[styles.btn, { flex: 1, backgroundColor: '#FFFFFF' }]}
                   >
                     <Text style={styles.btnTextDark}>Sync Now</Text>
                   </Pressable>
@@ -195,9 +195,9 @@ export default function SettingsModal() {
           </View>
 
           <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Penyimpanan Offline Berkendara</Text>
+            <Text style={styles.panelTitle}>Penyimpanan Offline</Text>
             <Text style={styles.rowDesc}>
-              {offlineEntries.length} lagu tersimpan • {formatBytes(offlineBytes)} terpakai
+              {offlineEntries.length} lagu tersimpan • {formatBytes(offlineBytes)} terpakai di iPhone
             </Text>
             {offlineEntries.length > 0 && (
               <Pressable onPress={handleClearOffline} style={styles.clearBtn}>
@@ -230,9 +230,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: LumeTheme.border,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  closeBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   title: {
     color: '#FFFFFF',
@@ -241,30 +251,33 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
-    gap: 16,
+    gap: 14,
     paddingBottom: 48,
   },
   busyRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
   },
   busyText: {
     color: '#FFFFFF',
     fontSize: 13,
   },
   panel: {
-    padding: 15,
-    borderRadius: 16,
-    backgroundColor: LumeTheme.bgCard,
+    padding: 16,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
     gap: 10,
   },
   panelTitle: {
     color: '#FFFFFF',
     fontSize: 15.5,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   switchRow: {
     flexDirection: 'row',
@@ -283,14 +296,15 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   mono: {
+    color: '#FFFFFF',
     fontWeight: '700',
   },
   input: {
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    backgroundColor: 'rgba(0, 0, 0, 0.36)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
-    borderRadius: 12,
-    paddingHorizontal: 12,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    borderRadius: 14,
+    paddingHorizontal: 13,
     height: 44,
     color: '#FFFFFF',
     fontSize: 14,
@@ -301,26 +315,28 @@ const styles = StyleSheet.create({
   },
   btn: {
     height: 42,
-    borderRadius: 12,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 14,
   },
   btnTextWhite: {
     color: '#FFFFFF',
-    fontWeight: '700',
+    fontWeight: '800',
     fontSize: 13.5,
   },
   btnTextDark: {
-    color: '#0A0C12',
+    color: LumeTheme.inkDark,
     fontWeight: '800',
     fontSize: 13.5,
   },
   dangerIconBtn: {
     width: 42,
     height: 42,
-    borderRadius: 12,
-    backgroundColor: 'rgba(244, 63, 94, 0.16)',
+    borderRadius: 21,
+    backgroundColor: 'rgba(244, 63, 94, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(244, 63, 94, 0.34)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -329,12 +345,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    backgroundColor: 'rgba(244, 63, 94, 0.16)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(244, 63, 94, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(244, 63, 94, 0.34)',
+    borderRadius: 999,
     height: 42,
   },
   clearBtnText: {
-    color: LumeTheme.rose,
+    color: '#FECDD3',
     fontWeight: '700',
     fontSize: 13.5,
   },

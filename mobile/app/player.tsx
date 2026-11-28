@@ -71,29 +71,32 @@ export default function PlayerModal() {
       {currentTrack.artwork_ref && (
         <Image
           source={{ uri: currentTrack.artwork_ref }}
-          style={StyleSheet.absoluteFill}
-          blurRadius={44}
+          style={styles.backdropImg}
+          blurRadius={70}
+          resizeMode="cover"
         />
       )}
-      <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFill} />
+      <BlurView intensity={65} tint="dark" style={StyleSheet.absoluteFill} />
       <LinearGradient
-        colors={[palette.bg_top + 'AA', palette.bg_mid + 'D9', palette.bg_bottom]}
+        colors={[
+          palette.bg_top + '78',
+          'rgba(8, 10, 16, 0.72)',
+          'rgba(7, 9, 14, 0.96)',
+        ]}
+        locations={[0, 0.52, 1]}
         style={StyleSheet.absoluteFill}
       />
 
       <SafeAreaView style={styles.safe}>
         <View style={styles.topBar}>
-          <Pressable onPress={() => router.back()} style={styles.topBtn} hitSlop={10}>
-            <Ionicons name="chevron-down" size={26} color={LumeTheme.textPrimary} />
+          <Pressable onPress={() => router.back()} style={styles.topCircleBtn} hitSlop={10}>
+            <Ionicons name="chevron-down" size={22} color="#FFFFFF" />
           </Pressable>
 
           <View style={styles.modeSwitch}>
             <Pressable
               onPress={() => setShowLyrics(false)}
-              style={[
-                styles.modePill,
-                !showLyrics && { backgroundColor: palette.accent },
-              ]}
+              style={[styles.modePill, !showLyrics && styles.modePillActive]}
             >
               <Text style={[styles.modePillText, !showLyrics && styles.modePillDark]}>
                 Player
@@ -101,10 +104,7 @@ export default function PlayerModal() {
             </Pressable>
             <Pressable
               onPress={() => setShowLyrics(true)}
-              style={[
-                styles.modePill,
-                showLyrics && { backgroundColor: palette.accent },
-              ]}
+              style={[styles.modePill, showLyrics && styles.modePillActive]}
             >
               <Text style={[styles.modePillText, showLyrics && styles.modePillDark]}>
                 Lyrics
@@ -115,19 +115,19 @@ export default function PlayerModal() {
           <View style={styles.topRight}>
             <Pressable
               onPress={() => router.push('/queue')}
-              style={styles.topBtn}
+              style={styles.topCircleBtn}
               hitSlop={8}
               accessibilityLabel="Queue"
             >
-              <Ionicons name="list" size={22} color="#FFFFFF" />
+              <Ionicons name="list" size={19} color="#FFFFFF" />
             </Pressable>
             <Pressable
               onPress={() => router.push('/driving')}
-              style={styles.topBtn}
+              style={styles.topCircleBtn}
               hitSlop={8}
               accessibilityLabel="Driving Mode"
             >
-              <Ionicons name="car-sport" size={21} color={palette.accent} />
+              <Ionicons name="car-sport-outline" size={19} color="#FFFFFF" />
             </Pressable>
           </View>
         </View>
@@ -144,13 +144,15 @@ export default function PlayerModal() {
           </View>
         ) : (
           <View style={styles.artContainer}>
-            {currentTrack.artwork_ref ? (
-              <Image source={{ uri: currentTrack.artwork_ref }} style={styles.coverArt} />
-            ) : (
-              <View style={[styles.coverArt, styles.coverFallback]}>
-                <Ionicons name="musical-notes" size={76} color={palette.accent} />
-              </View>
-            )}
+            <View style={styles.coverFrame}>
+              {currentTrack.artwork_ref ? (
+                <Image source={{ uri: currentTrack.artwork_ref }} style={styles.coverArt} />
+              ) : (
+                <View style={[styles.coverArt, styles.coverFallback]}>
+                  <Ionicons name="musical-notes" size={76} color="rgba(255,255,255,0.65)" />
+                </View>
+              )}
+            </View>
           </View>
         )}
 
@@ -160,10 +162,15 @@ export default function PlayerModal() {
               <Text style={styles.trackTitle} numberOfLines={1}>
                 {currentTrack.title}
               </Text>
-              <Text style={styles.trackArtist} numberOfLines={1}>
-                {trackArtistDisplay(currentTrack)}
-                {currentStream?.is_offline ? '  •  Offline' : ''}
-              </Text>
+              <View style={styles.artistLine}>
+                {currentStream?.is_offline && (
+                  <Ionicons name="checkmark-circle" size={14} color={LumeTheme.emerald} />
+                )}
+                <Text style={styles.trackArtist} numberOfLines={1}>
+                  {trackArtistDisplay(currentTrack)}
+                  {currentStream?.is_offline ? '  •  Offline' : ''}
+                </Text>
+              </View>
             </View>
 
             <Pressable
@@ -172,12 +179,12 @@ export default function PlayerModal() {
               hitSlop={8}
             >
               {isDownloading ? (
-                <ActivityIndicator size="small" color={palette.accent} />
+                <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <Ionicons
                   name={isOffline ? 'cloud-done' : 'cloud-download-outline'}
-                  size={22}
-                  color={isOffline ? LumeTheme.emerald : LumeTheme.textSecondary}
+                  size={21}
+                  color={isOffline ? LumeTheme.emerald : 'rgba(255,255,255,0.78)'}
                 />
               )}
             </Pressable>
@@ -190,7 +197,7 @@ export default function PlayerModal() {
               <Ionicons
                 name={isLiked ? 'heart' : 'heart-outline'}
                 size={23}
-                color={isLiked ? LumeTheme.rose : LumeTheme.textPrimary}
+                color={isLiked ? LumeTheme.rose : '#FFFFFF'}
               />
             </Pressable>
 
@@ -199,7 +206,7 @@ export default function PlayerModal() {
               style={styles.metaBtn}
               hitSlop={8}
             >
-              <Ionicons name="ellipsis-horizontal" size={22} color="#FFFFFF" />
+              <Ionicons name="ellipsis-horizontal" size={21} color="rgba(255,255,255,0.85)" />
             </Pressable>
           </View>
 
@@ -228,8 +235,9 @@ export default function PlayerModal() {
               <Ionicons
                 name="shuffle"
                 size={22}
-                color={shuffle ? palette.accent : LumeTheme.textMuted}
+                color={shuffle ? '#FFFFFF' : 'rgba(255,255,255,0.42)'}
               />
+              {shuffle && <View style={styles.activeDot} />}
             </Pressable>
 
             <Pressable
@@ -237,17 +245,21 @@ export default function PlayerModal() {
               style={styles.ctrlBtn}
               hitSlop={8}
             >
-              <Ionicons name="play-skip-back" size={32} color={LumeTheme.textPrimary} />
+              <Ionicons name="play-skip-back" size={32} color="#FFFFFF" />
             </Pressable>
 
-            <Pressable onPress={togglePlayPause} style={styles.playCircle}>
+            <Pressable
+              onPress={togglePlayPause}
+              style={({ pressed }) => [styles.playCircle, pressed && styles.playPressed]}
+            >
               {isBuffering ? (
-                <ActivityIndicator size="large" color="#0A0C12" />
+                <ActivityIndicator size="large" color={LumeTheme.inkDark} />
               ) : (
                 <Ionicons
                   name={isPlaying ? 'pause' : 'play'}
                   size={34}
-                  color="#0A0C12"
+                  color={LumeTheme.inkDark}
+                  style={!isPlaying ? { marginLeft: 3 } : undefined}
                 />
               )}
             </Pressable>
@@ -257,18 +269,17 @@ export default function PlayerModal() {
               style={styles.ctrlBtn}
               hitSlop={8}
             >
-              <Ionicons name="play-skip-forward" size={32} color={LumeTheme.textPrimary} />
+              <Ionicons name="play-skip-forward" size={32} color="#FFFFFF" />
             </Pressable>
 
             <Pressable onPress={cycleRepeat} style={styles.ctrlBtn} hitSlop={8}>
               <Ionicons
                 name={repeat === 'one' ? 'repeat-outline' : 'repeat'}
                 size={22}
-                color={repeat !== 'off' ? palette.accent : LumeTheme.textMuted}
+                color={repeat !== 'off' ? '#FFFFFF' : 'rgba(255,255,255,0.42)'}
               />
-              {repeat === 'one' && (
-                <Text style={[styles.repeatOne, { color: palette.accent }]}>1</Text>
-              )}
+              {repeat === 'one' && <Text style={styles.repeatOne}>1</Text>}
+              {repeat !== 'off' && <View style={styles.activeDot} />}
             </Pressable>
           </View>
         </View>
@@ -281,6 +292,15 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: LumeTheme.bg,
+  },
+  backdropImg: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    opacity: 0.62,
+    transform: [{ scale: 1.18 }],
   },
   safe: {
     flex: 1,
@@ -298,66 +318,87 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   closePill: {
-    backgroundColor: LumeTheme.accent,
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 22,
     paddingVertical: 10,
     borderRadius: 999,
   },
   closePillText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
+    color: LumeTheme.inkDark,
+    fontWeight: '800',
   },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 8,
   },
   topRight: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
   },
-  topBtn: {
-    width: 38,
-    height: 38,
+  topCircleBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   modeSwitch: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     borderRadius: 999,
     padding: 3,
   },
   modePill: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingVertical: 6,
     borderRadius: 999,
   },
+  modePillActive: {
+    backgroundColor: '#FFFFFF',
+  },
   modePillText: {
-    color: '#FFFFFF',
+    color: 'rgba(255, 255, 255, 0.80)',
     fontWeight: '700',
     fontSize: 13,
   },
   modePillDark: {
-    color: '#0A0C12',
+    color: LumeTheme.inkDark,
     fontWeight: '800',
   },
   artContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 28,
+    paddingHorizontal: 26,
+  },
+  coverFrame: {
+    width: '100%',
+    maxWidth: 344,
+    aspectRatio: 1,
+    borderRadius: 26,
+    shadowColor: '#000000',
+    shadowOpacity: 0.55,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 14 },
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    overflow: 'hidden',
   },
   coverArt: {
     width: '100%',
-    aspectRatio: 1,
-    maxWidth: 340,
-    borderRadius: 24,
+    height: '100%',
   },
   coverFallback: {
-    backgroundColor: LumeTheme.bgElevated,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -371,18 +412,25 @@ const styles = StyleSheet.create({
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 2,
     marginBottom: 14,
   },
   trackTitle: {
     color: '#FFFFFF',
     fontSize: 22,
     fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  artistLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 4,
   },
   trackArtist: {
     color: LumeTheme.textSecondary,
     fontSize: 15,
-    marginTop: 3,
+    flexShrink: 1,
   },
   metaBtn: {
     width: 34,
@@ -396,11 +444,12 @@ const styles = StyleSheet.create({
   seekTrack: {
     height: 5,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.22)',
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
     overflow: 'hidden',
   },
   seekFill: {
     height: 5,
+    borderRadius: 3,
     backgroundColor: '#FFFFFF',
   },
   timeRow: {
@@ -411,6 +460,7 @@ const styles = StyleSheet.create({
   timeText: {
     color: LumeTheme.textSecondary,
     fontSize: 12,
+    fontVariant: ['tabular-nums'],
   },
   controlsRow: {
     flexDirection: 'row',
@@ -430,12 +480,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  playPressed: {
+    transform: [{ scale: 0.94 }],
+  },
+  activeDot: {
+    position: 'absolute',
+    bottom: 6,
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#FFFFFF',
   },
   repeatOne: {
     position: 'absolute',
-    bottom: 6,
-    right: 8,
-    fontSize: 10,
+    top: 9,
+    right: 9,
+    color: '#FFFFFF',
+    fontSize: 9.5,
     fontWeight: '900',
   },
 });

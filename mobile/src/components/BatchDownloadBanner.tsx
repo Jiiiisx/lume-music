@@ -5,7 +5,7 @@ import { usePlayer } from '../context/PlayerContext';
 import { LumeTheme } from '../theme';
 
 export function BatchDownloadBanner() {
-  const { batchDownload, palette, cancelBatchDownload } = usePlayer();
+  const { batchDownload, cancelBatchDownload } = usePlayer();
   if (!batchDownload) return null;
 
   const doneCount = batchDownload.completed + batchDownload.failed;
@@ -18,7 +18,7 @@ export function BatchDownloadBanner() {
     <View style={styles.card}>
       <View style={styles.topRow}>
         {batchDownload.active ? (
-          <ActivityIndicator size="small" color={palette.accent} />
+          <ActivityIndicator size="small" color="#FFFFFF" />
         ) : (
           <Ionicons name="checkmark-circle" size={18} color={LumeTheme.emerald} />
         )}
@@ -45,7 +45,7 @@ export function BatchDownloadBanner() {
             styles.barFill,
             {
               width: `${pct * 100}%`,
-              backgroundColor: batchDownload.active ? palette.accent : LumeTheme.emerald,
+              backgroundColor: batchDownload.active ? '#FFFFFF' : LumeTheme.emerald,
             },
           ]}
         />
@@ -56,13 +56,13 @@ export function BatchDownloadBanner() {
 
 const styles = StyleSheet.create({
   card: {
-    marginHorizontal: 14,
-    marginBottom: 10,
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 13,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     gap: 8,
   },
   topRow: {
@@ -82,22 +82,25 @@ const styles = StyleSheet.create({
   },
   cancelBtn: {
     backgroundColor: 'rgba(244, 63, 94, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(244, 63, 94, 0.36)',
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 8,
+    borderRadius: 999,
   },
   cancelText: {
     color: '#FECDD3',
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '700',
   },
   barTrack: {
-    height: 4,
+    height: 3.5,
     borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
     overflow: 'hidden',
   },
   barFill: {
-    height: 4,
+    height: 3.5,
+    borderRadius: 2,
   },
 });

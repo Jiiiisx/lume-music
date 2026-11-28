@@ -23,11 +23,21 @@ import type { ArtistSummary, RemotePlaylistSummary, Track } from '../../src/type
 type SourceFilter = 'all' | 'youtube' | 'spotify' | 'local';
 type CategoryFilter = 'all' | 'songs' | 'artists' | 'playlists';
 
+const QUICK_PROMPTS = [
+  'Tulus',
+  'Bernadya',
+  'Mahalini',
+  'Hindia',
+  'Nadin Amizah',
+  'Lofi Chill',
+  'Pop Indonesia',
+  'Roadtrip Hits',
+];
+
 export default function SearchScreen() {
   const router = useRouter();
   const {
     currentTrack,
-    palette,
     offlineUids,
     downloadingUids,
     playTrack,
@@ -45,8 +55,8 @@ export default function SearchScreen() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const runSearch = async (overrideSource?: SourceFilter) => {
-    const trimmed = query.trim();
+  const runSearch = async (overrideSource?: SourceFilter, overrideQuery?: string) => {
+    const trimmed = (overrideQuery ?? query).trim();
     if (!trimmed) return;
     const activeSource = overrideSource ?? sourceFilter;
     setSearching(true);
@@ -92,6 +102,7 @@ export default function SearchScreen() {
     }
   };
 
+  const hasResults = tracks.length > 0 || artists.length > 0 || playlists.length > 0;
   const showSongs = categoryFilter === 'all' || categoryFilter === 'songs';
   const showArtists = categoryFilter === 'all' || categoryFilter === 'artists';
   const showPlaylists = categoryFilter === 'all' || categoryFilter === 'playlists';
@@ -114,13 +125,26 @@ export default function SearchScreen() {
               style={styles.input}
             />
             {query.length > 0 && (
-              <Pressable onPress={() => setQuery('')} hitSlop={8}>
+              <Pressable
+                onPress={() => {
+                  setQuery('');
+                  setTracks([]);
+                  setArtists([]);
+                  setPlaylists([]);
+                  setError(null);
+                }}
+                hitSlop={8}
+              >
                 <Ionicons name="close-circle" size={18} color={LumeTheme.textMuted} />
               </Pressable>
             )}
           </View>
 
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chipRow}
+          >
             {(['all', 'youtube', 'spotify', 'local'] as SourceFilter[]).map((src) => {
               const active = sourceFilter === src;
               const label =
@@ -138,10 +162,7 @@ export default function SearchScreen() {
                     setSourceFilter(src);
                     if (query.trim()) void runSearch(src);
                   }}
-                  style={[
-                    styles.chip,
-                    active && { backgroundColor: palette.accent, borderColor: palette.accent },
-                  ]}
+                  style={[styles.chip, active && styles.chipActive]}
                 >
                   <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
                 </Pressable>
@@ -149,25 +170,32 @@ export default function SearchScreen() {
             })}
           </ScrollView>
 
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chipRow}
+          >
             {(['all', 'songs', 'artists', 'playlists'] as CategoryFilter[]).map((cat) => {
               const active = categoryFilter === cat;
               const label =
                 cat === 'all'
                   ? 'Semua'
                   : cat === 'songs'
-                    ? `Songs (${tracks.length})`
+                    ? tracks.length > 0
+                      ? `Songs (${tracks.length})`
+                      : 'Songs'
                     : cat === 'artists'
-                      ? `Artists (${artists.length})`
-                      : `Playlists (${playlists.length})`;
+                      ? artists.length > 0
+                        ? `Artists (${artists.length})`
+                        : 'Artists'
+                      : playlists.length > 0
+                        ? `Playlists (${playlists.length})`
+                        : 'Playlists';
               return (
                 <Pressable
                   key={cat}
                   onPress={() => setCategoryFilter(cat)}
-                  style={[
-                    styles.subChip,
-                    active && styles.subChipActive,
-                  ]}
+                  style={[styles.subChip, active && styles.subChipActive]}
                 >
                   <Text style={[styles.subChipText, active && styles.subChipTextActive]}>
                     {label}
@@ -181,23 +209,48 @@ export default function SearchScreen() {
         {error && <Text style={styles.error}>{error}</Text>}
 
         {searching ? (
-          <ActivityIndicator size="large" color={palette.accent} style={{ marginTop: 40 }} />
+          <ActivityIndicator size="large" color="#FFFFFF" style={{ marginTop: 48 }} />
         ) : (
-          <ScrollView contentContainerStyle={styles.listContent}>
-            {tracks.length === 0 && artists.length === 0 && playlists.length === 0 && (
+          <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+            {!hasResults && (
               <View style={styles.empty}>
-                <Ionicons name="compass-outline" size={40} color={LumeTheme.textMuted} />
+                <View style={styles.emptyIconWrap}>
+                  <Ionicons name="compass-outline" size={34} color="#FFFFFF" />
+                </View>
+                <Text style={styles.emptyHeading}>Jelajahi Musik Favorit</Text>
                 <Text style={styles.emptyText}>
-                  Cari lagu, profil artis, album, atau playlist dari YouTube Music, Spotify,
-                  maupun file lokal HP kamu.
+                  Cari lagu, artis, album, atau playlist dari YouTube Music, Spotify, dan file lokal HP kamu.
                 </Text>
+
+                <View style={styles.promptWrap}>
+                  {QUICK_PROMPTS.map((term) => (
+                    <Pressable
+                      key={term}
+                      onPress={() => {
+                        setQuery(term);
+                        void runSearch(undefined, term);
+                      }}
+                      style={({ pressed }) => [
+                        styles.promptChip,
+                        pressed && styles.promptChipPressed,
+                      ]}
+                    >
+                      <Ionicons name="sparkles-outline" size={12} color={LumeTheme.textSecondary} />
+                      <Text style={styles.promptText}>{term}</Text>
+                    </Pressable>
+                  ))}
+                </View>
               </View>
             )}
 
             {showArtists && artists.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Artists</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.hRow}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.hRow}
+                >
                   {artists.map((artist) => (
                     <Pressable
                       key={`${artist.source}-${artist.id}`}
@@ -212,7 +265,7 @@ export default function SearchScreen() {
                         <Image source={{ uri: artist.avatar_url }} style={styles.artistAvatar} />
                       ) : (
                         <View style={[styles.artistAvatar, styles.artFallback]}>
-                          <Ionicons name="person" size={28} color={palette.accent} />
+                          <Ionicons name="person" size={28} color="rgba(255,255,255,0.7)" />
                         </View>
                       )}
                       <Text style={styles.cardName} numberOfLines={1}>
@@ -232,25 +285,31 @@ export default function SearchScreen() {
             {showSongs && tracks.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Songs</Text>
-                {tracks.map((item) => (
-                  <TrackRow
-                    key={item.uid}
-                    track={item}
-                    isActive={currentTrack?.uid === item.uid}
-                    isOffline={offlineUids.has(item.uid)}
-                    isDownloading={downloadingUids.has(item.uid)}
-                    onPress={() => void playTrack(item, tracks)}
-                    onDownloadPress={() => void downloadOffline(item)}
-                    onLikePress={() => void toggleLikeTrack(item)}
-                  />
-                ))}
+                <View style={styles.glassListBox}>
+                  {tracks.map((item) => (
+                    <TrackRow
+                      key={item.uid}
+                      track={item}
+                      isActive={currentTrack?.uid === item.uid}
+                      isOffline={offlineUids.has(item.uid)}
+                      isDownloading={downloadingUids.has(item.uid)}
+                      onPress={() => void playTrack(item, tracks)}
+                      onDownloadPress={() => void downloadOffline(item)}
+                      onLikePress={() => void toggleLikeTrack(item)}
+                    />
+                  ))}
+                </View>
               </View>
             )}
 
             {showPlaylists && playlists.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Playlists</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.hRow}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.hRow}
+                >
                   {playlists.map((pl) => (
                     <Pressable
                       key={`${pl.source}-${pl.id}`}
@@ -268,7 +327,7 @@ export default function SearchScreen() {
                         <Image source={{ uri: pl.cover_url }} style={styles.plCover} />
                       ) : (
                         <View style={[styles.plCover, styles.artFallback]}>
-                          <Ionicons name="musical-notes" size={32} color={palette.accent} />
+                          <Ionicons name="musical-notes" size={32} color="rgba(255,255,255,0.7)" />
                         </View>
                       )}
                       <Text style={styles.cardName} numberOfLines={1}>
@@ -294,43 +353,48 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingHorizontal: 18,
+    paddingTop: 10,
     paddingBottom: 10,
     gap: 10,
   },
   title: {
-    color: LumeTheme.textPrimary,
-    fontSize: 27,
+    color: '#FFFFFF',
+    fontSize: 28,
     fontWeight: '800',
+    letterSpacing: -0.6,
   },
   searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.09)',
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
-    borderRadius: 14,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    borderRadius: 16,
     paddingHorizontal: 14,
-    height: 44,
+    height: 46,
     gap: 10,
   },
   input: {
     flex: 1,
-    color: LumeTheme.textPrimary,
+    color: '#FFFFFF',
     fontSize: 15,
   },
   chipRow: {
     gap: 8,
-    paddingRight: 16,
+    paddingRight: 18,
   },
   chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
+    paddingHorizontal: 15,
+    paddingVertical: 6.5,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
-    borderColor: LumeTheme.border,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  chipActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
   },
   chipText: {
     color: LumeTheme.textSecondary,
@@ -338,16 +402,20 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   chipTextActive: {
-    color: '#0A0C12',
+    color: LumeTheme.inkDark,
+    fontWeight: '800',
   },
   subChip: {
     paddingHorizontal: 12,
-    paddingVertical: 5,
+    paddingVertical: 5.5,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   subChipActive: {
-    backgroundColor: 'rgba(255,255,255,0.22)',
+    backgroundColor: 'rgba(255, 255, 255, 0.20)',
+    borderColor: 'rgba(255, 255, 255, 0.28)',
   },
   subChipText: {
     color: LumeTheme.textSecondary,
@@ -359,55 +427,74 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   error: {
-    color: LumeTheme.rose,
-    paddingHorizontal: 16,
+    color: '#FECDD3',
+    paddingHorizontal: 18,
     marginBottom: 8,
     fontSize: 13,
   },
   listContent: {
-    paddingHorizontal: 10,
-    paddingBottom: 165,
+    paddingBottom: 170,
   },
   section: {
-    marginBottom: 20,
+    marginBottom: 22,
   },
   sectionTitle: {
-    color: LumeTheme.textPrimary,
+    color: '#FFFFFF',
     fontSize: 18,
-    fontWeight: '700',
-    paddingHorizontal: 8,
+    fontWeight: '800',
+    paddingHorizontal: 18,
     marginBottom: 10,
+    letterSpacing: -0.2,
+  },
+  glassListBox: {
+    marginHorizontal: 14,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.10)',
   },
   hRow: {
     gap: 12,
-    paddingHorizontal: 8,
+    paddingHorizontal: 18,
   },
   artistCard: {
     width: 112,
     alignItems: 'center',
     gap: 6,
+    padding: 8,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.11)',
   },
   artistAvatar: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
+    width: 88,
+    height: 88,
+    borderRadius: 44,
   },
   plCard: {
-    width: 136,
+    width: 142,
     gap: 6,
+    padding: 8,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.11)',
   },
   plCover: {
-    width: 136,
-    height: 136,
-    borderRadius: 14,
+    width: 124,
+    height: 124,
+    borderRadius: 12,
   },
   artFallback: {
-    backgroundColor: LumeTheme.bgElevated,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   cardName: {
-    color: LumeTheme.textPrimary,
+    color: '#FFFFFF',
     fontSize: 13.5,
     fontWeight: '700',
     textAlign: 'center',
@@ -419,14 +506,56 @@ const styles = StyleSheet.create({
   },
   empty: {
     alignItems: 'center',
-    paddingHorizontal: 32,
-    paddingTop: 56,
-    gap: 12,
+    paddingHorizontal: 28,
+    paddingTop: 34,
+    gap: 10,
+  },
+  emptyIconWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  emptyHeading: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
   },
   emptyText: {
     color: LumeTheme.textSecondary,
-    fontSize: 14,
+    fontSize: 13.5,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  promptWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 14,
+  },
+  promptChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  promptChipPressed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  promptText: {
+    color: '#FFFFFF',
+    fontSize: 12.5,
+    fontWeight: '600',
   },
 });

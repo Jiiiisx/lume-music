@@ -1,6 +1,7 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Tabs } from 'expo-router';
+import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { MiniPlayer } from '../../src/components/MiniPlayer';
 import { LumeTheme } from '../../src/theme';
@@ -13,18 +14,27 @@ export default function TabsLayout() {
           headerShown: false,
           sceneStyle: { backgroundColor: LumeTheme.bg },
           tabBarStyle: {
-            backgroundColor: '#0E121D',
-            borderTopColor: LumeTheme.border,
-            borderTopWidth: 1,
-            height: 78,
+            position: 'absolute',
+            backgroundColor: 'transparent',
+            borderTopWidth: 0,
+            elevation: 0,
+            height: 82,
             paddingTop: 8,
-            paddingBottom: 18,
+            paddingBottom: 20,
           },
-          tabBarActiveTintColor: LumeTheme.accentBright,
-          tabBarInactiveTintColor: LumeTheme.textMuted,
+          tabBarBackground: () => (
+            <View style={styles.tabBgWrap}>
+              <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFill} />
+              <View style={styles.tabBgTint} />
+            </View>
+          ),
+          tabBarActiveTintColor: LumeTheme.crystalWhite,
+          tabBarInactiveTintColor: 'rgba(255, 255, 255, 0.48)',
           tabBarLabelStyle: {
-            fontSize: 11,
-            fontWeight: '600',
+            fontSize: 10.5,
+            fontWeight: '700',
+            letterSpacing: 0.15,
+            marginTop: 2,
           },
         }}
       >
@@ -32,10 +42,10 @@ export default function TabsLayout() {
           name="index"
           options={{
             title: 'Home',
-            tabBarIcon: ({ color, size }) => (
+            tabBarIcon: ({ color, size, focused }) => (
               <Ionicons
-                name="home-outline"
-                size={size}
+                name={focused ? 'home' : 'home-outline'}
+                size={size - 1}
                 color={typeof color === 'string' ? color : LumeTheme.textMuted}
               />
             ),
@@ -44,10 +54,10 @@ export default function TabsLayout() {
         <Tabs.Screen
           name="search"
           options={{
-            title: 'Search',
-            tabBarIcon: ({ color, size }) => (
+            title: 'Explore',
+            tabBarIcon: ({ color, size, focused }) => (
               <Ionicons
-                name="search-outline"
+                name={focused ? 'compass' : 'compass-outline'}
                 size={size}
                 color={typeof color === 'string' ? color : LumeTheme.textMuted}
               />
@@ -58,10 +68,10 @@ export default function TabsLayout() {
           name="library"
           options={{
             title: 'Library',
-            tabBarIcon: ({ color, size }) => (
+            tabBarIcon: ({ color, size, focused }) => (
               <Ionicons
-                name="library-outline"
-                size={size}
+                name={focused ? 'library' : 'library-outline'}
+                size={size - 1}
                 color={typeof color === 'string' ? color : LumeTheme.textMuted}
               />
             ),
@@ -71,9 +81,9 @@ export default function TabsLayout() {
           name="offline"
           options={{
             title: 'Offline',
-            tabBarIcon: ({ color, size }) => (
+            tabBarIcon: ({ color, size, focused }) => (
               <Ionicons
-                name="cloud-done-outline"
+                name={focused ? 'cloud-done' : 'cloud-done-outline'}
                 size={size}
                 color={typeof color === 'string' ? color : LumeTheme.textMuted}
               />
@@ -94,10 +104,28 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: LumeTheme.bg,
   },
+  tabBgWrap: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    overflow: 'hidden',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 255, 255, 0.16)',
+  },
+  tabBgTint: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(10, 12, 20, 0.62)',
+  },
   miniPlayerSlot: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 80,
+    bottom: 84,
   },
 });

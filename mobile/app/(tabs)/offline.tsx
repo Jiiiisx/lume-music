@@ -25,12 +25,14 @@ export default function OfflineScreen() {
 
   const tracks = offlineEntries.map((e) => e.track);
 
-  const playAllOfflineDriving = async () => {
+  const playAllOffline = async (openDriving: boolean) => {
     if (tracks.length === 0) return;
     if (!shuffle) toggleShuffle();
     const randomStart = tracks[Math.floor(Math.random() * tracks.length)];
     await playTrack(randomStart, tracks);
-    router.push('/driving');
+    if (openDriving) {
+      router.push('/driving');
+    }
   };
 
   return (
@@ -38,22 +40,47 @@ export default function OfflineScreen() {
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.header}>
           <Text style={styles.title}>Offline Cache</Text>
-          <Text style={styles.subtitle}>
-            {offlineEntries.length} lagu siap putar tanpa sinyal •{' '}
-            {formatBytes(offlineBytes)} terpakai
-          </Text>
 
-          {tracks.length > 0 && (
-            <Pressable
-              onPress={() => void playAllOfflineDriving()}
-              style={styles.playAllBtn}
-            >
-              <Ionicons name="car-sport" size={18} color="#FFFFFF" />
-              <Text style={styles.playAllText}>
-                Putar Acak Semua Offline (Mode Berkendara)
-              </Text>
-            </Pressable>
-          )}
+          <View style={styles.statsCard}>
+            <View style={styles.statsTop}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statsMain}>
+                  {offlineEntries.length} lagu tersimpan
+                </Text>
+                <Text style={styles.statsSub}>
+                  {formatBytes(offlineBytes)} terpakai di penyimpanan iPhone
+                </Text>
+              </View>
+              <View style={styles.readyBadge}>
+                <Ionicons name="checkmark-circle" size={14} color={LumeTheme.emerald} />
+                <Text style={styles.readyBadgeText}>Tanpa Sinyal</Text>
+              </View>
+            </View>
+
+            {tracks.length > 0 && (
+              <View style={styles.actionRow}>
+                <Pressable
+                  onPress={() => void playAllOffline(false)}
+                  style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+                >
+                  <Ionicons name="shuffle" size={17} color={LumeTheme.inkDark} />
+                  <Text style={styles.primaryBtnText} numberOfLines={1}>
+                    Putar Acak
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => void playAllOffline(true)}
+                  style={({ pressed }) => [styles.driveBtn, pressed && styles.pressed]}
+                >
+                  <Ionicons name="car-sport" size={17} color="#FFFFFF" />
+                  <Text style={styles.driveBtnText} numberOfLines={1}>
+                    Mode Drive
+                  </Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
         </View>
 
         <BatchDownloadBanner />
@@ -62,19 +89,23 @@ export default function OfflineScreen() {
           data={offlineEntries}
           keyExtractor={(item) => item.track.uid}
           contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <View style={styles.empty}>
-              <Ionicons name="cloud-offline-outline" size={42} color={LumeTheme.textMuted} />
+              <View style={styles.emptyIconWrap}>
+                <Ionicons name="cloud-offline-outline" size={34} color="#FFFFFF" />
+              </View>
               <Text style={styles.emptyTitle}>Belum Ada Lagu Offline</Text>
               <Text style={styles.emptyDesc}>
-                Ketuk ikon awan pada lagu di tab Home, Explore, atau Library untuk
-                menyimpan audio M4A + lirik ke penyimpanan iPhone sebelum berkendara.
+                Ketuk ikon awan pada lagu atau playlist di tab Home, Explore, atau Library untuk
+                menyimpan audio M4A + lirik ke iPhone sebelum berkendara.
               </Text>
             </View>
           }
-          renderItem={({ item }) => (
+          renderItem={({ item, index }) => (
             <TrackRow
               track={item.track}
+              rank={index + 1}
               isActive={currentTrack?.uid === item.track.uid}
               isOffline
               onPress={() => void playTrack(item.track, tracks)}
@@ -107,48 +138,123 @@ const styles = StyleSheet.create({
   },
   header: {
     paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingTop: 10,
     paddingBottom: 12,
-    gap: 6,
+    gap: 12,
   },
   title: {
-    color: LumeTheme.textPrimary,
-    fontSize: 27,
+    color: '#FFFFFF',
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.6,
+    paddingHorizontal: 2,
+  },
+  statsCard: {
+    padding: 15,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    gap: 14,
+  },
+  statsTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  statsMain: {
+    color: '#FFFFFF',
+    fontSize: 16,
     fontWeight: '800',
   },
-  subtitle: {
+  statsSub: {
     color: LumeTheme.textSecondary,
-    fontSize: 13,
+    fontSize: 12.5,
+    marginTop: 2,
   },
-  playAllBtn: {
+  readyBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.34)',
+  },
+  readyBadgeText: {
+    color: '#6EE7B7',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  primaryBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    backgroundColor: LumeTheme.emerald,
-    borderRadius: 14,
-    paddingVertical: 13,
-    marginTop: 8,
+    gap: 7,
+    height: 44,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
   },
-  playAllText: {
+  primaryBtnText: {
+    color: LumeTheme.inkDark,
+    fontWeight: '800',
+    fontSize: 13.5,
+  },
+  driveBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    height: 44,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: 'rgba(16, 185, 129, 0.24)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.45)',
+  },
+  driveBtnText: {
     color: '#FFFFFF',
     fontWeight: '800',
-    fontSize: 14,
+    fontSize: 13.5,
+  },
+  pressed: {
+    opacity: 0.84,
   },
   listContent: {
-    paddingHorizontal: 10,
-    paddingBottom: 165,
+    paddingHorizontal: 12,
+    paddingBottom: 170,
   },
   empty: {
     alignItems: 'center',
-    paddingHorizontal: 32,
-    paddingTop: 64,
+    paddingHorizontal: 30,
+    paddingTop: 52,
     gap: 10,
   },
+  emptyIconWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
   emptyTitle: {
-    color: LumeTheme.textPrimary,
-    fontSize: 17,
-    fontWeight: '700',
+    color: '#FFFFFF',
+    fontSize: 17.5,
+    fontWeight: '800',
   },
   emptyDesc: {
     color: LumeTheme.textSecondary,
