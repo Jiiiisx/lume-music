@@ -38,6 +38,7 @@ interface NativeLumeCoreModule {
   getPlaylistTracks(playlistId: string): Promise<string>;
   addTrackToPlaylist(playlistId: string, trackJson: string): Promise<void>;
   removeTrackFromPlaylist(playlistId: string, position: number): Promise<void>;
+  reorderPlaylistTrack(playlistId: string, fromPos: number, toPos: number): Promise<void>;
   setTrackLiked(trackJson: string, liked: boolean): Promise<void>;
   listLikedTracks(): Promise<string>;
   recordPlayHistory(trackJson: string): Promise<void>;
@@ -182,6 +183,14 @@ export const LumeCore = {
 
   async removeTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
     await ensureNative().removeTrackFromPlaylist(playlistId, position);
+  },
+
+  async reorderPlaylistTrack(
+    playlistId: string,
+    fromPos: number,
+    toPos: number
+  ): Promise<void> {
+    await ensureNative().reorderPlaylistTrack(playlistId, fromPos, toPos);
   },
 
   async setTrackLiked(track: Track, liked: boolean): Promise<void> {

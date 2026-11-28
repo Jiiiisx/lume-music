@@ -49,6 +49,15 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function fisherYatesShuffle<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 interface PlayerContextValue {
   currentTrack: Track | null;
   currentStream: PlayableStreamDto | null;
@@ -74,10 +83,16 @@ interface PlayerContextValue {
   dynamicThemeEnabled: boolean;
   menuTrack: Track | null;
   errorMessage: string | null;
-  playTrack: (track: Track, newQueue?: Track[], forceRematch?: boolean) => Promise<void>;
+  playTrack: (
+    track: Track,
+    newQueue?: Track[],
+    forceRematch?: boolean,
+    overrideShuffle?: boolean
+  ) => Promise<void>;
   playNext: (track: Track) => void;
   addToQueue: (track: Track) => void;
   removeFromQueue: (index: number) => void;
+  reorderQueue: (fromIndex: number, toIndex: number) => void;
   jumpToQueueIndex: (index: number) => Promise<void>;
   clearUpcomingQueue: () => void;
   togglePlayPause: () => void;
@@ -135,6 +150,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const queueRef = useRef(queue);
+  const originalQueueRef = useRef<Track[]>([]);
   const queueIndexRef = useRef(queueIndex);
   const shuffleRef = useRef(shuffle);
   const repeatRef = useRef(repeat);
@@ -235,11 +251,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setLyrics(null);
 
       if (newQueue) {
+        queueRef.current = newQueue;
         setQueue(newQueue);
         const idx =
           explicitIndex ?? Math.max(0, newQueue.findIndex((t) => t.uid === track.uid));
+        queueIndexRef.current = idx;
         setQueueIndex(idx);
       } else if (explicitIndex !== undefined) {
+        queueIndexRef.current = explicitIndex;
         setQueueIndex(explicitIndex);
       }
 
@@ -348,35 +367,55 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     [updateDynamicPalette]
   );
 
-  const nextTrack = useCallback(async () => {
-    const list = queueRef.current;
-    if (list.length === 0) return;
+  const advanceTrack = useCallback(
+    async (isAutoFinish: boolean) => {
+      const list = queueRef.current;
+      if (list.length === 0) return;
 
-    const currentIdx = queueIndexRef.current;
-    if (repeatRef.current === 'one' && currentIdx >= 0 && list[currentIdx]) {
-      await loadTrackInternal(list[currentIdx], undefined, currentIdx);
-      return;
-    }
+      const currentIdx = queueIndexRef.current;
+      // Only repeat the same song when it finishes naturally; manual Next always skips ahead.
+      if (isAutoFinish && repeatRef.current === 'one' && currentIdx >= 0 && list[currentIdx]) {
+        const player = playerRef.current;
+        if (player) {
+          finishedHandledForGenRef.current = -1;
+          await player.seekTo(0);
+          setPositionMs(0);
+          player.play();
+          return;
+        }
+        await loadTrackInternal(list[currentIdx], undefined, currentIdx);
+        return;
+      }
 
-    let nextIdx: number;
-    if (shuffleRef.current && list.length > 1) {
-      do {
-        nextIdx = Math.floor(Math.random() * list.length);
-      } while (nextIdx === currentIdx);
-    } else {
-      nextIdx = currentIdx + 1;
+      let nextIdx = currentIdx + 1;
       if (nextIdx >= list.length) {
-        if (repeatRef.current === 'all') {
+        if (repeatRef.current === 'all' || (!isAutoFinish && list.length > 1)) {
+          if (shuffleRef.current && list.length > 1) {
+            const reshuffled = fisherYatesShuffle(
+              originalQueueRef.current.length > 0 ? originalQueueRef.current : list
+            );
+            // Avoid immediately repeating the exact song that just finished.
+            if (reshuffled.length > 1 && reshuffled[0].uid === list[currentIdx]?.uid) {
+              [reshuffled[0], reshuffled[1]] = [reshuffled[1], reshuffled[0]];
+            }
+            await loadTrackInternal(reshuffled[0], reshuffled, 0);
+            return;
+          }
           nextIdx = 0;
         } else {
           playerRef.current?.pause();
           return;
         }
       }
-    }
 
-    await loadTrackInternal(list[nextIdx], undefined, nextIdx);
-  }, [loadTrackInternal]);
+      await loadTrackInternal(list[nextIdx], undefined, nextIdx);
+    },
+    [loadTrackInternal]
+  );
+
+  const nextTrack = useCallback(async () => {
+    await advanceTrack(false);
+  }, [advanceTrack]);
 
   const previousTrack = useCallback(async () => {
     const list = queueRef.current;
@@ -415,7 +454,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }).catch(() => {});
 
     const player = createAudioPlayer(null, {
-      updateInterval: 100,
+      updateInterval: 50,
       keepAudioSessionActive: true,
       preferredForwardBufferDuration: 30,
       allowsExternalPlayback: false,
@@ -474,7 +513,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (hitInflatedEnd) {
           player.pause();
         }
-        void nextTrack();
+        void advanceTrack(true);
       }
     });
 
@@ -498,28 +537,56 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       player.remove();
       playerRef.current = null;
     };
-  }, [nextTrack, previousTrack, refreshLibraryState, refreshOfflineCache]);
+  }, [advanceTrack, nextTrack, previousTrack, refreshLibraryState, refreshOfflineCache]);
 
   const playTrack = useCallback(
-    async (track: Track, newQueue?: Track[], forceRematch = false) => {
-      await loadTrackInternal(track, newQueue ?? [track], undefined, forceRematch);
+    async (
+      track: Track,
+      newQueue?: Track[],
+      forceRematch = false,
+      overrideShuffle?: boolean
+    ) => {
+      const effectiveShuffle =
+        overrideShuffle !== undefined ? overrideShuffle : shuffleRef.current;
+      if (overrideShuffle !== undefined && overrideShuffle !== shuffleRef.current) {
+        shuffleRef.current = overrideShuffle;
+        setShuffle(overrideShuffle);
+      }
+
+      const sourceList = newQueue && newQueue.length > 0 ? [...newQueue] : [track];
+      originalQueueRef.current = sourceList;
+
+      if (effectiveShuffle && sourceList.length > 1) {
+        const rest = sourceList.filter((t) => t.uid !== track.uid);
+        const shuffledQueue = [track, ...fisherYatesShuffle(rest)];
+        await loadTrackInternal(track, shuffledQueue, 0, forceRematch);
+      } else {
+        const idx = Math.max(0, sourceList.findIndex((t) => t.uid === track.uid));
+        await loadTrackInternal(track, sourceList, idx, forceRematch);
+      }
     },
     [loadTrackInternal]
   );
 
   const playNext = useCallback((track: Track) => {
     setQueue((prev) => {
-      if (prev.length === 0) return [track];
-      const idx = Math.max(0, queueIndexRef.current);
-      const copy = [...prev];
-      copy.splice(idx + 1, 0, track);
-      return copy;
+      const next = prev.length === 0 ? [track] : [...prev];
+      if (prev.length > 0) {
+        const idx = Math.max(0, queueIndexRef.current);
+        next.splice(idx + 1, 0, track);
+      }
+      queueRef.current = next;
+      return next;
     });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);
 
   const addToQueue = useCallback((track: Track) => {
-    setQueue((prev) => [...prev, track]);
+    setQueue((prev) => {
+      const next = [...prev, track];
+      queueRef.current = next;
+      return next;
+    });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);
 
@@ -527,11 +594,48 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setQueue((prev) => {
       if (index < 0 || index >= prev.length || index === queueIndexRef.current) return prev;
       const next = prev.filter((_, i) => i !== index);
+      queueRef.current = next;
       if (index < queueIndexRef.current) {
-        setQueueIndex((cur) => Math.max(0, cur - 1));
+        const nextIdx = Math.max(0, queueIndexRef.current - 1);
+        queueIndexRef.current = nextIdx;
+        setQueueIndex(nextIdx);
       }
       return next;
     });
+  }, []);
+
+  const reorderQueue = useCallback((fromIndex: number, toIndex: number) => {
+    const prev = queueRef.current;
+    if (
+      fromIndex === toIndex ||
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= prev.length ||
+      toIndex >= prev.length
+    ) {
+      return;
+    }
+    const next = [...prev];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+
+    let nextActiveIdx = queueIndexRef.current;
+    if (fromIndex === nextActiveIdx) {
+      nextActiveIdx = toIndex;
+    } else if (fromIndex < nextActiveIdx && toIndex >= nextActiveIdx) {
+      nextActiveIdx -= 1;
+    } else if (fromIndex > nextActiveIdx && toIndex <= nextActiveIdx) {
+      nextActiveIdx += 1;
+    }
+
+    queueRef.current = next;
+    queueIndexRef.current = nextActiveIdx;
+    setQueue(next);
+    setQueueIndex(nextActiveIdx);
+    if (!shuffleRef.current) {
+      originalQueueRef.current = next;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);
 
   const jumpToQueueIndex = useCallback(
@@ -546,8 +650,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const clearUpcomingQueue = useCallback(() => {
     setQueue((prev) => {
       const idx = queueIndexRef.current;
-      if (idx < 0 || idx >= prev.length) return [];
-      return prev.slice(0, idx + 1);
+      const next = idx < 0 || idx >= prev.length ? [] : prev.slice(0, idx + 1);
+      queueRef.current = next;
+      return next;
     });
   }, []);
 
@@ -571,10 +676,54 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setPositionMs(Math.round(clampedMs));
   }, []);
 
-  const toggleShuffle = useCallback(() => setShuffle((prev) => !prev), []);
+  const toggleShuffle = useCallback(() => {
+    const nextShuffle = !shuffleRef.current;
+    shuffleRef.current = nextShuffle;
+    setShuffle(nextShuffle);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+
+    const curQueue = queueRef.current;
+    const curIdx = queueIndexRef.current;
+    const active = curIdx >= 0 && curIdx < curQueue.length ? curQueue[curIdx] : currentTrackRef.current;
+
+    if (curQueue.length <= 1) return;
+
+    if (nextShuffle) {
+      if (originalQueueRef.current.length === 0) {
+        originalQueueRef.current = [...curQueue];
+      }
+      if (active) {
+        const rest = curQueue.filter((t, i) => i !== curIdx && t.uid !== active.uid);
+        const shuffled = [active, ...fisherYatesShuffle(rest)];
+        queueRef.current = shuffled;
+        queueIndexRef.current = 0;
+        setQueue(shuffled);
+        setQueueIndex(0);
+      } else {
+        const shuffled = fisherYatesShuffle(curQueue);
+        queueRef.current = shuffled;
+        queueIndexRef.current = 0;
+        setQueue(shuffled);
+        setQueueIndex(0);
+      }
+    } else if (originalQueueRef.current.length > 0) {
+      const restored = [...originalQueueRef.current];
+      const restoredIdx = active
+        ? Math.max(0, restored.findIndex((t) => t.uid === active.uid))
+        : 0;
+      queueRef.current = restored;
+      queueIndexRef.current = restoredIdx;
+      setQueue(restored);
+      setQueueIndex(restoredIdx);
+    }
+  }, []);
 
   const cycleRepeat = useCallback(() => {
-    setRepeat((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'));
+    const cur = repeatRef.current;
+    const next: RepeatMode = cur === 'off' ? 'all' : cur === 'all' ? 'one' : 'off';
+    repeatRef.current = next;
+    setRepeat(next);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);
 
   const toggleLikeTrack = useCallback(
@@ -851,6 +1000,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       playNext,
       addToQueue,
       removeFromQueue,
+      reorderQueue,
       jumpToQueueIndex,
       clearUpcomingQueue,
       togglePlayPause,
@@ -903,6 +1053,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       playNext,
       addToQueue,
       removeFromQueue,
+      reorderQueue,
       jumpToQueueIndex,
       clearUpcomingQueue,
       togglePlayPause,

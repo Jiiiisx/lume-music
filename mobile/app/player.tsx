@@ -138,6 +138,7 @@ export default function PlayerModal() {
               lyrics={lyrics}
               loading={lyricsLoading}
               positionMs={positionMs}
+              durationMs={durationMs}
               onSeekToMs={(ms) => void seekToMs(ms)}
               onRefreshLyrics={() => void refreshLyrics()}
             />
@@ -231,11 +232,16 @@ export default function PlayerModal() {
           </View>
 
           <View style={styles.controlsRow}>
-            <Pressable onPress={toggleShuffle} style={styles.ctrlBtn} hitSlop={8}>
+            <Pressable
+              onPress={toggleShuffle}
+              style={[styles.ctrlBtn, shuffle && styles.ctrlBtnActive]}
+              hitSlop={8}
+              accessibilityLabel={shuffle ? 'Shuffle On' : 'Shuffle Off'}
+            >
               <Ionicons
                 name="shuffle"
-                size={22}
-                color={shuffle ? '#FFFFFF' : 'rgba(255,255,255,0.42)'}
+                size={21}
+                color={shuffle ? '#FFFFFF' : 'rgba(255,255,255,0.44)'}
               />
               {shuffle && <View style={styles.activeDot} />}
             </Pressable>
@@ -272,13 +278,22 @@ export default function PlayerModal() {
               <Ionicons name="play-skip-forward" size={32} color="#FFFFFF" />
             </Pressable>
 
-            <Pressable onPress={cycleRepeat} style={styles.ctrlBtn} hitSlop={8}>
+            <Pressable
+              onPress={cycleRepeat}
+              style={[styles.ctrlBtn, repeat !== 'off' && styles.ctrlBtnActive]}
+              hitSlop={8}
+              accessibilityLabel={`Repeat ${repeat}`}
+            >
               <Ionicons
-                name={repeat === 'one' ? 'repeat-outline' : 'repeat'}
-                size={22}
-                color={repeat !== 'off' ? '#FFFFFF' : 'rgba(255,255,255,0.42)'}
+                name="repeat"
+                size={21}
+                color={repeat !== 'off' ? '#FFFFFF' : 'rgba(255,255,255,0.44)'}
               />
-              {repeat === 'one' && <Text style={styles.repeatOne}>1</Text>}
+              {repeat === 'one' && (
+                <View style={styles.repeatOneBadge}>
+                  <Text style={styles.repeatOne}>1</Text>
+                </View>
+              )}
               {repeat !== 'off' && <View style={styles.activeDot} />}
             </Pressable>
           </View>
@@ -468,10 +483,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   ctrlBtn: {
-    width: 48,
-    height: 48,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  ctrlBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.28)',
   },
   playCircle: {
     width: 72,
@@ -490,18 +511,27 @@ const styles = StyleSheet.create({
   },
   activeDot: {
     position: 'absolute',
-    bottom: 6,
+    bottom: 5,
     width: 4,
     height: 4,
     borderRadius: 2,
     backgroundColor: '#FFFFFF',
   },
-  repeatOne: {
+  repeatOneBadge: {
     position: 'absolute',
-    top: 9,
-    right: 9,
-    color: '#FFFFFF',
-    fontSize: 9.5,
+    top: 5,
+    right: 6,
+    minWidth: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  repeatOne: {
+    color: LumeTheme.inkDark,
+    fontSize: 9,
     fontWeight: '900',
   },
 });

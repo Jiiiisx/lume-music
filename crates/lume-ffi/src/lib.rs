@@ -938,6 +938,20 @@ impl LumeMobileCore {
             .map_err(|e| LumeFfiError::storage(e.to_string()))
     }
 
+    pub fn reorder_playlist_track(
+        &self,
+        playlist_id: String,
+        from_pos: u32,
+        to_pos: u32,
+    ) -> Result<(), LumeFfiError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| LumeFfiError::internal("database mutex poisoned"))?;
+        db.reorder_playlist_track(&playlist_id, from_pos as usize, to_pos as usize)
+            .map_err(|e| LumeFfiError::storage(e.to_string()))
+    }
+
     pub fn set_track_liked(&self, track_json: String, liked: bool) -> Result<(), LumeFfiError> {
         let track = parse_track_json(&track_json)?;
         let db = self
@@ -1622,6 +1636,19 @@ mod tests {
             .unwrap();
         let enriched_map: HashMap<String, String> = serde_json::from_str(&enriched_json).unwrap();
         assert!(enriched_map.is_empty());
+
+        // Verify playlist track reordering persists in SQLite.
+        let t1 = sample_ytm_track("reorder0001");
+        let t2 = sample_ytm_track("reorder0002");
+        core.add_track_to_playlist(pl.id.clone(), serde_json::to_string(&t1).unwrap())
+            .unwrap();
+        core.add_track_to_playlist(pl.id.clone(), serde_json::to_string(&t2).unwrap())
+            .unwrap();
+        core.reorder_playlist_track(pl.id.clone(), 1, 0).unwrap();
+        let ordered: Vec<Track> =
+            serde_json::from_str(&core.get_playlist_tracks_json(pl.id.clone()).unwrap()).unwrap();
+        assert_eq!(ordered[0].uid, t2.uid);
+        assert_eq!(ordered[1].uid, t1.uid);
     }
 
     #[test]

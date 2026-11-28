@@ -19,17 +19,14 @@ export default function OfflineScreen() {
     playTrack,
     removeOffline,
     toggleLikeTrack,
-    toggleShuffle,
-    shuffle,
   } = usePlayer();
 
   const tracks = offlineEntries.map((e) => e.track);
 
   const playAllOffline = async (openDriving: boolean) => {
     if (tracks.length === 0) return;
-    if (!shuffle) toggleShuffle();
     const randomStart = tracks[Math.floor(Math.random() * tracks.length)];
-    await playTrack(randomStart, tracks);
+    await playTrack(randomStart, tracks, false, true);
     if (openDriving) {
       router.push('/driving');
     }

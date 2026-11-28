@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -17,6 +18,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import * as DocumentPicker from 'expo-document-picker';
 import { File as ExpoFile } from 'expo-file-system';
+import * as Haptics from 'expo-haptics';
+import * as SecureStore from 'expo-secure-store';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { LumeCore } from '../../modules/lume-core';
 import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
@@ -34,6 +37,8 @@ import {
 
 type SortMode = 'custom' | 'title' | 'artist' | 'duration';
 
+const KEY_PLAYLIST_ORDER = 'lume_playlist_order_v1';
+
 function needsSpotifyArt(track: Track): boolean {
   if (!('Spotify' in track.source)) return false;
   const art = track.artwork_ref?.trim() ?? '';
@@ -48,9 +53,7 @@ export default function LibraryScreen() {
     playlists,
     offlineUids,
     downloadingUids,
-    shuffle,
     playTrack,
-    toggleShuffle,
     downloadOffline,
     downloadPlaylistOffline,
     toggleLikeTrack,
@@ -62,6 +65,9 @@ export default function LibraryScreen() {
   const [selectedTracks, setSelectedTracks] = useState<Track[]>([]);
   const [activeView, setActiveView] = useState<'main' | 'liked' | 'local' | 'playlist'>('main');
   const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [reorderingTracks, setReorderingTracks] = useState(false);
+  const [reorderingPlaylists, setReorderingPlaylists] = useState(false);
+  const [playlistOrder, setPlaylistOrder] = useState<string[]>([]);
   const enrichRunRef = useRef(0);
   const pickerInFlightRef = useRef(false);
   const pendingImportActionRef = useRef<'csv' | 'audio' | null>(null);
@@ -76,6 +82,17 @@ export default function LibraryScreen() {
 
   const loadLibrary = useCallback(async () => {
     await refreshLibraryState();
+    try {
+      const savedOrder = await SecureStore.getItemAsync(KEY_PLAYLIST_ORDER);
+      if (savedOrder) {
+        const parsed = JSON.parse(savedOrder) as unknown;
+        if (Array.isArray(parsed)) {
+          setPlaylistOrder(parsed.filter((v): v is string => typeof v === 'string'));
+        }
+      }
+    } catch {
+      // Non-fatal.
+    }
     if (!LumeCore.isAvailable()) return;
     try {
       const local = await LumeCore.listLocalTracks();
@@ -97,6 +114,7 @@ export default function LibraryScreen() {
     setSelectedTracks(tracks);
     setRenameText(pl.name);
     setRenaming(false);
+    setReorderingTracks(false);
     setSortMode('custom');
     setActiveView('playlist');
   };
@@ -363,13 +381,86 @@ export default function LibraryScreen() {
     return copy;
   }, [rawDetailTracks, sortMode]);
 
+  const orderedPlaylists = useMemo(() => {
+    if (playlistOrder.length === 0) return playlists;
+    const rankMap = new Map(playlistOrder.map((id, idx) => [id, idx]));
+    return [...playlists].sort((a, b) => {
+      const ra = rankMap.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+      const rb = rankMap.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+      return ra - rb;
+    });
+  }, [playlists, playlistOrder]);
+
+  const movePlaylistOrder = async (fromIdx: number, toIdx: number) => {
+    if (
+      fromIdx === toIdx ||
+      fromIdx < 0 ||
+      toIdx < 0 ||
+      fromIdx >= orderedPlaylists.length ||
+      toIdx >= orderedPlaylists.length
+    ) {
+      return;
+    }
+    const ids = orderedPlaylists.map((p) => p.id);
+    const [moved] = ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, moved);
+    setPlaylistOrder(ids);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    await SecureStore.setItemAsync(KEY_PLAYLIST_ORDER, JSON.stringify(ids)).catch(() => {});
+  };
+
+  const handleMovePlaylistTrack = async (fromPos: number, toPos: number) => {
+    if (!selectedPlaylist) return;
+    if (
+      fromPos === toPos ||
+      fromPos < 0 ||
+      toPos < 0 ||
+      fromPos >= selectedTracks.length ||
+      toPos >= selectedTracks.length
+    ) {
+      return;
+    }
+    const prev = selectedTracks;
+    const next = [...prev];
+    const [moved] = next.splice(fromPos, 1);
+    next.splice(toPos, 0, moved);
+    setSelectedTracks(next);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    try {
+      await LumeCore.reorderPlaylistTrack(selectedPlaylist.id, fromPos, toPos);
+    } catch (err) {
+      setSelectedTracks(prev);
+      Alert.alert('Gagal Mengubah Urutan', err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleRemoveTrackAt = async (position: number, title: string) => {
+    if (!selectedPlaylist) return;
+    Alert.alert('Hapus Lagu dari Playlist?', `Hapus "${title}" dari "${selectedPlaylist.name}"?`, [
+      { text: 'Batal', style: 'cancel' },
+      {
+        text: 'Hapus',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await LumeCore.removeTrackFromPlaylist(selectedPlaylist.id, position);
+            const updated = await LumeCore.getPlaylistTracks(selectedPlaylist.id);
+            setSelectedTracks(updated);
+            await refreshLibraryState();
+          } catch (err) {
+            Alert.alert('Gagal', err instanceof Error ? err.message : String(err));
+          }
+        },
+      },
+    ]);
+  };
+
   const playDetailAll = async (shuffled: boolean) => {
     if (sortedDetailTracks.length === 0) return;
-    if (shuffled && !shuffle) toggleShuffle();
     const startTrack = shuffled
       ? sortedDetailTracks[Math.floor(Math.random() * sortedDetailTracks.length)]
       : sortedDetailTracks[0];
-    await playTrack(startTrack, sortedDetailTracks);
+    await playTrack(startTrack, sortedDetailTracks, false, shuffled);
   };
 
   if (activeView !== 'main') {
@@ -402,6 +493,24 @@ export default function LibraryScreen() {
             <View style={styles.detailActions}>
               {canEdit && selectedPlaylist && (
                 <>
+                  <Pressable
+                    onPress={() => {
+                      const next = !reorderingTracks;
+                      setReorderingTracks(next);
+                      if (next) setSortMode('custom');
+                    }}
+                    style={[
+                      styles.iconCircle,
+                      reorderingTracks && styles.iconCircleActive,
+                    ]}
+                    accessibilityLabel="Atur urutan lagu"
+                  >
+                    <Ionicons
+                      name="swap-vertical"
+                      size={16}
+                      color={reorderingTracks ? LumeTheme.inkDark : '#FFFFFF'}
+                    />
+                  </Pressable>
                   <Pressable
                     onPress={() => setRenaming((r) => !r)}
                     style={styles.iconCircle}
@@ -490,30 +599,45 @@ export default function LibraryScreen() {
               )}
             </View>
 
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={{ flexGrow: 0 }}
-              contentContainerStyle={styles.sortRow}
-            >
-              {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
+            {reorderingTracks && canEdit ? (
+              <View style={styles.reorderBanner}>
+                <Ionicons name="swap-vertical" size={16} color="#FFFFFF" />
+                <Text style={styles.reorderBannerText}>
+                  Geser naik/turun untuk mengatur urutan lagu
+                </Text>
                 <Pressable
-                  key={mode}
-                  onPress={() => setSortMode(mode)}
-                  style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
+                  onPress={() => setReorderingTracks(false)}
+                  style={styles.reorderDoneBtn}
                 >
-                  <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
-                    {mode === 'custom'
-                      ? 'Urutan Asli'
-                      : mode === 'title'
-                        ? 'Judul'
-                        : mode === 'artist'
-                          ? 'Artis'
-                          : 'Durasi'}
-                  </Text>
+                  <Text style={styles.reorderDoneText}>Selesai</Text>
                 </Pressable>
-              ))}
-            </ScrollView>
+              </View>
+            ) : (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={{ flexGrow: 0 }}
+                contentContainerStyle={styles.sortRow}
+              >
+                {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
+                  <Pressable
+                    key={mode}
+                    onPress={() => setSortMode(mode)}
+                    style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
+                  >
+                    <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
+                      {mode === 'custom'
+                        ? 'Urutan Asli'
+                        : mode === 'title'
+                          ? 'Judul'
+                          : mode === 'artist'
+                            ? 'Artis'
+                            : 'Durasi'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
 
             <BatchDownloadBanner />
 
@@ -528,6 +652,57 @@ export default function LibraryScreen() {
               <View style={styles.emptyBox}>
                 <Ionicons name="musical-notes-outline" size={32} color={LumeTheme.textMuted} />
                 <Text style={styles.emptyDetail}>Belum ada lagu di sini.</Text>
+              </View>
+            ) : reorderingTracks && canEdit ? (
+              <View style={styles.glassListBox}>
+                {selectedTracks.map((track, idx) => (
+                  <View key={`${track.uid}-${idx}`} style={styles.reorderRow}>
+                    <Text style={styles.reorderRank}>{String(idx + 1).padStart(2, '0')}</Text>
+                    {track.artwork_ref ? (
+                      <Image source={{ uri: track.artwork_ref }} style={styles.reorderArt} />
+                    ) : (
+                      <View style={[styles.reorderArt, styles.reorderArtFallback]}>
+                        <Ionicons name="musical-note" size={16} color="rgba(255,255,255,0.7)" />
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.reorderTitle} numberOfLines={1}>
+                        {track.title}
+                      </Text>
+                      <Text style={styles.reorderArtist} numberOfLines={1}>
+                        {trackArtistDisplay(track)}
+                      </Text>
+                    </View>
+                    <View style={styles.reorderTools}>
+                      <Pressable
+                        onPress={() => void handleMovePlaylistTrack(idx, idx - 1)}
+                        disabled={idx === 0}
+                        hitSlop={6}
+                        style={[styles.reorderToolBtn, idx === 0 && styles.toolDisabled]}
+                      >
+                        <Ionicons name="chevron-up" size={17} color="#FFFFFF" />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => void handleMovePlaylistTrack(idx, idx + 1)}
+                        disabled={idx + 1 >= selectedTracks.length}
+                        hitSlop={6}
+                        style={[
+                          styles.reorderToolBtn,
+                          idx + 1 >= selectedTracks.length && styles.toolDisabled,
+                        ]}
+                      >
+                        <Ionicons name="chevron-down" size={17} color="#FFFFFF" />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => void handleRemoveTrackAt(idx, track.title)}
+                        hitSlop={6}
+                        style={styles.reorderToolBtn}
+                      >
+                        <Ionicons name="trash-outline" size={15} color={LumeTheme.rose} />
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
               </View>
             ) : (
               <View style={styles.glassListBox}>
@@ -637,6 +812,23 @@ export default function LibraryScreen() {
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionLabel}>PLAYLISTS</Text>
               <View style={styles.sectionTools}>
+                {orderedPlaylists.length > 1 && (
+                  <Pressable
+                    onPress={() => setReorderingPlaylists((r) => !r)}
+                    style={[
+                      styles.sectionToolBtn,
+                      reorderingPlaylists && styles.sectionToolBtnActive,
+                    ]}
+                    hitSlop={6}
+                    accessibilityLabel="Atur urutan playlist"
+                  >
+                    <Ionicons
+                      name="swap-vertical"
+                      size={15}
+                      color={reorderingPlaylists ? LumeTheme.inkDark : '#FFFFFF'}
+                    />
+                  </Pressable>
+                )}
                 <Pressable
                   onPress={() => setShowCreateModal(true)}
                   style={styles.sectionToolBtn}
@@ -654,7 +846,7 @@ export default function LibraryScreen() {
               </View>
             </View>
 
-            {playlists.length === 0 ? (
+            {orderedPlaylists.length === 0 ? (
               <View style={styles.emptyBox}>
                 <Ionicons name="albums-outline" size={32} color={LumeTheme.textMuted} />
                 <Text style={styles.emptyDetail}>
@@ -679,12 +871,14 @@ export default function LibraryScreen() {
               </View>
             ) : (
               <View style={styles.playlistList}>
-                {playlists.map((pl) => {
+                {orderedPlaylists.map((pl, idx) => {
                   const badge = playlistOriginBadge(pl.origin);
                   return (
                     <Pressable
                       key={pl.id}
-                      onPress={() => void openPlaylist(pl)}
+                      onPress={() => {
+                        if (!reorderingPlaylists) void openPlaylist(pl);
+                      }}
                       style={({ pressed }) => [styles.playlistRow, pressed && styles.cardPressed]}
                     >
                       <View style={styles.plIcon}>
@@ -705,18 +899,50 @@ export default function LibraryScreen() {
                           <Text style={styles.cardSub}>{pl.track_count} lagu</Text>
                         </View>
                       </View>
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          void handleDownloadPlaylistById(pl);
-                        }}
-                        hitSlop={8}
-                        style={styles.plDownloadBtn}
-                        accessibilityLabel={`Download playlist ${pl.name}`}
-                      >
-                        <Ionicons name="cloud-download-outline" size={17} color="#FFFFFF" />
-                      </Pressable>
-                      <Ionicons name="chevron-forward" size={17} color={LumeTheme.textMuted} />
+                      {reorderingPlaylists ? (
+                        <View style={styles.reorderTools}>
+                          <Pressable
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              void movePlaylistOrder(idx, idx - 1);
+                            }}
+                            disabled={idx === 0}
+                            hitSlop={6}
+                            style={[styles.reorderToolBtn, idx === 0 && styles.toolDisabled]}
+                          >
+                            <Ionicons name="chevron-up" size={17} color="#FFFFFF" />
+                          </Pressable>
+                          <Pressable
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              void movePlaylistOrder(idx, idx + 1);
+                            }}
+                            disabled={idx + 1 >= orderedPlaylists.length}
+                            hitSlop={6}
+                            style={[
+                              styles.reorderToolBtn,
+                              idx + 1 >= orderedPlaylists.length && styles.toolDisabled,
+                            ]}
+                          >
+                            <Ionicons name="chevron-down" size={17} color="#FFFFFF" />
+                          </Pressable>
+                        </View>
+                      ) : (
+                        <>
+                          <Pressable
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              void handleDownloadPlaylistById(pl);
+                            }}
+                            hitSlop={8}
+                            style={styles.plDownloadBtn}
+                            accessibilityLabel={`Download playlist ${pl.name}`}
+                          >
+                            <Ionicons name="cloud-download-outline" size={17} color="#FFFFFF" />
+                          </Pressable>
+                          <Ionicons name="chevron-forward" size={17} color={LumeTheme.textMuted} />
+                        </>
+                      )}
                     </Pressable>
                   );
                 })}
@@ -922,6 +1148,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  iconCircleActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+  },
   quickGrid: {
     flexDirection: 'row',
     gap: 12,
@@ -994,6 +1224,94 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.14)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  sectionToolBtnActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+  },
+  reorderBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.11)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.20)',
+  },
+  reorderBannerText: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 12.5,
+    fontWeight: '600',
+  },
+  reorderDoneBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+  },
+  reorderDoneText: {
+    color: LumeTheme.inkDark,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  reorderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+  },
+  reorderRank: {
+    width: 22,
+    color: LumeTheme.textMuted,
+    fontSize: 11.5,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    textAlign: 'center',
+  },
+  reorderArt: {
+    width: 40,
+    height: 40,
+    borderRadius: 9,
+  },
+  reorderArtFallback: {
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reorderTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  reorderArtist: {
+    color: LumeTheme.textSecondary,
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  reorderTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  reorderToolBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toolDisabled: {
+    opacity: 0.28,
   },
   playlistList: {
     gap: 8,

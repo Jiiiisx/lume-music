@@ -206,6 +206,14 @@ public class LumeCoreModule: Module {
       }
     }
 
+    AsyncFunction("reorderPlaylistTrack") { (playlistId: String, fromPos: Int, toPos: Int, promise: Promise) in
+      let from = UInt32(max(0, fromPos))
+      let to = UInt32(max(0, toPos))
+      self.runAsyncVoid(promise) { core in
+        try core.reorderPlaylistTrack(playlistId: playlistId, fromPos: from, toPos: to)
+      }
+    }
+
     AsyncFunction("setTrackLiked") { (trackJson: String, liked: Bool, promise: Promise) in
       self.runAsyncVoid(promise) { core in
         try core.setTrackLiked(trackJson: trackJson, liked: liked)
