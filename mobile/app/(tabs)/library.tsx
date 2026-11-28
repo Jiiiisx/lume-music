@@ -113,16 +113,31 @@ export default function LibraryScreen() {
     try {
       const picked = await DocumentPicker.getDocumentAsync({
         type: ['text/csv', 'text/comma-separated-values', 'public.comma-separated-values-text', '*/*'],
+        multiple: true,
         copyToCacheDirectory: true,
       });
-      if (picked.canceled || !picked.assets?.[0]) return;
-      const asset = picked.assets[0];
-      setBusyMessage('Mengimpor Exportify CSV...');
-      const csvText = await new ExpoFile(asset.uri).text();
-      const name = asset.name.replace(/\.csv$/i, '') || 'Exportify Playlist';
-      const pl = await LumeCore.importExportifyCsv(csvText, name);
+      if (picked.canceled || !picked.assets || picked.assets.length === 0) return;
+      setBusyMessage(`Mengimpor ${picked.assets.length} file Exportify CSV...`);
+      const importedNames: string[] = [];
+      let totalTracks = 0;
+      for (const asset of picked.assets) {
+        const csvText = await new ExpoFile(asset.uri).text();
+        let rawName = asset.name;
+        try {
+          rawName = decodeURIComponent(asset.name);
+        } catch {
+          // Keep original name if not percent-encoded.
+        }
+        const name = rawName.replace(/\.csv$/i, '').trim() || 'Exportify Playlist';
+        const pl = await LumeCore.importExportifyCsv(csvText, name);
+        importedNames.push(`${pl.name} (${pl.track_count})`);
+        totalTracks += pl.track_count;
+      }
       await loadLibrary();
-      Alert.alert('Import CSV Berhasil', `"${pl.name}" (${pl.track_count} lagu) ditambahkan.`);
+      Alert.alert(
+        'Import CSV Berhasil',
+        `${importedNames.length} playlist (${totalTracks} lagu total):\n${importedNames.join(', ')}`
+      );
     } catch (err) {
       Alert.alert('Import CSV Gagal', err instanceof Error ? err.message : String(err));
     } finally {

@@ -1166,7 +1166,14 @@ impl LumeMobileCore {
         } else {
             playlist_name.trim()
         };
-        let source_tag = format!("csv:{}", sanitize_filename(name));
+        // Preserve full Unicode name bytes (including emoji names like "💪💪", "🤗🤗", "😭😭")
+        // so distinct non-ASCII playlists never collide onto the same SQLite `source_url` key.
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in name.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let source_tag = format!("csv:{hash:016x}:{name}");
         let imported = parse_exportify_csv(&csv_text, name, &source_tag)
             .map_err(|e| LumeFfiError::invalid(e.to_string()))?;
         let playlist = {
@@ -1481,6 +1488,20 @@ mod tests {
         .unwrap();
         assert_eq!(imported.name, "Exportify Mix");
         assert_eq!(imported.track_count, 1);
+
+        // Emoji-only CSV playlist names must remain distinct and never overwrite each other.
+        for emoji_name in ["💪💪", "🤗🤗", "😭😭"] {
+            let p: lume_core::Playlist = serde_json::from_str(
+                &core
+                    .import_exportify_csv_json(csv.into(), emoji_name.into())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(p.name, emoji_name);
+        }
+        let all_pls: Vec<lume_core::Playlist> =
+            serde_json::from_str(&core.list_playlists_json().unwrap()).unwrap();
+        assert_eq!(all_pls.len(), 5);
 
         // Verify palette extraction on a synthetic crimson PNG image.
         let mut img = image::RgbaImage::new(8, 8);
