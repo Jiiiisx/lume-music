@@ -9,6 +9,14 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { LumeTheme } from '../theme';
 import type { LyricsData, LyricsLine, LyricsWord } from '../types';
 
@@ -17,6 +25,8 @@ interface SyncedLyricsViewProps {
   loading: boolean;
   positionMs: number;
   durationMs?: number;
+  isPlaying?: boolean;
+  fadeColor?: string;
   onSeekToMs: (ms: number) => void;
   onRefreshLyrics?: () => void;
 }
@@ -42,10 +52,6 @@ const INTERLUDE_GAP_MS = 3500;
 const INTRO_INTERLUDE_MS = 2600;
 const USER_SCROLL_PAUSE_MS = 3500;
 
-/**
- * Mirrors Desktop's `build_display_timeline` so instrumental breaks appear inline
- * between lyric lines (instead of pinned at the top of the scroll view).
- */
 function buildDisplayTimeline(lines: LyricsLine[], durationMs: number): TimelineItem[] {
   const items: TimelineItem[] = [];
   if (lines.length === 0) return items;
@@ -110,10 +116,6 @@ function findActiveTimelineIndex(items: TimelineItem[], positionMs: number): num
   return active;
 }
 
-/**
- * Produces per-word timings for BOTH native syllable-synced lines (LyricsPlus / Apple Music TTML)
- * and line-only synced lines (LRCLIB), matching Desktop's `resolve_line_words` karaoke sweep.
- */
 function resolveLineWords(line: LyricsLine, startMs: number, endMs: number): LyricsWord[] {
   if (line.words && line.words.length > 0) {
     return line.words;
@@ -122,7 +124,6 @@ function resolveLineWords(line: LyricsLine, startMs: number, endMs: number): Lyr
   if (tokens.length === 0) return [];
 
   const totalSpan = Math.max(400, endMs - startMs);
-  // Slight 8% breathing cushion at the end of line-synced rows so the final word finishes crisply.
   const usableSpan = totalSpan * 0.92;
   const weights = tokens.map((tok) => Math.max(1, tok.length));
   const totalWeight = weights.reduce((acc, w) => acc + w, 0);
@@ -131,7 +132,7 @@ function resolveLineWords(line: LyricsLine, startMs: number, endMs: number): Lyr
   return tokens.map((tok, idx) => {
     const share = (weights[idx] / totalWeight) * usableSpan;
     const wStart = Math.round(cursor);
-    const wEnd = Math.round(cursor + Math.max(80, share));
+    const wEnd = Math.round(cursor + Math.max(90, share));
     cursor += share;
     return {
       text: tok,
@@ -142,11 +143,148 @@ function resolveLineWords(line: LyricsLine, startMs: number, endMs: number): Lyr
   });
 }
 
+function smoothstep(t: number): number {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+}
+
+interface LyricLineRowProps {
+  line: LyricsLine;
+  startMs: number;
+  endMs: number;
+  isActive: boolean;
+  distance: number;
+  smoothPosMs: number;
+  onLayoutY: (y: number) => void;
+  onPress: () => void;
+}
+
+/**
+ * Animated lyric line row using constant layout typography + UI-thread Reanimated
+ * springs (`scale`, `translateY`, `opacity`) so activating/deactivating lines NEVER
+ * causes text reflow jumps or scroll jank.
+ */
+const LyricLineRow = React.memo(function LyricLineRow({
+  line,
+  startMs,
+  endMs,
+  isActive,
+  distance,
+  smoothPosMs,
+  onLayoutY,
+  onPress,
+}: LyricLineRowProps) {
+  const absDist = Math.abs(distance);
+  const targetOpacity = isActive
+    ? 1
+    : absDist === 1
+      ? 0.44
+      : absDist === 2
+        ? 0.27
+        : 0.16;
+  const targetScale = isActive ? 1 : absDist === 1 ? 0.94 : 0.91;
+  const targetLift = isActive ? -2 : 0;
+
+  const animOpacity = useSharedValue(targetOpacity);
+  const animScale = useSharedValue(targetScale);
+  const animLift = useSharedValue(targetLift);
+
+  useEffect(() => {
+    animOpacity.value = withTiming(targetOpacity, {
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+    });
+    animScale.value = withSpring(targetScale, {
+      damping: 22,
+      stiffness: 175,
+      mass: 0.85,
+    });
+    animLift.value = withSpring(targetLift, {
+      damping: 22,
+      stiffness: 175,
+      mass: 0.85,
+    });
+  }, [animLift, animOpacity, animScale, targetLift, targetOpacity, targetScale]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: animOpacity.value,
+    transform: [{ translateY: animLift.value }, { scale: animScale.value }],
+  }));
+
+  const words = useMemo(
+    () => (isActive ? resolveLineWords(line, startMs, endMs) : null),
+    [isActive, line, startMs, endMs]
+  );
+
+  return (
+    <Pressable
+      onLayout={(e) => onLayoutY(e.nativeEvent.layout.y)}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.lineBox,
+        line.opposite_aligned && styles.rightAligned,
+        pressed && styles.linePressed,
+      ]}
+    >
+      <Animated.View
+        style={[
+          styles.lineInner,
+          line.opposite_aligned && styles.rightAligned,
+          animatedStyle,
+        ]}
+      >
+        {isActive && words && words.length > 0 ? (
+          <Text
+            style={[
+              styles.baseLineText,
+              styles.activeLineGlow,
+              line.is_background && styles.bgLineText,
+              line.opposite_aligned && styles.textRight,
+            ]}
+          >
+            {words.map((word, wi) => {
+              const dur = Math.max(130, word.end_ms - word.start_ms);
+              const rawProg = (smoothPosMs - word.start_ms) / dur;
+              const eased = smoothstep(rawProg);
+              // Continuous smooth fade 0.34 -> 1.00 across each syllable/word (no harsh single-word halo).
+              const alpha = (0.34 + 0.66 * eased).toFixed(2);
+              const sep = word.is_part_of_word ? '' : ' ';
+
+              return (
+                <Text
+                  key={`${word.start_ms}-${wi}`}
+                  style={{ color: `rgba(255, 255, 255, ${alpha})` }}
+                >
+                  {word.text}
+                  {wi < words.length - 1 ? sep : ''}
+                </Text>
+              );
+            })}
+          </Text>
+        ) : (
+          <Text
+            style={[
+              styles.baseLineText,
+              styles.idleLineColor,
+              line.is_background && styles.bgLineText,
+              line.opposite_aligned && styles.textRight,
+            ]}
+          >
+            {line.text}
+          </Text>
+        )}
+      </Animated.View>
+    </Pressable>
+  );
+});
+
 export function SyncedLyricsView({
   lyrics,
   loading,
   positionMs,
   durationMs = 0,
+  isPlaying = true,
+  fadeColor = '#080A10',
   onSeekToMs,
   onRefreshLyrics,
 }: SyncedLyricsViewProps) {
@@ -155,19 +293,39 @@ export function SyncedLyricsView({
   const userScrollUntilRef = useRef(0);
   const [viewportHeight, setViewportHeight] = useState(420);
 
+  // 60fps interpolated playhead anchored to AVPlayer's position updates so syllable sweeps glide smoothly.
+  const clockAnchorRef = useRef({ baseMs: positionMs, wallMs: Date.now() });
+  const [smoothPosMs, setSmoothPosMs] = useState(positionMs);
+
+  useEffect(() => {
+    clockAnchorRef.current = { baseMs: positionMs, wallMs: Date.now() };
+    setSmoothPosMs(positionMs);
+  }, [positionMs]);
+
+  useEffect(() => {
+    if (!isPlaying || !lyrics || lyrics.synced.length === 0) return;
+    let rafId = 0;
+    const tick = () => {
+      const elapsed = Math.min(180, Math.max(0, Date.now() - clockAnchorRef.current.wallMs));
+      setSmoothPosMs(clockAnchorRef.current.baseMs + elapsed);
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, lyrics]);
+
   const timeline = useMemo(
     () => (lyrics ? buildDisplayTimeline(lyrics.synced, durationMs) : []),
     [lyrics, durationMs]
   );
 
-  // Clear cached layout offsets whenever the lyrics payload changes.
   useEffect(() => {
     itemOffsetsRef.current = {};
   }, [lyrics]);
 
   const activeIndex = useMemo(
-    () => findActiveTimelineIndex(timeline, positionMs),
-    [timeline, positionMs]
+    () => findActiveTimelineIndex(timeline, smoothPosMs),
+    [timeline, smoothPosMs]
   );
 
   useEffect(() => {
@@ -175,7 +333,7 @@ export function SyncedLyricsView({
     if (Date.now() < userScrollUntilRef.current) return;
     const y = itemOffsetsRef.current[activeIndex];
     if (y !== undefined) {
-      const focalOffset = Math.round(viewportHeight * 0.31);
+      const focalOffset = Math.round(viewportHeight * 0.30);
       scrollRef.current?.scrollTo({
         y: Math.max(0, y - focalOffset),
         animated: true,
@@ -231,8 +389,8 @@ export function SyncedLyricsView({
     );
   }
 
-  const topSpacer = Math.max(64, Math.round(viewportHeight * 0.24));
-  const bottomSpacer = Math.max(140, Math.round(viewportHeight * 0.44));
+  const topSpacer = Math.max(68, Math.round(viewportHeight * 0.25));
+  const bottomSpacer = Math.max(150, Math.round(viewportHeight * 0.45));
 
   return (
     <View
@@ -264,17 +422,13 @@ export function SyncedLyricsView({
           if (item.kind === 'interlude') {
             const span = Math.max(1, item.endMs - item.startMs);
             const prog = isActive
-              ? Math.min(1, Math.max(0, (positionMs - item.startMs) / span))
+              ? Math.min(1, Math.max(0, (smoothPosMs - item.startMs) / span))
               : distance < 0
                 ? 1
                 : 0;
-            const dot1 = isActive ? 0.35 + 0.65 * Math.min(1, prog * 3) : 0.22;
-            const dot2 = isActive
-              ? 0.35 + 0.65 * Math.min(1, Math.max(0, (prog - 0.33) * 3))
-              : 0.22;
-            const dot3 = isActive
-              ? 0.35 + 0.65 * Math.min(1, Math.max(0, (prog - 0.66) * 3))
-              : 0.22;
+            const d1 = isActive ? 0.30 + 0.70 * smoothstep(prog * 3) : 0.20;
+            const d2 = isActive ? 0.30 + 0.70 * smoothstep((prog - 0.33) * 3) : 0.20;
+            const d3 = isActive ? 0.30 + 0.70 * smoothstep((prog - 0.66) * 3) : 0.20;
 
             return (
               <Pressable
@@ -289,12 +443,12 @@ export function SyncedLyricsView({
                 style={[
                   styles.interludeRow,
                   item.oppositeAligned && styles.interludeRight,
-                  !isActive && { opacity: absDist === 1 ? 0.4 : 0.16 },
+                  !isActive && { opacity: absDist === 1 ? 0.38 : 0.14 },
                 ]}
               >
-                <View style={[styles.dot, isActive && styles.dotActive, { opacity: dot1 }]} />
-                <View style={[styles.dot, isActive && styles.dotActive, { opacity: dot2 }]} />
-                <View style={[styles.dot, isActive && styles.dotActive, { opacity: dot3 }]} />
+                <View style={[styles.dot, { opacity: d1, transform: [{ scale: isActive ? 0.9 + d1 * 0.22 : 0.9 }] }]} />
+                <View style={[styles.dot, { opacity: d2, transform: [{ scale: isActive ? 0.9 + d2 * 0.22 : 0.9 }] }]} />
+                <View style={[styles.dot, { opacity: d3, transform: [{ scale: isActive ? 0.9 + d3 * 0.22 : 0.9 }] }]} />
               </Pressable>
             );
           }
@@ -303,93 +457,43 @@ export function SyncedLyricsView({
           const isOverlappingDuet =
             !isActive &&
             Boolean(line.words && line.words.length > 0) &&
-            positionMs >= startMs &&
-            positionMs <= endMs;
-          const highlightActive = isActive || isOverlappingDuet;
-
-          const words = highlightActive ? resolveLineWords(line, startMs, endMs) : null;
-
-          // Distance-graded Apple Music / Desktop opacity & scale hierarchy.
-          const idleColor =
-            absDist === 1
-              ? 'rgba(255, 255, 255, 0.46)'
-              : absDist === 2
-                ? 'rgba(255, 255, 255, 0.28)'
-                : 'rgba(255, 255, 255, 0.17)';
-          const idleSize = line.is_background
-            ? 16.5
-            : absDist === 1
-              ? 22.5
-              : absDist === 2
-                ? 21
-                : 20;
+            smoothPosMs >= startMs &&
+            smoothPosMs <= endMs;
 
           return (
-            <Pressable
+            <LyricLineRow
               key={item.key}
-              onLayout={(e) => {
-                itemOffsetsRef.current[index] = e.nativeEvent.layout.y;
+              line={line}
+              startMs={startMs}
+              endMs={endMs}
+              isActive={isActive || isOverlappingDuet}
+              distance={distance}
+              smoothPosMs={isActive || isOverlappingDuet ? smoothPosMs : 0}
+              onLayoutY={(y) => {
+                itemOffsetsRef.current[index] = y;
               }}
               onPress={() => {
                 userScrollUntilRef.current = 0;
                 onSeekToMs(line.time_ms);
               }}
-              style={({ pressed }) => [
-                styles.lineBox,
-                highlightActive && styles.lineBoxActive,
-                line.opposite_aligned && styles.rightAligned,
-                pressed && styles.linePressed,
-              ]}
-            >
-              {highlightActive && words && words.length > 0 ? (
-                <Text
-                  style={[
-                    styles.activeLineText,
-                    line.is_background && styles.activeBgLineText,
-                    line.opposite_aligned && styles.textRight,
-                  ]}
-                >
-                  {words.map((word, wi) => {
-                    const isSingingNow =
-                      positionMs >= word.start_ms && positionMs <= word.end_ms + 80;
-                    const isSung = positionMs > word.end_ms + 80;
-                    const sep = word.is_part_of_word ? '' : ' ';
-
-                    return (
-                      <Text
-                        key={`${word.start_ms}-${wi}`}
-                        style={
-                          isSingingNow
-                            ? styles.wordGlowing
-                            : isSung
-                              ? styles.wordSung
-                              : styles.wordUpcoming
-                        }
-                      >
-                        {word.text}
-                        {wi < words.length - 1 ? sep : ''}
-                      </Text>
-                    );
-                  })}
-                </Text>
-              ) : (
-                <Text
-                  style={[
-                    styles.idleLineText,
-                    { color: idleColor, fontSize: idleSize, lineHeight: Math.round(idleSize * 1.36) },
-                    line.is_background && styles.bgLineItalic,
-                    line.opposite_aligned && styles.textRight,
-                  ]}
-                >
-                  {line.text}
-                </Text>
-              )}
-            </Pressable>
+            />
           );
         })}
 
         <View style={{ height: bottomSpacer }} />
       </ScrollView>
+
+      {/* Soft top & bottom gradient edge fades so lyrics melt seamlessly into the backdrop */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={[fadeColor, 'transparent']}
+        style={styles.topFade}
+      />
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', fadeColor]}
+        style={styles.bottomFade}
+      />
 
       <View style={styles.footerBar}>
         <Text style={styles.providerTag}>
@@ -408,6 +512,7 @@ export function SyncedLyricsView({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+    position: 'relative',
   },
   center: {
     flex: 1,
@@ -449,17 +554,31 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 26,
   },
   plainContent: {
     paddingHorizontal: 24,
     paddingVertical: 20,
     paddingBottom: 60,
   },
+  topFade: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 36,
+  },
+  bottomFade: {
+    position: 'absolute',
+    bottom: 44,
+    left: 0,
+    right: 0,
+    height: 44,
+  },
   interludeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 9,
+    gap: 10,
     paddingVertical: 14,
   },
   interludeRight: {
@@ -471,65 +590,41 @@ const styles = StyleSheet.create({
     borderRadius: 4.5,
     backgroundColor: '#FFFFFF',
   },
-  dotActive: {
-    width: 11,
-    height: 11,
-    borderRadius: 5.5,
-    shadowColor: '#FFFFFF',
-    shadowOpacity: 0.75,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 0 },
-  },
   lineBox: {
     paddingVertical: 10,
     borderRadius: 12,
   },
-  lineBoxActive: {
-    paddingVertical: 12,
+  lineInner: {
+    width: '100%',
   },
   linePressed: {
-    backgroundColor: 'rgba(255, 255, 255, 0.07)',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
   },
   rightAligned: {
     alignItems: 'flex-end',
   },
-  idleLineText: {
-    fontWeight: '700',
-    letterSpacing: -0.3,
-  },
-  activeLineText: {
-    fontSize: 27,
-    lineHeight: 37,
+  baseLineText: {
+    fontSize: 25,
+    lineHeight: 34,
     fontWeight: '800',
-    letterSpacing: -0.4,
+    letterSpacing: -0.35,
   },
-  activeBgLineText: {
-    fontSize: 20,
-    lineHeight: 28,
+  idleLineColor: {
+    color: '#FFFFFF',
+  },
+  activeLineGlow: {
+    textShadowColor: 'rgba(255, 255, 255, 0.22)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 6,
+  },
+  bgLineText: {
+    fontSize: 18.5,
+    lineHeight: 26,
     fontWeight: '700',
-    fontStyle: 'italic',
-  },
-  bgLineItalic: {
-    fontWeight: '600',
     fontStyle: 'italic',
   },
   textRight: {
     textAlign: 'right',
-  },
-  wordGlowing: {
-    color: '#FFFFFF',
-    textShadowColor: 'rgba(255, 255, 255, 0.65)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 12,
-  },
-  wordSung: {
-    color: 'rgba(255, 255, 255, 0.94)',
-    textShadowColor: 'rgba(255, 255, 255, 0.25)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 5,
-  },
-  wordUpcoming: {
-    color: 'rgba(255, 255, 255, 0.36)',
   },
   plainText: {
     color: 'rgba(255, 255, 255, 0.88)',

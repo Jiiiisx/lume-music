@@ -17,14 +17,17 @@ export default function RootLayout() {
             screenOptions={{
               headerShown: false,
               contentStyle: { backgroundColor: LumeTheme.bg },
+              animation: 'ios_from_right',
+              gestureEnabled: true,
+              fullScreenGestureEnabled: true,
             }}
           >
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="(tabs)" options={{ headerShown: false, animation: 'none' }} />
             <Stack.Screen
               name="player"
               options={{
                 presentation: 'modal',
-                animation: 'slide_from_bottom',
+                gestureEnabled: true,
               }}
             />
             <Stack.Screen
@@ -38,14 +41,14 @@ export default function RootLayout() {
               name="queue"
               options={{
                 presentation: 'modal',
-                animation: 'slide_from_bottom',
+                gestureEnabled: true,
               }}
             />
             <Stack.Screen
               name="settings"
               options={{
                 presentation: 'modal',
-                animation: 'slide_from_bottom',
+                gestureEnabled: true,
               }}
             />
             <Stack.Screen name="artist/[id]" />

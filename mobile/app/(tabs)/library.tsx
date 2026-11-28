@@ -22,6 +22,7 @@ import { File as ExpoFile } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import * as SecureStore from 'expo-secure-store';
 import { useFocusEffect, useRouter } from 'expo-router';
+import Animated, { FadeIn, FadeInRight } from 'react-native-reanimated';
 import { LumeCore } from '../../modules/lume-core';
 import { AmbientBackdrop } from '../../src/components/AmbientBackdrop';
 import { BatchDownloadBanner } from '../../src/components/BatchDownloadBanner';
@@ -36,9 +37,26 @@ import {
   trackArtistDisplay,
 } from '../../src/types';
 
-type SortMode = 'custom' | 'title' | 'artist' | 'duration';
+type SortField = 'custom' | 'recently_added' | 'title' | 'artist' | 'album' | 'duration';
+type SortDirection = 'asc' | 'desc';
 
+interface PlaylistSortPref {
+  field: SortField;
+  direction: SortDirection;
+}
+
+const DEFAULT_SORT: PlaylistSortPref = { field: 'custom', direction: 'asc' };
 const KEY_PLAYLIST_ORDER = 'lume_playlist_order_v1';
+const KEY_PLAYLIST_SORTS = 'lume_playlist_sorts_v1';
+
+const SORT_FIELDS: { field: SortField; label: string }[] = [
+  { field: 'custom', label: 'Urutan Asli' },
+  { field: 'recently_added', label: 'Terbaru' },
+  { field: 'title', label: 'Judul' },
+  { field: 'artist', label: 'Artis' },
+  { field: 'album', label: 'Album' },
+  { field: 'duration', label: 'Durasi' },
+];
 
 function needsSpotifyArt(track: Track): boolean {
   if (!('Spotify' in track.source)) return false;
@@ -65,7 +83,8 @@ export default function LibraryScreen() {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedTracks, setSelectedTracks] = useState<Track[]>([]);
   const [activeView, setActiveView] = useState<'main' | 'liked' | 'local' | 'playlist'>('main');
-  const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [sortPref, setSortPref] = useState<PlaylistSortPref>(DEFAULT_SORT);
+  const [savedSorts, setSavedSorts] = useState<Record<string, PlaylistSortPref>>({});
   const [reorderingTracks, setReorderingTracks] = useState(false);
   const [reorderingPlaylists, setReorderingPlaylists] = useState(false);
   const [playlistOrder, setPlaylistOrder] = useState<string[]>([]);
@@ -88,11 +107,20 @@ export default function LibraryScreen() {
     lastLibraryLoadRef.current = now;
     await refreshLibraryState();
     try {
-      const savedOrder = await SecureStore.getItemAsync(KEY_PLAYLIST_ORDER);
+      const [savedOrder, rawSorts] = await Promise.all([
+        SecureStore.getItemAsync(KEY_PLAYLIST_ORDER),
+        SecureStore.getItemAsync(KEY_PLAYLIST_SORTS),
+      ]);
       if (savedOrder) {
         const parsed = JSON.parse(savedOrder) as unknown;
         if (Array.isArray(parsed)) {
           setPlaylistOrder(parsed.filter((v): v is string => typeof v === 'string'));
+        }
+      }
+      if (rawSorts) {
+        const parsedSorts = JSON.parse(rawSorts) as Record<string, PlaylistSortPref>;
+        if (parsedSorts && typeof parsedSorts === 'object') {
+          setSavedSorts(parsedSorts);
         }
       }
     } catch {
@@ -113,6 +141,44 @@ export default function LibraryScreen() {
     }, [loadLibrary])
   );
 
+  const currentSortKey =
+    activeView === 'liked'
+      ? '__liked__'
+      : activeView === 'local'
+        ? '__local__'
+        : selectedPlaylist?.id ?? '__default__';
+
+  const applySortPref = (next: PlaylistSortPref, key = currentSortKey) => {
+    setSortPref(next);
+    setSavedSorts((prev) => {
+      const updated = { ...prev, [key]: next };
+      void SecureStore.setItemAsync(KEY_PLAYLIST_SORTS, JSON.stringify(updated)).catch(() => {});
+      return updated;
+    });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  };
+
+  const handleSelectSortField = (field: SortField) => {
+    if (sortPref.field === field) {
+      applySortPref({
+        field,
+        direction: sortPref.direction === 'asc' ? 'desc' : 'asc',
+      });
+    } else {
+      applySortPref({
+        field,
+        direction: field === 'recently_added' ? 'desc' : 'asc',
+      });
+    }
+  };
+
+  const handleToggleSortDirection = () => {
+    applySortPref({
+      field: sortPref.field,
+      direction: sortPref.direction === 'asc' ? 'desc' : 'asc',
+    });
+  };
+
   const openPlaylist = async (pl: Playlist) => {
     const tracks = await LumeCore.getPlaylistTracks(pl.id);
     setSelectedPlaylist(pl);
@@ -120,7 +186,7 @@ export default function LibraryScreen() {
     setRenameText(pl.name);
     setRenaming(false);
     setReorderingTracks(false);
-    setSortMode('custom');
+    setSortPref(savedSorts[pl.id] ?? DEFAULT_SORT);
     setActiveView('playlist');
   };
 
@@ -375,16 +441,52 @@ export default function LibraryScreen() {
         : selectedTracks;
 
   const sortedDetailTracks = useMemo(() => {
-    const copy = [...rawDetailTracks];
-    if (sortMode === 'title') {
-      copy.sort((a, b) => a.title.localeCompare(b.title));
-    } else if (sortMode === 'artist') {
-      copy.sort((a, b) => trackArtistDisplay(a).localeCompare(trackArtistDisplay(b)));
-    } else if (sortMode === 'duration') {
-      copy.sort((a, b) => a.duration_ms - b.duration_ms);
+    const indexed = rawDetailTracks.map((track, idx) => ({ track, idx }));
+    const desc = sortPref.direction === 'desc';
+
+    if (sortPref.field === 'custom' || sortPref.field === 'recently_added') {
+      if (desc) indexed.reverse();
+    } else if (sortPref.field === 'title') {
+      indexed.sort((a, b) => {
+        const ord =
+          a.track.title.localeCompare(b.track.title, undefined, { sensitivity: 'base' }) ||
+          trackArtistDisplay(a.track).localeCompare(trackArtistDisplay(b.track), undefined, {
+            sensitivity: 'base',
+          }) ||
+          a.idx - b.idx;
+        return desc ? -ord : ord;
+      });
+    } else if (sortPref.field === 'artist') {
+      indexed.sort((a, b) => {
+        const ord =
+          trackArtistDisplay(a.track).localeCompare(trackArtistDisplay(b.track), undefined, {
+            sensitivity: 'base',
+          }) ||
+          a.track.title.localeCompare(b.track.title, undefined, { sensitivity: 'base' }) ||
+          a.idx - b.idx;
+        return desc ? -ord : ord;
+      });
+    } else if (sortPref.field === 'album') {
+      indexed.sort((a, b) => {
+        const albA = (a.track.album ?? '').trim();
+        const albB = (b.track.album ?? '').trim();
+        if (!albA && albB) return 1;
+        if (albA && !albB) return -1;
+        const ord =
+          albA.localeCompare(albB, undefined, { sensitivity: 'base' }) ||
+          a.track.title.localeCompare(b.track.title, undefined, { sensitivity: 'base' }) ||
+          a.idx - b.idx;
+        return desc ? -ord : ord;
+      });
+    } else if (sortPref.field === 'duration') {
+      indexed.sort((a, b) => {
+        const ord = a.track.duration_ms - b.track.duration_ms || a.idx - b.idx;
+        return desc ? -ord : ord;
+      });
     }
-    return copy;
-  }, [rawDetailTracks, sortMode]);
+
+    return indexed.map((entry) => entry.track);
+  }, [rawDetailTracks, sortPref]);
 
   const orderedPlaylists = useMemo(() => {
     if (playlistOrder.length === 0) return playlists;
@@ -483,6 +585,7 @@ export default function LibraryScreen() {
     return (
       <AmbientBackdrop>
         <SafeAreaView style={styles.container} edges={['top']}>
+          <Animated.View entering={FadeInRight.duration(220)} style={styles.container}>
           <View style={styles.detailHeader}>
             <Pressable
               onPress={() => {
@@ -502,7 +605,7 @@ export default function LibraryScreen() {
                     onPress={() => {
                       const next = !reorderingTracks;
                       setReorderingTracks(next);
-                      if (next) setSortMode('custom');
+                      if (next) setSortPref(DEFAULT_SORT);
                     }}
                     style={[
                       styles.iconCircle,
@@ -634,23 +737,42 @@ export default function LibraryScreen() {
                     style={{ flexGrow: 0 }}
                     contentContainerStyle={styles.sortRow}
                   >
-                    {(['custom', 'title', 'artist', 'duration'] as SortMode[]).map((mode) => (
-                      <Pressable
-                        key={mode}
-                        onPress={() => setSortMode(mode)}
-                        style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}
-                      >
-                        <Text style={[styles.sortText, sortMode === mode && styles.sortTextActive]}>
-                          {mode === 'custom'
-                            ? 'Urutan Asli'
-                            : mode === 'title'
-                              ? 'Judul'
-                              : mode === 'artist'
-                                ? 'Artis'
-                                : 'Durasi'}
-                        </Text>
-                      </Pressable>
-                    ))}
+                    <Pressable
+                      onPress={handleToggleSortDirection}
+                      style={styles.dirChip}
+                      accessibilityLabel="Toggle sort direction"
+                    >
+                      <Ionicons
+                        name={sortPref.direction === 'asc' ? 'arrow-up' : 'arrow-down'}
+                        size={13}
+                        color="#FFFFFF"
+                      />
+                      <Text style={styles.dirChipText}>
+                        {sortPref.direction === 'asc' ? 'Asc' : 'Desc'}
+                      </Text>
+                    </Pressable>
+
+                    {SORT_FIELDS.map(({ field, label }) => {
+                      const active = sortPref.field === field;
+                      return (
+                        <Pressable
+                          key={field}
+                          onPress={() => handleSelectSortField(field)}
+                          style={[styles.sortChip, active && styles.sortChipActive]}
+                        >
+                          <Text style={[styles.sortText, active && styles.sortTextActive]}>
+                            {label}
+                          </Text>
+                          {active && (
+                            <Ionicons
+                              name={sortPref.direction === 'asc' ? 'arrow-up' : 'arrow-down'}
+                              size={12}
+                              color={LumeTheme.inkDark}
+                            />
+                          )}
+                        </Pressable>
+                      );
+                    })}
                   </ScrollView>
                 )}
 
@@ -738,6 +860,7 @@ export default function LibraryScreen() {
               )
             }
           />
+          </Animated.View>
         </SafeAreaView>
       </AmbientBackdrop>
     );
@@ -746,6 +869,7 @@ export default function LibraryScreen() {
   return (
     <AmbientBackdrop>
       <SafeAreaView style={styles.container} edges={['top']}>
+        <Animated.View entering={FadeIn.duration(180)} style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           {/* Header with Desktop-style + & Import quick actions */}
           <View style={styles.topRow}>
@@ -794,7 +918,7 @@ export default function LibraryScreen() {
           <View style={styles.quickGrid}>
             <Pressable
               onPress={() => {
-                setSortMode('custom');
+                setSortPref(savedSorts['__liked__'] ?? DEFAULT_SORT);
                 setActiveView('liked');
               }}
               style={({ pressed }) => [styles.likedCard, pressed && styles.cardPressed]}
@@ -808,7 +932,7 @@ export default function LibraryScreen() {
 
             <Pressable
               onPress={() => {
-                setSortMode('custom');
+                setSortPref(savedSorts['__local__'] ?? DEFAULT_SORT);
                 setActiveView('local');
               }}
               style={({ pressed }) => [styles.localCard, pressed && styles.cardPressed]}
@@ -1091,6 +1215,7 @@ export default function LibraryScreen() {
             </BlurView>
           </KeyboardAvoidingView>
         </Modal>
+        </Animated.View>
       </SafeAreaView>
     </AmbientBackdrop>
   );
@@ -1502,8 +1627,28 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 18,
     paddingBottom: 12,
+    alignItems: 'center',
+  },
+  dirChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.24)',
+  },
+  dirChipText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
   sortChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     paddingHorizontal: 13,
     paddingVertical: 6,
     borderRadius: 999,

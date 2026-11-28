@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -12,6 +12,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import Animated, {
+  FadeIn,
+  FadeOut,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 import { SyncedLyricsView } from '../src/components/SyncedLyricsView';
 import { usePlaybackProgress, usePlayer } from '../src/context/PlayerContext';
 import { LumeTheme } from '../src/theme';
@@ -20,11 +27,15 @@ import { formatDurationMs, type LyricsData, trackArtistDisplay } from '../src/ty
 const PlayerLyricsPanel = React.memo(function PlayerLyricsPanel({
   lyrics,
   loading,
+  isPlaying,
+  fadeColor,
   onSeekToMs,
   onRefreshLyrics,
 }: {
   lyrics: LyricsData | null;
   loading: boolean;
+  isPlaying: boolean;
+  fadeColor: string;
   onSeekToMs: (ms: number) => void;
   onRefreshLyrics: () => void;
 }) {
@@ -35,6 +46,8 @@ const PlayerLyricsPanel = React.memo(function PlayerLyricsPanel({
       loading={loading}
       positionMs={positionMs}
       durationMs={durationMs}
+      isPlaying={isPlaying}
+      fadeColor={fadeColor}
       onSeekToMs={onSeekToMs}
       onRefreshLyrics={onRefreshLyrics}
     />
@@ -104,6 +117,34 @@ export default function PlayerModal() {
 
   const [showLyrics, setShowLyrics] = useState(false);
 
+  // Smooth spring thumb for the Player | Lyrics segmented control + Apple-Music cover art breath.
+  const tabProgress = useSharedValue(0);
+  const coverScale = useSharedValue(isPlaying ? 1 : 0.93);
+
+  useEffect(() => {
+    tabProgress.value = withSpring(showLyrics ? 1 : 0, {
+      damping: 22,
+      stiffness: 260,
+      mass: 0.75,
+    });
+  }, [showLyrics, tabProgress]);
+
+  useEffect(() => {
+    coverScale.value = withSpring(isPlaying ? 1 : 0.93, {
+      damping: 18,
+      stiffness: 150,
+      mass: 0.9,
+    });
+  }, [isPlaying, coverScale]);
+
+  const thumbStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: tabProgress.value * 82 }],
+  }));
+
+  const coverAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: coverScale.value }],
+  }));
+
   if (!currentTrack) {
     return (
       <SafeAreaView style={styles.emptyRoot}>
@@ -147,18 +188,13 @@ export default function PlayerModal() {
           </Pressable>
 
           <View style={styles.modeSwitch}>
-            <Pressable
-              onPress={() => setShowLyrics(false)}
-              style={[styles.modePill, !showLyrics && styles.modePillActive]}
-            >
+            <Animated.View style={[styles.modeThumb, thumbStyle]} pointerEvents="none" />
+            <Pressable onPress={() => setShowLyrics(false)} style={styles.modePill}>
               <Text style={[styles.modePillText, !showLyrics && styles.modePillDark]}>
                 Player
               </Text>
             </Pressable>
-            <Pressable
-              onPress={() => setShowLyrics(true)}
-              style={[styles.modePill, showLyrics && styles.modePillActive]}
-            >
+            <Pressable onPress={() => setShowLyrics(true)} style={styles.modePill}>
               <Text style={[styles.modePillText, showLyrics && styles.modePillDark]}>
                 Lyrics
               </Text>
@@ -186,17 +222,29 @@ export default function PlayerModal() {
         </View>
 
         {showLyrics ? (
-          <View style={styles.lyricsContainer}>
+          <Animated.View
+            key="lyrics-view"
+            entering={FadeIn.duration(220)}
+            exiting={FadeOut.duration(150)}
+            style={styles.lyricsContainer}
+          >
             <PlayerLyricsPanel
               lyrics={lyrics}
               loading={lyricsLoading}
+              isPlaying={isPlaying}
+              fadeColor="rgba(9, 11, 18, 0.88)"
               onSeekToMs={(ms) => void seekToMs(ms)}
               onRefreshLyrics={() => void refreshLyrics()}
             />
-          </View>
+          </Animated.View>
         ) : (
-          <View style={styles.artContainer}>
-            <View style={styles.coverFrame}>
+          <Animated.View
+            key="cover-view"
+            entering={FadeIn.duration(220)}
+            exiting={FadeOut.duration(150)}
+            style={styles.artContainer}
+          >
+            <Animated.View style={[styles.coverFrame, coverAnimatedStyle]}>
               {currentTrack.artwork_ref ? (
                 <Image source={{ uri: currentTrack.artwork_ref }} style={styles.coverArt} />
               ) : (
@@ -204,8 +252,8 @@ export default function PlayerModal() {
                   <Ionicons name="musical-notes" size={76} color="rgba(255,255,255,0.65)" />
                 </View>
               )}
-            </View>
-          </View>
+            </Animated.View>
+          </Animated.View>
         )}
 
         <View style={styles.bottomSection}>
@@ -398,23 +446,33 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   modeSwitch: {
+    position: 'relative',
     flexDirection: 'row',
     backgroundColor: 'rgba(255, 255, 255, 0.11)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.16)',
     borderRadius: 999,
     padding: 3,
+    width: 170,
   },
-  modePill: {
-    paddingHorizontal: 18,
-    paddingVertical: 6,
+  modeThumb: {
+    position: 'absolute',
+    top: 3,
+    left: 3,
+    width: 82,
+    bottom: 3,
     borderRadius: 999,
-  },
-  modePillActive: {
     backgroundColor: '#FFFFFF',
   },
+  modePill: {
+    width: 82,
+    paddingVertical: 6,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   modePillText: {
-    color: 'rgba(255, 255, 255, 0.80)',
+    color: 'rgba(255, 255, 255, 0.82)',
     fontWeight: '700',
     fontSize: 13,
   },
